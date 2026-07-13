@@ -79,7 +79,8 @@ def _format_source(source: str) -> str:
 
 def _link_citations(body: str, label: str, lang: str, urls: list[str | None]) -> str:
     """把 [來源1]/[Source 1] 這類引用標記轉成 markdown 連結，容錯標籤與數字間的空格。
-    urls 依編號順序（1-based）對應；為 None 或超出範圍（幻覺編號）不處理。
+    urls 依編號順序（1-based）對應；為 None（無連結來源）保留為純文字，
+    超出範圍（幻覺編號）則整段移除。
     """
     label = label.strip()
     sep = "" if lang == "zh" else " "
@@ -87,8 +88,13 @@ def _link_citations(body: str, label: str, lang: str, urls: list[str | None]) ->
         if not url:
             continue
         pattern = rf"\[{re.escape(label)}\s*{i}\]"
-        replacement = f"[{label}{sep}{i}]({url})"
+        replacement = f"[[{label}{sep}{i}]]({url})"  # 外層是 markdown 連結、內層方括號留在顯示文字，相鄰引用才分得開
         body = re.sub(pattern, replacement, body)
+
+    def _drop_out_of_range(m: re.Match) -> str:
+        return "" if int(m.group(1)) > len(urls) else m.group(0)
+
+    body = re.sub(rf"\[{re.escape(label)}\s*(\d+)\]", _drop_out_of_range, body)
     return body
 
 

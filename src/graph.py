@@ -166,11 +166,11 @@ def generate(state: GraphState) -> GraphState:
     src_label = t(lang, "citation_label")  # 引用標記跟隨回答語言（[來源1] / [Source 1]）
     ordered = unique_sources(state["retrieved"])
     context_blocks = []
-    for doc in state["retrieved"]:
-        idx = ordered.index(doc["source"]) + 1
-        context_blocks.append(
-            f"[{src_label}{idx}] {doc['source']}（{doc.get('published_at') or '日期未知'}）\n{doc['content']}"
-        )
+    for idx, src in enumerate(ordered, start=1):
+        docs = [d for d in state["retrieved"] if d["source"] == src]
+        date = docs[0].get("published_at") or "日期未知"
+        contents = "\n".join(d["content"] for d in docs)
+        context_blocks.append(f"[{src_label}{idx}] {src}（{date}）\n{contents}")
     context = "\n\n".join(context_blocks)
 
     history_block = ""
@@ -181,8 +181,12 @@ def generate(state: GraphState) -> GraphState:
 規則：
 - 只根據參考資料回答，不要編造資料中沒有的數字或事實
 - 回答中明確標示引用的來源編號，例如「根據[{src_label}1]...」
+- 引用編號僅限 [{src_label}1] 到 [{src_label}{len(ordered)}]，不得使用其他編號
 - 如果參考資料不足以完整回答，誠實說明還缺什麼資訊
-- 回答務必簡潔：先給結論，最多 2-3 段，不要展示推敲過程
+- 回答務必簡潔：先給結論，最多 2-3 段、每段不超過 3 句，段落間空一行，不要展示推敲過程
+- 回答時區分【已知事實】（附來源編號）與【推論】，不確定的事明說不確定
+- 不得輸出信心百分比；所有數字必須出自參考資料或即時市場數據，不得自行估算
+- 即使資料有限，也要給出可執行的觀察建議（觸發條件、關鍵事件、追蹤指標），不得整段棄權
 {t(lang, "answer_lang_rule")}
 
 輸出格式（嚴格遵守）：
