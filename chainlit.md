@@ -9,17 +9,3 @@ A stock-focused Q&A assistant over financial reports (SEC EDGAR / TWSE MOPS) and
 - "Any negative news about 2330 recently?"
 
 Each answer cites its sources and ends with an investment manager's trend view (with a disclaimer — not investment advice). Every response comes with a downloadable `.md` analysis file. Companies not yet in the database are fetched automatically (listed companies only — the first question may take a few minutes).
-
----
-
-# 財報/新聞 RAG 助理
-
-針對個股的財報(SEC EDGAR / 公開資訊觀測站)與新聞(Yahoo Finance RSS)問答助理。所有推理都透過 Ollama 在本機執行,資料不會外流。
-
-**可以問什麼:**
-
-- 「AAPL 最新一季營收多少?」
-- 「台積電(2330)最新一季的毛利率是多少?」
-- 「2330 最近有沒有負面新聞?」
-
-每則回答都會附引用來源,結尾附投資經理人趨勢觀點(含免責聲明,非投資建議)。每則回應旁都有可下載的 `.md` 分析檔。未匯入的公司會自動抓取資料(僅限上市公司,首次提問約需數分鐘)。

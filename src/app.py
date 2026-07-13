@@ -11,8 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # chainlit run 
 import datetime as dt
 
 import chainlit as cl
+from chainlit.input_widget import Select
 
 from src.graph import build_graph
+from src.i18n import detect_lang, t
 
 graph = build_graph()
 
@@ -21,17 +23,33 @@ graph = build_graph()
 async def start():
     # ponytail: 對話歷史只存在單次 session 記憶體，重整即清空；要持久化再存 DB
     cl.user_session.set("history", [])
-    await cl.Message(
-        content="財報/新聞 RAG 助理，請輸入問題（例：台積電最新一季毛利率？）"
-    ).send()
+    browser = detect_lang(cl.user_session.get("languages"))
+    cl.user_session.set("browser_lang", browser)
+    cl.user_session.set("lang_setting", "auto")
+    await cl.ChatSettings([
+        Select(
+            id="language",
+            label=t(browser, "settings_label"),
+            items={"Auto": "auto", "繁體中文": "zh", "English": "en"},
+            initial_value="auto",
+        ),
+    ]).send()
+
+
+@cl.on_settings_update
+async def on_settings_update(settings):
+    cl.user_session.set("lang_setting", settings["language"])
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
     history = cl.user_session.get("history")
+    setting = cl.user_session.get("lang_setting", "auto")
+    lang = setting if setting != "auto" else cl.user_session.get("browser_lang", "zh")
     state = {
         "question": message.content, "history": history,
         "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
+        "lang": lang,
     }
 
     msg = cl.Message(content="")
@@ -59,10 +77,7 @@ async def on_message(message: cl.Message):
             final_state = payload
             if payload.get("fetched") and not fetch_notified:
                 fetch_notified = True
-                await cl.Message(
-                    content="🔍 資料庫沒有這檔股票的資料，已自動抓取最新財報/新聞"
-                    "（首次約需 1-3 分鐘 embedding），正在重新檢索…"
-                ).send()
+                await cl.Message(content=t(lang, "fetch_notice")).send()
 
     answer = final_state["answer"] if final_state else ""
     if not msg.content:
@@ -72,13 +87,14 @@ async def on_message(message: cl.Message):
     if final_state and final_state["retrieved"]:
         body = msg.content  # 先留存純回答，避免下載檔重複附上來源列
         sources = sorted({doc["source"] for doc in final_state["retrieved"]})
-        await msg.stream_token(f"\n\n---\n參考來源: {', '.join(sources)}")
+        await msg.stream_token(f"\n\n---\n{t(lang, 'sources_label')}: {', '.join(sources)}")
 
         # 附上可下載的分析 .md（no_result 不附）
         now = dt.datetime.now()
         report = (
             f"# {message.content}\n\n{body}\n\n---\n"
-            f"參考來源: {', '.join(sources)}\n\n產生時間: {now:%Y-%m-%d %H:%M:%S}\n"
+            f"{t(lang, 'sources_label')}: {', '.join(sources)}\n\n"
+            f"{t(lang, 'report_generated_at')}: {now:%Y-%m-%d %H:%M:%S}\n"
         )
         msg.elements = [cl.File(
             name=f"analysis-{now:%Y%m%d-%H%M%S}.md",

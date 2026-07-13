@@ -20,6 +20,7 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.graph import StateGraph, END
 
 from . import config
+from .i18n import t
 from .vectorstore import similarity_search
 
 
@@ -31,6 +32,7 @@ class GraphState(TypedDict):
     retrieved: list[dict]
     answer: str
     fetched: bool  # auto_fetch 是否已執行過（保證只重試一次）
+    lang: str
 
 
 # reasoning=False 關閉 qwen3.5 的 <think> 推理段，避免污染 JSON 解析與串流輸出
@@ -149,6 +151,7 @@ def route_after_retrieve(state: GraphState) -> str:
 
 
 def generate(state: GraphState) -> GraphState:
+    lang = state.get("lang", "zh")
     context_blocks = []
     for i, doc in enumerate(state["retrieved"], start=1):
         context_blocks.append(
@@ -166,16 +169,15 @@ def generate(state: GraphState) -> GraphState:
 - 回答中明確標示引用的來源編號，例如「根據[來源1]...」
 - 如果參考資料不足以完整回答，誠實說明還缺什麼資訊
 - 回答務必簡潔：先給結論，最多 2-3 段，不要展示推敲過程
+{t(lang, "answer_lang_rule")}
 
 輸出格式（嚴格遵守）：
 1. 先簡潔回答問題
 2. 然後固定追加以下一節：
 
-## 📈 投資趨勢觀點
-（以資深投資經理人的角色，僅根據上述參考資料，用 2-4 句話給出該個股近期的投資/操作趨勢觀點：
-趨勢方向、值得關注的點、風險。不得引入資料以外的資訊。）
+{t(lang, "trend_section")}
 
-以上非投資建議，僅為資料解讀，投資請自行判斷。
+{t(lang, "disclaimer")}
 
 參考資料：
 {context}
@@ -187,18 +189,11 @@ def generate(state: GraphState) -> GraphState:
 
 
 def no_result(state: GraphState) -> GraphState:
+    lang = state.get("lang", "zh")
     if state.get("fetched"):
-        answer = (
-            f"已嘗試自動抓取「{state.get('company')}」的財報與新聞，但仍查無資料。"
-            "可能是未上市公司（如 SpaceX）、代號/ticker 有誤，或該來源暫時無法取得。"
-            "若你有相關文件，可手動匯入：python -m src.ingest --file <路徑> --company <代號>"
-        )
+        answer = t(lang, "no_result_fetched", company=state.get("company"))
     else:
-        answer = (
-            "資料庫中找不到與這個問題相關的財報或新聞內容。"
-            "問題若有指名上市公司（代號或 ticker）會自動抓取資料，"
-            "也可以手動匯入：python -m src.ingest --file <路徑> --company <代號>，或換個問法。"
-        )
+        answer = t(lang, "no_result_plain")
     return {**state, "answer": answer}
 
 
