@@ -9,18 +9,10 @@
 
 A financial report & news RAG assistant for individual stocks, built with LangGraph + Ollama (local LLM) + pgvector. All inference runs on your machine — sensitive financial data never leaves it.
 
-### Features
+**Demo:** TODO
+**Screenshot:** TODO
 
-- **Q&A over reports and news** with source citations, plus a structured decision card (facts, inference, valuation, stance, triggers, key event, watch metrics) at the end of each answer
-- **Live market snapshot**: price, 52-week range, PE, target price, and analyst view pulled from yfinance and folded into the decision card; any failure degrades gracefully, never breaks the answer
-- **One-command data updates**: SEC EDGAR (US reports), TWSE MOPS (TW reports), Yahoo Finance RSS (news), market-news sweep from udn/cmoney listings; idempotent re-runs
-- **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only); company questions with filings but no news auto-fetch news; company-less questions trigger a market-news sweep instead
-- **Chainlit web UI**: ChatGPT-style token streaming, multi-turn chat, downloadable `.md` analysis per answer
-- **Honest no-result path**: says "no data" instead of hallucinating
-
-Full documentation: [docs/PROJECT.md](docs/PROJECT.md)
-
-### Quickstart
+### Quick Start
 
 Requirements: Python 3.10+, Docker, [Ollama](https://ollama.com).
 
@@ -47,6 +39,19 @@ python -m src.update news --company 2330 --limit 10
 chainlit run src/app.py -w    # http://localhost:8000
 ```
 
+### Installation
+
+See steps 1-3 of Quick Start above (Ollama models, database, Python env).
+
+### Features
+
+- **Q&A over reports and news** with source citations, plus a structured decision card (facts, inference, valuation, stance, triggers, key event, watch metrics) at the end of each answer
+- **Live market snapshot**: price, 52-week range, PE, target price, and analyst view pulled from yfinance and folded into the decision card; any failure degrades gracefully, never breaks the answer
+- **One-command data updates**: SEC EDGAR (US reports), TWSE MOPS (TW reports), Yahoo Finance RSS (news), market-news sweep from udn/cmoney listings; idempotent re-runs
+- **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only); company questions with filings but no news auto-fetch news; company-less questions trigger a market-news sweep instead
+- **Chainlit web UI**: ChatGPT-style token streaming, multi-turn chat, downloadable `.md` analysis per answer
+- **Honest no-result path**: says "no data" instead of hallucinating
+
 ### Commands
 
 | Command | What it does |
@@ -67,6 +72,8 @@ chainlit run src/app.py -w    # http://localhost:8000
 | `NEWS_RETENTION_DAYS` | `180` | News chunks older than this are auto-pruned on app startup (reports are never pruned) |
 | `HISTORY_ANSWER_MAX_CHARS` | `400` | Max chars of a past answer kept in chat history (trend section stripped first) sent to the LLM on later turns |
 
+For architecture, design decisions, and the full AI Product Case Study (CRISP-DM, ML system design, production risks), see [docs/AI_Product_Case_Study.md](docs/AI_Product_Case_Study.md) and [docs/PROJECT.md](docs/PROJECT.md).
+
 ---
 
 <a id="中文"></a>
@@ -75,16 +82,8 @@ chainlit run src/app.py -w    # http://localhost:8000
 針對個股的財報/新聞 RAG 問答助理,用 LangGraph + Ollama(本地 LLM)+ pgvector 打造。
 所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。
 
-### 功能
-
-- **財報/新聞問答**:回答附引用來源,結尾附結構化決策卡(事實、推論、估值、立場、觸發條件、關鍵事件、觀察指標)
-- **即時市場快照**:用 yfinance 抓股價、52 週區間、本益比、目標價、分析師評等,併入決策卡;抓取失敗時優雅降級,不影響回答
-- **一鍵抓取更新**:SEC EDGAR(美股財報)、公開資訊觀測站 MOPS(台股財報)、Yahoo Finance RSS(新聞)、udn/cmoney 市場新聞列表頁掃描;重跑同一來源自動去重
-- **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司);有財報缺新聞的公司只補抓新聞;沒指定公司的問題則觸發市場新聞掃描
-- **Chainlit 網頁介面**:ChatGPT 風格逐字串流、多輪對話、每則回答附可下載 `.md` 分析檔
-- **查無資料時誠實告知**,不幻覺
-
-完整文件:[docs/PROJECT.md](docs/PROJECT.md)
+**Demo:** TODO
+**截圖:** TODO
 
 ### 快速開始
 
@@ -113,6 +112,19 @@ python -m src.update news --company 2330 --limit 10
 chainlit run src/app.py -w    # 開 http://localhost:8000
 ```
 
+### 安裝
+
+見上方快速開始的 1-3 步(安裝 Ollama 模型、啟動資料庫、建立 Python 環境)。
+
+### 功能
+
+- **財報/新聞問答**:回答附引用來源,結尾附結構化決策卡(事實、推論、估值、立場、觸發條件、關鍵事件、觀察指標)
+- **即時市場快照**:用 yfinance 抓股價、52 週區間、本益比、目標價、分析師評等,併入決策卡;抓取失敗時優雅降級,不影響回答
+- **一鍵抓取更新**:SEC EDGAR(美股財報)、公開資訊觀測站 MOPS(台股財報)、Yahoo Finance RSS(新聞)、udn/cmoney 市場新聞列表頁掃描;重跑同一來源自動去重
+- **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司);有財報缺新聞的公司只補抓新聞;沒指定公司的問題則觸發市場新聞掃描
+- **Chainlit 網頁介面**:ChatGPT 風格逐字串流、多輪對話、每則回答附可下載 `.md` 分析檔
+- **查無資料時誠實告知**,不幻覺
+
 ### 指令表
 
 | 指令 | 用途 |
@@ -139,9 +151,4 @@ chainlit run src/app.py -w    # 開 http://localhost:8000
 | `NEWS_RETENTION_DAYS` | `180` | 啟動時自動清除超過此天數的新聞 chunk(財報一律保留) |
 | `HISTORY_ANSWER_MAX_CHARS` | `400` | 對話歷史中保留的過去回答最大字數(先去掉趨勢觀點段落),控制後續輪次送給 LLM 的 token 量 |
 
-### 之後可以擴充的方向
-
-- `extract_filters` 目前只抽公司代號跟文件類型,可以再加日期區間過濾
-- `generate` 可以加一個 node 做「回答品質自我檢查」,形成 self-RAG
-- 排程自動更新(cron 呼叫 `python -m src.update` 即可)
-- 聊天歷史持久化(目前單次 session,重整即清空)
+架構、設計決策與完整 AI Product Case Study(CRISP-DM、ML 系統設計、production risks)請見 [docs/AI_Product_Case_Study.md](docs/AI_Product_Case_Study.md) 與 [docs/PROJECT.md](docs/PROJECT.md)。

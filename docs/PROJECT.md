@@ -54,6 +54,7 @@ flowchart TD
 | `ingest.py` | `ingest_text` (chunk → embed → insert, deduped by source) and `ingest_file` (PDF/txt loader); CLI `python -m src.ingest` |
 | `update.py` | Manual fetchers: SEC EDGAR (US 10-K/10-Q), MOPS (TW report PDFs), Yahoo Finance RSS news, market-news sweep (udn/cmoney listing pages via trafilatura); CLI `python -m src.update` |
 | `market.py` | `get_market_snapshot(company)`: live yfinance quote (price, 52w range, PE, target price, analyst view), formatted for the prompt only — any failure returns `None` and never raises |
+| `i18n.py` | Centralized bilingual (zh/en) UI and prompt strings, no i18n library |
 | `graph.py` | LangGraph pipeline described above; `build_graph()` returns the compiled app |
 | `cli.py` | Terminal chat (single-turn) |
 | `app.py` | Chainlit web UI: token streaming, multi-turn (last 5 rounds in session memory), downloadable `.md` analysis per answer |
@@ -153,6 +154,7 @@ flowchart TD
 | `ingest.py` | `ingest_text`(切 chunk → embedding → 寫入,依 source 去重)與 `ingest_file`(PDF/txt 載入);CLI `python -m src.ingest` |
 | `update.py` | 手動抓取:SEC EDGAR(美股 10-K/10-Q)、MOPS(台股財報 PDF)、Yahoo Finance RSS 新聞、udn/cmoney 市場新聞列表頁掃描(trafilatura 抽文);CLI `python -m src.update` |
 | `market.py` | `get_market_snapshot(company)`:即時 yfinance 報價(股價、52 週區間、本益比、目標價、分析師評等),僅供 prompt 使用——失敗一律回傳 `None`,不拋錯 |
+| `i18n.py` | 集中管理雙語(中/英)介面與 prompt 字串,不引入 i18n 套件 |
 | `graph.py` | 上述 LangGraph 流程;`build_graph()` 回傳編譯後的 app |
 | `cli.py` | 終端聊天(單輪) |
 | `app.py` | Chainlit 網頁介面:token 逐字串流、多輪對話(session 記憶體保留最近 5 輪)、每則回答附可下載 `.md` 分析檔 |
