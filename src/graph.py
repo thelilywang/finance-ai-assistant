@@ -1,11 +1,12 @@
 """LangGraph 主流程。
 
 Graph 結構：
-    rewrite_question -> extract_filters -> retrieve -> (no_result | generate)
+    rewrite_question -> extract_filters -> retrieve -> (generate | auto_fetch -> retrieve | no_result)
 
 - rewrite_question: 多輪對話時把追問改寫成獨立問題，讓 embedding 檢索有效
 - extract_filters: 用 LLM 從問題中抽出公司代號/文件類型，作為檢索 filter
 - retrieve: 把問題 embedding 後去 pgvector 找最相似的 chunk
+- auto_fetch: 檢索不到且問題有指名公司時，自動抓財報/新聞入庫後重新檢索（只重試一次）
 - generate: 根據檢索到的 chunk 生成回答，並附上出處來源
 - no_result: 找不到相關資料時，誠實告知使用者，避免幻覺
 """
@@ -28,6 +29,7 @@ class GraphState(TypedDict):
     doc_type: str | None
     retrieved: list[dict]
     answer: str
+    fetched: bool  # auto_fetch 是否已執行過（保證只重試一次）
 
 
 # reasoning=False 關閉 qwen3.5 的 <think> 推理段，避免污染 JSON 解析與串流輸出
@@ -67,11 +69,12 @@ def rewrite_question(state: GraphState) -> GraphState:
 def extract_filters(state: GraphState) -> GraphState:
     """從問題中抽取公司代號 / 文件類型，抽不出來就設為 None（不過濾）。"""
     prompt = f"""你是財經助理的前處理模組。請從使用者問題中判斷：
-1. company: 台股代號（4 碼數字），沒有提到就填 null
+1. company: 台股代號（4 碼數字，如 "2330"）或美股 ticker（1-5 個大寫英文字母，如 "AAPL"、"TSLA"），
+   沒有明確提到就填 null；公司名稱要轉成代號/ticker（如 台積電→"2330"、蘋果→"AAPL"）
 2. doc_type: "financial_report"（財報相關）或 "news"（新聞相關），不確定就填 null
 
 只回傳 JSON，不要有其他文字，格式：
-{{"company": "2330" 或 null, "doc_type": "financial_report" 或 "news" 或 null}}
+{{"company": "2330" 或 "AAPL" 或 null, "doc_type": "financial_report" 或 "news" 或 null}}
 
 使用者問題：{state['question']}
 """
@@ -83,7 +86,10 @@ def extract_filters(state: GraphState) -> GraphState:
     except (json.JSONDecodeError, AttributeError):
         parsed = {"company": None, "doc_type": None}
 
-    return {**state, "company": parsed.get("company"), "doc_type": parsed.get("doc_type")}
+    def _clean(v):  # 模型偶爾回字串 "null"，一律正規化成 None
+        return None if not v or (isinstance(v, str) and v.strip().lower() == "null") else v
+
+    return {**state, "company": _clean(parsed.get("company")), "doc_type": _clean(parsed.get("doc_type"))}
 
 
 def retrieve(state: GraphState) -> GraphState:
@@ -94,8 +100,31 @@ def retrieve(state: GraphState) -> GraphState:
     return {**state, "retrieved": docs}
 
 
+def auto_fetch(state: GraphState) -> GraphState:
+    """檢索不到時自動抓該公司的財報+新聞入庫。單一來源失敗不中斷，抓完標記 fetched。"""
+    from .update import fetch_edgar, fetch_mops, fetch_news  # 延遲 import，避免循環依賴
+
+    company = state["company"]
+    if company.isdigit() and len(company) == 4:
+        calls = [lambda: fetch_mops(company), lambda: fetch_news(company)]
+    else:
+        calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]
+
+    for call in calls:
+        try:
+            call()
+        except Exception as e:  # noqa: BLE001  單一來源失敗不中斷
+            print(f"[auto_fetch] 抓取失敗：{e}")
+
+    return {**state, "fetched": True}
+
+
 def route_after_retrieve(state: GraphState) -> str:
-    return "generate" if state["retrieved"] else "no_result"
+    if state["retrieved"]:
+        return "generate"
+    if state.get("company") and not state.get("fetched"):
+        return "auto_fetch"
+    return "no_result"
 
 
 def generate(state: GraphState) -> GraphState:
@@ -126,10 +155,19 @@ def generate(state: GraphState) -> GraphState:
 
 
 def no_result(state: GraphState) -> GraphState:
-    return {
-        **state,
-        "answer": "資料庫中找不到與這個問題相關的財報或新聞內容，建議先確認是否已匯入對應公司/文件，或換個問法。",
-    }
+    if state.get("fetched"):
+        answer = (
+            f"已嘗試自動抓取「{state.get('company')}」的財報與新聞，但仍查無資料。"
+            "可能是未上市公司（如 SpaceX）、代號/ticker 有誤，或該來源暫時無法取得。"
+            "若你有相關文件，可手動匯入：python -m src.ingest --file <路徑> --company <代號>"
+        )
+    else:
+        answer = (
+            "資料庫中找不到與這個問題相關的財報或新聞內容。"
+            "問題若有指名上市公司（代號或 ticker）會自動抓取資料，"
+            "也可以手動匯入：python -m src.ingest --file <路徑> --company <代號>，或換個問法。"
+        )
+    return {**state, "answer": answer}
 
 
 def build_graph():
@@ -138,15 +176,18 @@ def build_graph():
     graph.add_node("extract_filters", extract_filters)
     graph.add_node("retrieve", retrieve)
     graph.add_node("generate", generate)
+    graph.add_node("auto_fetch", auto_fetch)
     graph.add_node("no_result", no_result)
 
     graph.set_entry_point("rewrite_question")
     graph.add_edge("rewrite_question", "extract_filters")
     graph.add_edge("extract_filters", "retrieve")
     graph.add_conditional_edges(
-        "retrieve", route_after_retrieve, {"generate": "generate", "no_result": "no_result"}
+        "retrieve", route_after_retrieve,
+        {"generate": "generate", "auto_fetch": "auto_fetch", "no_result": "no_result"},
     )
     graph.add_edge("generate", END)
+    graph.add_edge("auto_fetch", "retrieve")  # 抓完重新檢索；fetched=True 保證不會無限迴圈
     graph.add_edge("no_result", END)
 
     return graph.compile()

@@ -29,12 +29,13 @@ async def on_message(message: cl.Message):
     history = cl.user_session.get("history")
     state = {
         "question": message.content, "history": history,
-        "company": None, "doc_type": None, "retrieved": [], "answer": "",
+        "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
     }
 
     msg = cl.Message(content="")
     final_state = None
     in_think = False  # 保險：reasoning=False 失效時過濾 <think>...</think>
+    fetch_notified = False  # auto_fetch 提示只送一次
     # 同時訂閱 messages（逐 token）與 values（節點完成後的完整 state）
     async for mode, payload in graph.astream(state, stream_mode=["messages", "values"]):
         if mode == "messages":
@@ -54,6 +55,12 @@ async def on_message(message: cl.Message):
                 await msg.stream_token(token)
         else:  # values：最後一筆就是 final state
             final_state = payload
+            if payload.get("fetched") and not fetch_notified:
+                fetch_notified = True
+                await cl.Message(
+                    content="🔍 資料庫沒有這檔股票的資料，已自動抓取最新財報/新聞"
+                    "（首次約需 1-3 分鐘 embedding），正在重新檢索…"
+                ).send()
 
     answer = final_state["answer"] if final_state else ""
     if not msg.content:
