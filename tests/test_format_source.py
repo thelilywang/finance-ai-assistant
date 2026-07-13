@@ -21,6 +21,10 @@ assert "https://www.example.com/news/apple-q3-earnings-beat" in result
 assert "example.com" in result
 assert "www." not in result.split("(")[0]  # domain 去掉 www.
 
+# 有提供 title 時優先用真標題，不用 slug
+assert _format_source("https://www.example.com/news/abc-123", "Real Title") == \
+    "[Real Title — example.com](https://www.example.com/news/abc-123)"
+
 # _clean_url：URL 去 query/fragment；非 URL（EDGAR/本地檔）回 None
 assert _clean_url("https://www.example.com/a?x=1#y") == "https://www.example.com/a"
 assert _clean_url("EDGAR:AAPL:0000320193-25-000057") is None

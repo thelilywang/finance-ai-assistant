@@ -38,15 +38,15 @@ def delete_news_older_than(days: int) -> int:
 
 
 def insert_chunks(rows: list[dict]) -> None:
-    """rows 每筆需含: source, doc_type, company, published_at, chunk_index, content, embedding"""
+    """rows 每筆需含: source, title, doc_type, company, published_at, chunk_index, content, embedding"""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.executemany(
                 """
                 INSERT INTO doc_chunks
-                    (source, doc_type, company, published_at, chunk_index, content, embedding)
+                    (source, title, doc_type, company, published_at, chunk_index, content, embedding)
                 VALUES
-                    (%(source)s, %(doc_type)s, %(company)s, %(published_at)s,
+                    (%(source)s, %(title)s, %(doc_type)s, %(company)s, %(published_at)s,
                      %(chunk_index)s, %(content)s, %(embedding)s)
                 """,
                 rows,
@@ -83,7 +83,7 @@ def similarity_search(
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
     sql = f"""
-        SELECT id, source, doc_type, company, published_at, content,
+        SELECT id, source, title, doc_type, company, published_at, content,
                1 - (embedding <=> %(embedding)s::vector) AS similarity
         FROM doc_chunks
         {where_clause}

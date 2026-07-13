@@ -52,8 +52,8 @@ def _clean_url(source: str) -> str | None:
     return None
 
 
-# ponytail: 標題取自 URL slug，要精確標題再存 DB title 欄位
-def _format_source(source: str) -> str:
+# ponytail: 有 DB title 就用真標題，沒有（舊資料）才退回 URL slug 當 fallback
+def _format_source(source: str, title: str | None = None) -> str:
     """把原始來源字串轉成可讀的 markdown（EDGAR/本地檔案/URL）。"""
     if source.startswith("EDGAR:"):
         parts = source.split(":")
@@ -64,13 +64,16 @@ def _format_source(source: str) -> str:
     if clean_url:
         split = urlsplit(source)
         domain = split.netloc.removeprefix("www.")
-        title = split.path.rstrip("/").rsplit("/", 1)[-1]
-        title = title.replace("-", " ").replace("_", " ").strip()
-        title = (title[:60] + "…") if len(title) > 60 else title
         if title:
-            title = title[0].upper() + title[1:]
+            title = (title[:60] + "…") if len(title) > 60 else title
         else:
-            title = domain
+            title = split.path.rstrip("/").rsplit("/", 1)[-1]
+            title = title.replace("-", " ").replace("_", " ").strip()
+            title = (title[:60] + "…") if len(title) > 60 else title
+            if title:
+                title = title[0].upper() + title[1:]
+            else:
+                title = domain
         return f"[{title} — {domain}]({clean_url})"
 
     # 本地路徑：只留檔名
@@ -221,7 +224,11 @@ async def on_message(message: cl.Message):
         msg.content = body_with_links
         body = body_with_links  # 先留存純回答（引用已轉連結），避免下載檔重複附上來源列
 
-        source_list = "\n".join(f"{i}. {_format_source(s)}" for i, s in enumerate(unique, start=1))
+        titles = {}
+        for doc in final_state["retrieved"]:
+            if doc.get("title") and doc["source"] not in titles:
+                titles[doc["source"]] = doc["title"]
+        source_list = "\n".join(f"{i}. {_format_source(s, titles.get(s))}" for i, s in enumerate(unique, start=1))
         await msg.stream_token(f"\n\n---\n**{t(content_lang, 'sources_label')}:**\n{source_list}")
 
         # 附上可下載的分析 .md（no_result 不附）

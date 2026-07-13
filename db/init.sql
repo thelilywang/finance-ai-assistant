@@ -6,6 +6,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS doc_chunks (
     id BIGSERIAL PRIMARY KEY,
     source VARCHAR(512) NOT NULL,       -- 檔名或 URL
+    title VARCHAR(512),                 -- 新聞標題（財報/本地檔為 NULL）
     doc_type VARCHAR(50) NOT NULL,      -- 'financial_report' / 'news'
     company VARCHAR(100),               -- 公司代號，例如 2330
     published_at DATE,                  -- 財報/新聞發布日期

@@ -35,7 +35,8 @@ def chunk_text(text: str) -> list[str]:
 
 
 def ingest_text(
-    text: str, source: str, company: str | None, doc_type: str, published_at: str | None
+    text: str, source: str, company: str | None, doc_type: str, published_at: str | None,
+    title: str | None = None,
 ) -> int:
     """切 chunk → embedding → 寫入 pgvector，回傳寫入的 chunk 數。
 
@@ -56,6 +57,7 @@ def ingest_text(
     rows = [
         {
             "source": source,
+            "title": title,
             "doc_type": doc_type,
             "company": company,
             "published_at": dt.date.fromisoformat(published_at) if published_at else None,

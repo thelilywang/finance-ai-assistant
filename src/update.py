@@ -171,7 +171,8 @@ def fetch_news(company: str, limit: int = 10) -> None:
             # 抽不到內文就只 ingest 標題，聊勝於無
             text = f"{title}\n\n{body}" if body else title
             total += ingest_text(
-                text, source=link, company=company, doc_type="news", published_at=published_at
+                text, source=link, company=company, doc_type="news", published_at=published_at,
+                title=title,
             )
         except Exception as e:  # noqa: BLE001
             print(f"[update] 新聞處理失敗（{link}）：{e}")
