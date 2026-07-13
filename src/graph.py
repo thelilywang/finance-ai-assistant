@@ -144,6 +144,17 @@ def generate(state: GraphState) -> GraphState:
 - 只根據參考資料回答，不要編造資料中沒有的數字或事實
 - 回答中明確標示引用的來源編號，例如「根據[來源1]...」
 - 如果參考資料不足以完整回答，誠實說明還缺什麼資訊
+- 回答務必簡潔：先給結論，最多 2-3 段，不要展示推敲過程
+
+輸出格式（嚴格遵守）：
+1. 先簡潔回答問題
+2. 然後固定追加以下一節：
+
+## 📈 投資趨勢觀點
+（以資深投資經理人的角色，僅根據上述參考資料，用 2-4 句話給出該個股近期的投資/操作趨勢觀點：
+趨勢方向、值得關注的點、風險。不得引入資料以外的資訊。）
+
+以上非投資建議，僅為資料解讀，投資請自行判斷。
 
 參考資料：
 {context}
@@ -175,8 +186,8 @@ def build_graph():
     graph.add_node("rewrite_question", rewrite_question)
     graph.add_node("extract_filters", extract_filters)
     graph.add_node("retrieve", retrieve)
-    graph.add_node("generate", generate)
     graph.add_node("auto_fetch", auto_fetch)
+    graph.add_node("generate", generate)
     graph.add_node("no_result", no_result)
 
     graph.set_entry_point("rewrite_question")
@@ -186,8 +197,8 @@ def build_graph():
         "retrieve", route_after_retrieve,
         {"generate": "generate", "auto_fetch": "auto_fetch", "no_result": "no_result"},
     )
-    graph.add_edge("generate", END)
     graph.add_edge("auto_fetch", "retrieve")  # 抓完重新檢索；fetched=True 保證不會無限迴圈
+    graph.add_edge("generate", END)
     graph.add_edge("no_result", END)
 
     return graph.compile()

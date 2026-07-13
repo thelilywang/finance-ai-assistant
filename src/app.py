@@ -8,6 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # chainlit run 以 src/ 為 sys.path[0]
 
+import datetime as dt
+
 import chainlit as cl
 
 from src.graph import build_graph
@@ -68,8 +70,21 @@ async def on_message(message: cl.Message):
         msg.content = answer
 
     if final_state and final_state["retrieved"]:
+        body = msg.content  # 先留存純回答，避免下載檔重複附上來源列
         sources = sorted({doc["source"] for doc in final_state["retrieved"]})
         await msg.stream_token(f"\n\n---\n參考來源: {', '.join(sources)}")
+
+        # 附上可下載的分析 .md（no_result 不附）
+        now = dt.datetime.now()
+        report = (
+            f"# {message.content}\n\n{body}\n\n---\n"
+            f"參考來源: {', '.join(sources)}\n\n產生時間: {now:%Y-%m-%d %H:%M:%S}\n"
+        )
+        msg.elements = [cl.File(
+            name=f"analysis-{now:%Y%m%d-%H%M%S}.md",
+            content=report.encode("utf-8"),
+            display="inline",
+        )]
 
     await msg.send()
 
