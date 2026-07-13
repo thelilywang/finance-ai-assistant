@@ -23,6 +23,7 @@ STRINGS = {
             "趨勢方向、值得關注的點、風險。不得引入資料以外的資訊。）"
         ),
         "disclaimer": "以上非投資建議，僅為資料解讀，投資請自行判斷。",
+        "citation_label": "來源",
         "settings_label": "語言 / Language",
         "step_analyze": "解析問題",
         "step_retrieve": "檢索資料庫",
@@ -58,6 +59,7 @@ STRINGS = {
             "Do not introduce information outside the reference material.)"
         ),
         "disclaimer": "This is not investment advice — data interpretation only. Invest at your own discretion.",
+        "citation_label": "Source ",
         "settings_label": "語言 / Language",
         "step_analyze": "Analyzing question",
         "step_retrieve": "Retrieving from database",

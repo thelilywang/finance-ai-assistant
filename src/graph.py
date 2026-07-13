@@ -152,10 +152,11 @@ def route_after_retrieve(state: GraphState) -> str:
 
 def generate(state: GraphState) -> GraphState:
     lang = state.get("lang", "zh")
+    src_label = t(lang, "citation_label")  # 引用標記跟隨回答語言（[來源1] / [Source 1]）
     context_blocks = []
     for i, doc in enumerate(state["retrieved"], start=1):
         context_blocks.append(
-            f"[來源{i}] {doc['source']}（{doc.get('published_at') or '日期未知'}）\n{doc['content']}"
+            f"[{src_label}{i}] {doc['source']}（{doc.get('published_at') or '日期未知'}）\n{doc['content']}"
         )
     context = "\n\n".join(context_blocks)
 
@@ -166,7 +167,7 @@ def generate(state: GraphState) -> GraphState:
     prompt = f"""你是專業的財經分析助理。請根據下方參考資料回答使用者問題。
 規則：
 - 只根據參考資料回答，不要編造資料中沒有的數字或事實
-- 回答中明確標示引用的來源編號，例如「根據[來源1]...」
+- 回答中明確標示引用的來源編號，例如「根據[{src_label}1]...」
 - 如果參考資料不足以完整回答，誠實說明還缺什麼資訊
 - 回答務必簡潔：先給結論，最多 2-3 段，不要展示推敲過程
 {t(lang, "answer_lang_rule")}
