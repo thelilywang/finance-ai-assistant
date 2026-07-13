@@ -106,7 +106,7 @@ def extract_filters(state: GraphState) -> GraphState:
 
 def retrieve(state: GraphState) -> GraphState:
     # ponytail: 關鍵字啟發式判斷時效性，要更準再交給 extract_filters 的 LLM 判斷
-    recent = re.search(r"最近|近期|這幾天|本週|近日|recent|lately|latest", state["question"], re.I)
+    recent = re.search(r"最近|近期|這幾天|本週|近日|最新|recent|lately|latest", state["question"], re.I)
     query_vec = embeddings.embed_query(state["question"])
     docs = similarity_search(
         query_vec, company=state.get("company"), doc_type=state.get("doc_type"),
@@ -118,22 +118,41 @@ def retrieve(state: GraphState) -> GraphState:
             query_vec, company=state.get("company"),
             news_since_days=90 if recent else None,
         )
+    if state.get("company") and docs and not any(d["doc_type"] == "news" for d in docs):
+        # ponytail: 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 route 觸發 auto_fetch
+        news = similarity_search(
+            query_vec, top_k=3, company=state["company"], doc_type="news",
+            news_since_days=90 if recent else None,
+        )
+        docs = docs + news
+    if state.get("company") and docs:
+        # ponytail: 補 2 條全域市場新聞給決策卡當市場脈絡（market-news 入庫多為 company=NULL）
+        seen_ids = {d["id"] for d in docs}
+        market = similarity_search(query_vec, top_k=2, doc_type="news",
+                                   news_since_days=90 if recent else None)
+        docs = docs + [d for d in market if d["id"] not in seen_ids]
     return {**state, "retrieved": docs}
 
 
 def auto_fetch(state: GraphState) -> GraphState:
-    """檢索不到時自動抓該公司的財報+新聞入庫。單一來源失敗不中斷，抓完標記 fetched。"""
+    """資料不足時自動補抓：有指名公司抓其財報+新聞，一律加掃市場總覽新聞。單一來源失敗不中斷，抓完標記 fetched。"""
     try:
-        from .update import fetch_edgar, fetch_mops, fetch_news  # 延遲 import，避免循環依賴
+        from .update import fetch_edgar, fetch_mops, fetch_news, fetch_market_news  # 延遲 import，避免循環依賴
     except ImportError as e:  # 環境缺套件時降級成查無資料，不炸整個對話
         print(f"[auto_fetch] 匯入失敗（環境缺套件？）：{e}")
         return {**state, "fetched": True}
 
-    company = state["company"]
-    if company.isdigit() and len(company) == 4:
-        calls = [lambda: fetch_mops(company), lambda: fetch_news(company)]
-    else:
-        calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]
+    company = state.get("company")
+    calls = []
+    if company:
+        if company.isdigit() and len(company) == 4:
+            calls = [lambda: fetch_mops(company), lambda: fetch_news(company)]
+        else:
+            calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]
+        if state["retrieved"]:  # 已有財報資料，只缺新聞
+            calls = calls[-1:]
+    # ponytail: 市場總覽新聞一律補掃，source_exists 會跳過已入庫的，重複觸發便宜
+    calls.append(lambda: fetch_market_news(3))
 
     for call in calls:
         try:
@@ -146,9 +165,12 @@ def auto_fetch(state: GraphState) -> GraphState:
 
 def route_after_retrieve(state: GraphState) -> str:
     if state["retrieved"]:
+        if (state.get("company") and not state.get("fetched")
+                and not any(d["doc_type"] == "news" for d in state["retrieved"])):
+            return "auto_fetch"  # 有財報但沒新聞：補抓新聞給趨勢段
         return "generate"
-    if state.get("company") and not state.get("fetched"):
-        return "auto_fetch"
+    if not state.get("fetched"):
+        return "auto_fetch"  # 沒指名公司也掃市場新聞，別直接舉手投降
     return "no_result"
 
 

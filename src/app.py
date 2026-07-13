@@ -17,7 +17,7 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
 from src import config
-from src.graph import build_graph, unique_sources
+from src.graph import build_graph, route_after_retrieve, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.vectorstore import delete_news_older_than
 
@@ -199,7 +199,7 @@ async def on_message(message: cl.Message):
                     await _advance(t(ui_lang, "step_retrieve"))
             elif node == "retrieve":
                 partial = payload[node]
-                if not partial.get("retrieved") and partial.get("company") and not partial.get("fetched"):
+                if route_after_retrieve(partial) == "auto_fetch":
                     await _advance(t(ui_lang, "step_fetch"))
                 else:
                     await _advance(t(ui_lang, "step_generate"))
