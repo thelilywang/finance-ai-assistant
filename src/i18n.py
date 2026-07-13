@@ -1,4 +1,5 @@
 """集中管理雙語字串，不引入 i18n 套件。"""
+import re
 
 STRINGS = {
     "zh": {
@@ -77,6 +78,15 @@ def detect_lang(languages: str | None) -> str:
     return "zh" if (languages or "").lower().startswith("zh") else "en"
 
 
+def detect_question_lang(text: str) -> str | None:
+    """從提問文字判斷語言：含 CJK -> zh，含英文字母 -> en，判斷不了（如純代號）回 None。"""
+    if re.search(r"[一-鿿]", text):
+        return "zh"
+    if re.search(r"[A-Za-z]", text):
+        return "en"
+    return None
+
+
 def t(lang: str, key: str, **fmt) -> str:
     table = STRINGS.get(lang, STRINGS["zh"])
     s = table[key]
@@ -87,6 +97,9 @@ if __name__ == "__main__":
     assert detect_lang("zh-TW,zh;q=0.9") == "zh"
     assert detect_lang("en-US") == "en"
     assert detect_lang(None) == "en"
+    assert detect_question_lang("NVDA 最新財報重點是什麼？") == "zh"
+    assert detect_question_lang("What was AAPL's revenue?") == "en"
+    assert detect_question_lang("2330？") is None
     assert "AAPL" in t("zh", "no_result_fetched", company="AAPL")
     assert "AAPL" in t("en", "no_result_fetched", company="AAPL")
     assert set(STRINGS["zh"].keys()) == set(STRINGS["en"].keys())

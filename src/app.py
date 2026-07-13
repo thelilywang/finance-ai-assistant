@@ -17,7 +17,7 @@ from chainlit.input_widget import Select
 
 from src import config
 from src.graph import build_graph
-from src.i18n import STRINGS, detect_lang, t
+from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.vectorstore import delete_news_older_than
 
 graph = build_graph()
@@ -100,7 +100,11 @@ async def on_settings_update(settings):
 async def on_message(message: cl.Message):
     history = cl.user_session.get("history")
     setting = cl.user_session.get("lang_setting", "auto")
-    lang = setting if setting != "auto" else cl.user_session.get("browser_lang", "zh")
+    # auto：跟隨提問語言（中文問→中文答），判斷不了（純代號）才退回瀏覽器語言
+    if setting != "auto":
+        lang = setting
+    else:
+        lang = detect_question_lang(message.content) or cl.user_session.get("browser_lang", "zh")
     state = {
         "question": message.content, "history": history,
         "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,

@@ -38,7 +38,14 @@ CREATE TABLE IF NOT EXISTS steps (
     "end" TEXT,
     "generation" JSONB,
     "showInput" TEXT,
-    "language" TEXT
+    "language" TEXT,
+    -- create_step 會把 StepDict 所有非 None key 當欄位 insert，必須全部涵蓋
+    "command" TEXT,
+    "modes" TEXT[],
+    "defaultOpen" BOOLEAN,
+    "autoCollapse" BOOLEAN,
+    "icon" TEXT,
+    "feedback" JSONB
 );
 
 CREATE TABLE IF NOT EXISTS elements (
