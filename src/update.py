@@ -4,6 +4,7 @@
     python -m src.update report --market us --company AAPL [--form 10-Q]
     python -m src.update report --market tw --company 2330
     python -m src.update news --company 2330 --limit 10
+    python -m src.update prune --days 180
 """
 from __future__ import annotations
 
@@ -187,14 +188,21 @@ def main() -> None:
     p_news.add_argument("--company", required=True, help="美股 ticker 或台股代號")
     p_news.add_argument("--limit", type=int, default=10)
 
+    p_prune = sub.add_parser("prune", help="刪除過期新聞 chunk（財報不刪）")
+    p_prune.add_argument("--days", type=int, default=180, help="保留天數，預設 180")
+
     args = parser.parse_args()
     if args.command == "report":
         if args.market == "us":
             fetch_edgar(args.company, args.form)
         else:
             fetch_mops(args.company)
-    else:
+    elif args.command == "news":
         fetch_news(args.company, args.limit)
+    else:
+        from .vectorstore import delete_news_older_than
+
+        print(f"[update] 已刪除 {delete_news_older_than(args.days)} 筆過期新聞 chunk。")
 
 
 if __name__ == "__main__":

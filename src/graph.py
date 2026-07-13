@@ -13,6 +13,7 @@ Graph 結構：
 from __future__ import annotations
 
 import json
+import re
 from typing import TypedDict
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -93,9 +94,12 @@ def extract_filters(state: GraphState) -> GraphState:
 
 
 def retrieve(state: GraphState) -> GraphState:
+    # ponytail: 關鍵字啟發式判斷時效性，要更準再交給 extract_filters 的 LLM 判斷
+    recent = re.search(r"最近|近期|這幾天|本週|近日|recent|lately|latest", state["question"], re.I)
     query_vec = embeddings.embed_query(state["question"])
     docs = similarity_search(
-        query_vec, company=state.get("company"), doc_type=state.get("doc_type")
+        query_vec, company=state.get("company"), doc_type=state.get("doc_type"),
+        news_since_days=90 if recent else None,
     )
     return {**state, "retrieved": docs}
 

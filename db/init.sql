@@ -15,10 +15,9 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 向量相似度索引（IVFFlat，資料量大時效果較好；小量資料先不建也可以）
+-- 向量相似度索引（HNSW：增量寫入不需重建分群，適合本專案隨用隨抓的寫入模式）
 CREATE INDEX IF NOT EXISTS doc_chunks_embedding_idx
-    ON doc_chunks USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+    ON doc_chunks USING hnsw (embedding vector_cosine_ops);
 
 CREATE INDEX IF NOT EXISTS doc_chunks_company_idx ON doc_chunks (company);
 CREATE INDEX IF NOT EXISTS doc_chunks_doc_type_idx ON doc_chunks (doc_type);
