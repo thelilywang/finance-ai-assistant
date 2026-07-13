@@ -12,12 +12,28 @@ import datetime as dt
 from urllib.parse import urlsplit
 
 import chainlit as cl
+from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
+from src import config
 from src.graph import build_graph
 from src.i18n import STRINGS, detect_lang, t
+from src.vectorstore import delete_news_older_than
 
 graph = build_graph()
+
+try:  # 啟動時清過期新聞，DB 未起不擋 app
+    pruned = delete_news_older_than(config.NEWS_RETENTION_DAYS)
+    if pruned:
+        print(f"[app] 已清除 {pruned} 筆過期新聞 chunk")
+except Exception as e:
+    print(f"[app] 新聞清理略過：{e}")
+
+
+@cl.data_layer
+def get_data_layer():
+    # 沿用同一個 Postgres（PGVECTOR_URL），供讚/倒讚回饋持久化用
+    return SQLAlchemyDataLayer(conninfo=config.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://"))
 
 
 @cl.set_starters
@@ -50,6 +66,12 @@ def _format_source(source: str) -> str:
 
     # 本地路徑：只留檔名
     return source.rsplit("/", 1)[-1]
+
+
+def _trim_for_history(answer: str) -> str:
+    """存入 history 前去掉趨勢觀點段落並截斷長度，控制 rewrite/generate prompt 的 token 消耗。"""
+    answer = answer.split("## 📈", 1)[0].rstrip()
+    return answer[: config.HISTORY_ANSWER_MAX_CHARS]
 
 
 @cl.on_chat_start
@@ -171,5 +193,5 @@ async def on_message(message: cl.Message):
 
     await msg.send()
 
-    history.append((message.content, answer))
+    history.append((message.content, _trim_for_history(answer)))
     cl.user_session.set("history", history[-5:])  # 只留最近 5 輪

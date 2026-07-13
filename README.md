@@ -36,6 +36,7 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env       # uses PGVECTOR_URL for the DB connection
+psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # enables thumbs up/down feedback
 
 # 4. Fetch some data
 python -m src.update report --market us --company AAPL
@@ -56,6 +57,13 @@ chainlit run src/app.py -w    # http://localhost:8000
 | `python -m src.ingest --file data/x.pdf --company 2330 --doc-type financial_report --date 2026-07-15` | Import a local PDF/txt manually |
 | `python -m src.cli` | Terminal chat (single-turn) |
 | `chainlit run src/app.py -w` | Web chat UI at http://localhost:8000 |
+
+### Environment variables (data/token control)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `NEWS_RETENTION_DAYS` | `180` | News chunks older than this are auto-pruned on app startup (reports are never pruned) |
+| `HISTORY_ANSWER_MAX_CHARS` | `400` | Max chars of a past answer kept in chat history (trend section stripped first) sent to the LLM on later turns |
 
 ---
 
@@ -92,6 +100,7 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env       # DB 連線用 PGVECTOR_URL(避免與 chainlit 的 DATABASE_URL 撞名)
+psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # 套用後才能在回答上按讚/倒讚
 
 # 4. 抓資料
 python -m src.update report --market us --company AAPL
@@ -118,6 +127,13 @@ chainlit run src/app.py -w    # 開 http://localhost:8000
 - 「AAPL 最新一季營收多少?」
 - 「台積電最新一季的毛利率是多少?」
 - 「2330 最近有沒有負面新聞?」
+
+### 環境變數(資料/token 控制)
+
+| 變數 | 預設值 | 用途 |
+|---|---|---|
+| `NEWS_RETENTION_DAYS` | `180` | 啟動時自動清除超過此天數的新聞 chunk(財報一律保留) |
+| `HISTORY_ANSWER_MAX_CHARS` | `400` | 對話歷史中保留的過去回答最大字數(先去掉趨勢觀點段落),控制後續輪次送給 LLM 的 token 量 |
 
 ### 之後可以擴充的方向
 

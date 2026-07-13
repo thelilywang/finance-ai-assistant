@@ -19,3 +19,7 @@ CHUNK_OVERLAP = 120
 
 # 檢索參數
 TOP_K = 5
+
+# 資料/token 控制
+NEWS_RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "180"))
+HISTORY_ANSWER_MAX_CHARS = int(os.getenv("HISTORY_ANSWER_MAX_CHARS", "400"))
