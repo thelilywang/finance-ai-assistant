@@ -3,6 +3,7 @@
 用法：
     chainlit run src/app.py -w    # 開 http://localhost:8000
 """
+import re
 import sys
 from pathlib import Path
 
@@ -74,6 +75,21 @@ def _format_source(source: str) -> str:
 
     # 本地路徑：只留檔名
     return source.rsplit("/", 1)[-1]
+
+
+def _link_citations(body: str, label: str, lang: str, urls: list[str | None]) -> str:
+    """把 [來源1]/[Source 1] 這類引用標記轉成 markdown 連結，容錯標籤與數字間的空格。
+    urls 依編號順序（1-based）對應；為 None 或超出範圍（幻覺編號）不處理。
+    """
+    label = label.strip()
+    sep = "" if lang == "zh" else " "
+    for i, url in enumerate(urls, start=1):
+        if not url:
+            continue
+        pattern = rf"\[{re.escape(label)}\s*{i}\]"
+        replacement = f"[{label}{sep}{i}]({url})"
+        body = re.sub(pattern, replacement, body)
+    return body
 
 
 def _trim_for_history(answer: str) -> str:
@@ -194,11 +210,8 @@ async def on_message(message: cl.Message):
     if final_state and final_state["retrieved"]:
         unique = unique_sources(final_state["retrieved"])
         label = t(content_lang, "citation_label")
-        body_with_links = msg.content
-        for i, s in enumerate(unique, start=1):
-            url = _clean_url(s)
-            if url:
-                body_with_links = body_with_links.replace(f"[{label}{i}]", f"[{label}{i}]({url})")
+        urls = [_clean_url(s) for s in unique]
+        body_with_links = _link_citations(msg.content, label, content_lang, urls)
         msg.content = body_with_links
         body = body_with_links  # 先留存純回答（引用已轉連結），避免下載檔重複附上來源列
 

@@ -55,6 +55,8 @@ def rewrite_question(state: GraphState) -> GraphState:
     """有對話歷史時，把追問改寫成不依賴上下文的獨立問題；沒有就直接通過。"""
     if not state.get("history"):
         return state
+    if re.search(r"(?<!\d)\d{4}(?!\d)|(?<![A-Za-z])[A-Z]{2,5}(?![A-Za-z])", state["question"]):
+        return state  # ponytail: 已指名公司代號/ticker，視為獨立問題，避免被歷史污染
 
     prompt = f"""以下是使用者與財經助理的對話紀錄，以及使用者的新問題。
 若新問題依賴上下文（例如「那毛利率呢？」），請改寫成一個不依賴上下文、可獨立理解的完整問題；

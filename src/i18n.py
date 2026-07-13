@@ -20,7 +20,8 @@ STRINGS = {
         "trend_section": (
             "## 📈 投資趨勢觀點\n"
             "（以資深投資經理人的角色，僅根據上述參考資料，用 2-4 句話給出該個股近期的投資/操作趨勢觀點：\n"
-            "趨勢方向、值得關注的點、風險。不得引入資料以外的資訊。）"
+            "趨勢方向、值得關注的點、風險。不得引入資料以外的資訊。"
+            "若參考資料不足以形成趨勢觀點，本節僅寫『參考資料不足，無法提供趨勢觀點』一句，不得臆測。）"
         ),
         "disclaimer": "以上非投資建議，僅為資料解讀，投資請自行判斷。",
         "citation_label": "來源",
@@ -56,7 +57,9 @@ STRINGS = {
             "## 📈 Investment Trend View\n"
             "(As a senior investment manager, using only the reference material above, give a 2-4 sentence "
             "view on this stock's recent investment/trading trend: direction, points worth watching, and risks. "
-            "Do not introduce information outside the reference material.)"
+            "Do not introduce information outside the reference material. "
+            "If the reference material is insufficient to form a trend view, write only the sentence "
+            "\"Insufficient reference material to provide a trend view\" in this section — do not speculate.)"
         ),
         "disclaimer": "This is not investment advice — data interpretation only. Invest at your own discretion.",
         "citation_label": "Source ",
