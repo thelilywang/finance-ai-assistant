@@ -23,6 +23,13 @@ def delete_by_source(source: str) -> None:
         conn.execute("DELETE FROM doc_chunks WHERE source = %s", (source,))
 
 
+def source_exists(source: str) -> bool:
+    """該來源是否已入庫（讓重複掃描跳過 embedding）。"""
+    with get_connection() as conn:
+        cur = conn.execute("SELECT 1 FROM doc_chunks WHERE source = %s LIMIT 1", (source,))
+        return cur.fetchone() is not None
+
+
 def delete_news_older_than(days: int) -> int:
     """刪除超過 days 天的新聞 chunk，回傳刪除筆數。
 
