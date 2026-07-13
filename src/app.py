@@ -16,7 +16,7 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
 from src import config
-from src.graph import build_graph
+from src.graph import build_graph, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.vectorstore import delete_news_older_than
 
@@ -43,6 +43,14 @@ async def starters(user=None, language=None):
     return [cl.Starter(label=label, message=msg) for label, msg in STRINGS[lang]["starters"]]
 
 
+def _clean_url(source: str) -> str | None:
+    """http(s) URL 回傳去 query/fragment 的乾淨 URL；其他（EDGAR/本地檔）回 None。"""
+    if source.startswith(("http://", "https://")):
+        split = urlsplit(source)
+        return f"{split.scheme}://{split.netloc}{split.path}"
+    return None
+
+
 # ponytail: 標題取自 URL slug，要精確標題再存 DB title 欄位
 def _format_source(source: str) -> str:
     """把原始來源字串轉成可讀的 markdown（EDGAR/本地檔案/URL）。"""
@@ -51,9 +59,9 @@ def _format_source(source: str) -> str:
         ticker = parts[1] if len(parts) > 1 else ""
         return f"SEC EDGAR filing ({ticker})" if ticker else "SEC EDGAR filing"
 
-    if source.startswith(("http://", "https://")):
+    clean_url = _clean_url(source)
+    if clean_url:
         split = urlsplit(source)
-        clean_url = f"{split.scheme}://{split.netloc}{split.path}"
         domain = split.netloc.removeprefix("www.")
         title = split.path.rstrip("/").rsplit("/", 1)[-1]
         title = title.replace("-", " ").replace("_", " ").strip()
@@ -74,6 +82,17 @@ def _trim_for_history(answer: str) -> str:
     return answer[: config.HISTORY_ANSWER_MAX_CHARS]
 
 
+def _chat_settings(label_lang: str, initial_value: str) -> cl.ChatSettings:
+    return cl.ChatSettings([
+        Select(
+            id="language",
+            label=t(label_lang, "settings_label"),
+            items={"Auto": "auto", "繁體中文": "zh", "English": "en"},
+            initial_value=initial_value,
+        ),
+    ])
+
+
 @cl.on_chat_start
 async def start():
     # ponytail: 對話歷史只存在單次 session 記憶體，重整即清空；要持久化再存 DB
@@ -81,41 +100,38 @@ async def start():
     browser = detect_lang(cl.user_session.get("languages"))
     cl.user_session.set("browser_lang", browser)
     cl.user_session.set("lang_setting", "auto")
-    await cl.ChatSettings([
-        Select(
-            id="language",
-            label=t(browser, "settings_label"),
-            items={"Auto": "auto", "繁體中文": "zh", "English": "en"},
-            initial_value="auto",
-        ),
-    ]).send()
+    await _chat_settings(browser, "auto").send()
 
 
 @cl.on_settings_update
 async def on_settings_update(settings):
-    cl.user_session.set("lang_setting", settings["language"])
+    setting = settings["language"]
+    cl.user_session.set("lang_setting", setting)
+    browser = cl.user_session.get("browser_lang", "zh")
+    new_lang = setting if setting != "auto" else browser
+    await _chat_settings(new_lang, setting).send()
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
     history = cl.user_session.get("history")
     setting = cl.user_session.get("lang_setting", "auto")
-    # auto：跟隨提問語言（中文問→中文答），判斷不了（純代號）才退回瀏覽器語言
-    if setting != "auto":
-        lang = setting
-    else:
-        lang = detect_question_lang(message.content) or cl.user_session.get("browser_lang", "zh")
+    browser = cl.user_session.get("browser_lang", "zh")
+    # ui_lang：介面字串（step 名稱等）跟隨設定/瀏覽器語言，不受提問語言影響
+    # content_lang：回答/來源/報告內容，auto 時跟隨提問語言（中文問→中文答），判斷不了（純代號）才退回瀏覽器語言
+    ui_lang = setting if setting != "auto" else browser
+    content_lang = setting if setting != "auto" else (detect_question_lang(message.content) or browser)
     state = {
         "question": message.content, "history": history,
         "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
-        "lang": lang,
+        "lang": content_lang,
     }
 
     msg = cl.Message(content="")
     final_state = None
     in_think = False  # 保險：reasoning=False 失效時過濾 <think>...</think>
 
-    step = cl.Step(name=t(lang, "step_analyze"), type="tool")
+    step = cl.Step(name=t(ui_lang, "step_analyze"), type="tool")
     await step.send()
 
     async def _advance(name: str):
@@ -155,13 +171,13 @@ async def on_message(message: cl.Message):
             node = next(iter(payload))
             if node == "extract_filters":
                 if step is not None:
-                    await _advance(t(lang, "step_retrieve"))
+                    await _advance(t(ui_lang, "step_retrieve"))
             elif node == "retrieve":
                 partial = payload[node]
                 if not partial.get("retrieved") and partial.get("company") and not partial.get("fetched"):
-                    await _advance(t(lang, "step_fetch"))
+                    await _advance(t(ui_lang, "step_fetch"))
                 else:
-                    await _advance(t(lang, "step_generate"))
+                    await _advance(t(ui_lang, "step_generate"))
             elif node == "auto_fetch":
                 # 關閉 fetch step；重新檢索會再走一次 retrieve update 開下一個 step
                 await _close_step()
@@ -176,17 +192,25 @@ async def on_message(message: cl.Message):
         msg.content = answer
 
     if final_state and final_state["retrieved"]:
-        body = msg.content  # 先留存純回答，避免下載檔重複附上來源列
-        sources = sorted({doc["source"] for doc in final_state["retrieved"]})
-        source_list = "\n".join(f"- {_format_source(s)}" for s in sources)
-        await msg.stream_token(f"\n\n---\n**{t(lang, 'sources_label')}:**\n{source_list}")
+        unique = unique_sources(final_state["retrieved"])
+        label = t(content_lang, "citation_label")
+        body_with_links = msg.content
+        for i, s in enumerate(unique, start=1):
+            url = _clean_url(s)
+            if url:
+                body_with_links = body_with_links.replace(f"[{label}{i}]", f"[{label}{i}]({url})")
+        msg.content = body_with_links
+        body = body_with_links  # 先留存純回答（引用已轉連結），避免下載檔重複附上來源列
+
+        source_list = "\n".join(f"{i}. {_format_source(s)}" for i, s in enumerate(unique, start=1))
+        await msg.stream_token(f"\n\n---\n**{t(content_lang, 'sources_label')}:**\n{source_list}")
 
         # 附上可下載的分析 .md（no_result 不附）
         now = dt.datetime.now()
         report = (
             f"# {message.content}\n\n{body}\n\n---\n"
-            f"**{t(lang, 'sources_label')}:**\n{source_list}\n\n"
-            f"{t(lang, 'report_generated_at')}: {now:%Y-%m-%d %H:%M:%S}\n"
+            f"**{t(content_lang, 'sources_label')}:**\n{source_list}\n\n"
+            f"{t(content_lang, 'report_generated_at')}: {now:%Y-%m-%d %H:%M:%S}\n"
         )
         msg.elements = [cl.File(
             name=f"analysis-{now:%Y%m%d-%H%M%S}.md",

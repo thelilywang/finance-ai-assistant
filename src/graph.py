@@ -150,13 +150,24 @@ def route_after_retrieve(state: GraphState) -> str:
     return "no_result"
 
 
+def unique_sources(retrieved: list[dict]) -> list[str]:
+    """依出現順序去重的來源列表，引用編號與來源列表共用這個順序。"""
+    ordered = []
+    for doc in retrieved:
+        if doc["source"] not in ordered:
+            ordered.append(doc["source"])
+    return ordered
+
+
 def generate(state: GraphState) -> GraphState:
     lang = state.get("lang", "zh")
     src_label = t(lang, "citation_label")  # 引用標記跟隨回答語言（[來源1] / [Source 1]）
+    ordered = unique_sources(state["retrieved"])
     context_blocks = []
-    for i, doc in enumerate(state["retrieved"], start=1):
+    for doc in state["retrieved"]:
+        idx = ordered.index(doc["source"]) + 1
         context_blocks.append(
-            f"[{src_label}{i}] {doc['source']}（{doc.get('published_at') or '日期未知'}）\n{doc['content']}"
+            f"[{src_label}{idx}] {doc['source']}（{doc.get('published_at') or '日期未知'}）\n{doc['content']}"
         )
     context = "\n\n".join(context_blocks)
 
