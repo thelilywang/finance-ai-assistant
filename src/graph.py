@@ -21,6 +21,7 @@ from langgraph.graph import StateGraph, END
 
 from . import config
 from .i18n import t
+from .market import get_market_snapshot
 from .vectorstore import similarity_search
 
 
@@ -199,6 +200,12 @@ def generate(state: GraphState) -> GraphState:
     if state.get("history"):
         history_block = f"\n先前對話（僅供理解語境）：\n{_format_history(state['history'])}\n"
 
+    market_block = ""
+    if state.get("company"):
+        snapshot = get_market_snapshot(state["company"])
+        if snapshot:
+            market_block = f"\n即時市場數據（Yahoo Finance，僅供估值/時機參考，非檢索來源，不參與來源編號）：\n{snapshot}\n"
+
     prompt = f"""你是專業的財經分析助理。請根據下方參考資料回答使用者問題。
 規則：
 - 只根據參考資料回答，不要編造資料中沒有的數字或事實
@@ -221,7 +228,7 @@ def generate(state: GraphState) -> GraphState:
 
 參考資料：
 {context}
-{history_block}
+{market_block}{history_block}
 使用者問題：{state['question']}
 """
     resp = llm.invoke(prompt)
@@ -234,6 +241,10 @@ def no_result(state: GraphState) -> GraphState:
         answer = t(lang, "no_result_fetched", company=state.get("company"))
     else:
         answer = t(lang, "no_result_plain")
+    if state.get("company"):
+        snapshot = get_market_snapshot(state["company"])
+        if snapshot:
+            answer += "\n\n" + t(lang, "no_result_market", snapshot=snapshot)
     return {**state, "answer": answer}
 
 

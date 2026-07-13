@@ -18,10 +18,24 @@ STRINGS = {
         ),
         "answer_lang_rule": "- 全文以繁體中文回答",
         "trend_section": (
-            "## 📈 投資趨勢觀點\n"
-            "（以資深投資經理人的角色，僅根據上述參考資料，用 2-4 句話給出該個股近期的投資/操作趨勢觀點：\n"
-            "趨勢方向、值得關注的點、風險。不得引入資料以外的資訊。"
-            "若參考資料不足以形成趨勢觀點，本節僅寫『參考資料不足，無法提供趨勢觀點』一句，不得臆測。）"
+            "## 📈 投資決策參考\n"
+            "（以 buy-side 分析師的角色填寫下列欄位。格式硬性要求：每欄輸出成獨立的 markdown 條列項目"
+            "「- **欄名**：內容」，欄名粗體、內容務必簡潔；已知事實／推論／觸發條件的多個點用巢狀子條列，不得把多欄擠在同一行：\n"
+            "- **一句話結論**：\n"
+            "- **已知事實**：1-2 點子條列，每點必附 [來源N]\n"
+            "- **推論**：1-2 點子條列，明確標示為推論\n"
+            "- **利多**：\n"
+            "- **風險**：\n"
+            "- **估值觀察**：僅根據「即時市場數據」的數字；沒有該數據就寫「資料不足」\n"
+            "- **建議傾向**：僅當財報＋新聞＋行情足以支持時，給「偏多／中性觀望／偏空」其一並附一句依據；不足時寫「資料不足以形成明確傾向，見觸發條件」\n"
+            "- **觸發條件**：「轉積極」「轉保守」兩點子條列（條件式描述，非指令）\n"
+            "- **下一個關鍵事件**：\n"
+            "- **建議追蹤指標**：2-3 個\n"
+            "硬規則：「資料不足」只准出現在已知事實／估值觀察／建議傾向三欄；觸發條件、下一個關鍵事件、建議追蹤指標永遠必填；不得輸出信心百分比；不得編造資料中沒有的數字。）"
+        ),
+        "no_result_market": (
+            "雖查無相關財報/新聞資料，以下為即時行情供參考：\n{snapshot}\n"
+            "建議追蹤：下次財報/月營收公告、法說會，以及營收與毛利率變化。以上非投資建議。"
         ),
         "disclaimer": "以上非投資建議，僅為資料解讀，投資請自行判斷。",
         "citation_label": "來源",
@@ -54,12 +68,29 @@ STRINGS = {
         ),
         "answer_lang_rule": "- Answer entirely in English",
         "trend_section": (
-            "## 📈 Investment Trend View\n"
-            "(As a senior investment manager, using only the reference material above, give a 2-4 sentence "
-            "view on this stock's recent investment/trading trend: direction, points worth watching, and risks. "
-            "Do not introduce information outside the reference material. "
-            "If the reference material is insufficient to form a trend view, write only the sentence "
-            "\"Insufficient reference material to provide a trend view\" in this section — do not speculate.)"
+            "## 📈 Investment Decision Reference\n"
+            "(As a buy-side analyst, fill in the fields below. Strict formatting: output each field as its own "
+            "markdown list item \"- **Field**: content\" with the field name in bold, content concise; use nested "
+            "sub-bullets for multiple points under Known facts / Inference / Triggers; never cram fields onto one line:\n"
+            "- **One-line conclusion**:\n"
+            "- **Known facts**: 1-2 sub-bullets, each must cite [Source N]\n"
+            "- **Inference**: 1-2 sub-bullets, clearly labeled as inference\n"
+            "- **Positives**:\n"
+            "- **Risks**:\n"
+            "- **Valuation check**: based only on figures from the \"real-time market data\"; if absent, write \"insufficient data\"\n"
+            "- **Stance**: only give \"Bullish / Neutral-wait / Bearish\" with one supporting reason when filings + news + "
+            "market data support it; otherwise write \"insufficient data for a clear stance, see triggers\"\n"
+            "- **Triggers**: two sub-bullets \"turn positive\" / \"turn cautious\" (conditional description, not an instruction)\n"
+            "- **Next key event**:\n"
+            "- **Metrics to watch**: 2-3 items\n"
+            "Hard rules: \"insufficient data\" is only allowed in Known facts / Valuation check / Stance; "
+            "Triggers, Next key event, and Metrics to watch are always required; never output a confidence percentage; "
+            "never fabricate numbers not in the reference material.)"
+        ),
+        "no_result_market": (
+            "No related filings/news were found, but here is the current market snapshot:\n{snapshot}\n"
+            "Suggested watch items: next earnings/monthly revenue release, earnings call, and revenue/margin trends. "
+            "This is not investment advice."
         ),
         "disclaimer": "This is not investment advice — data interpretation only. Invest at your own discretion.",
         "citation_label": "Source ",
