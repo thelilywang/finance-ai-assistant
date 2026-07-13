@@ -1,14 +1,25 @@
-# Welcome to Chainlit! 🚀🤖
+# Financial Report & News RAG Assistant
 
-Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
+A stock-focused Q&A assistant over financial reports (SEC EDGAR / TWSE MOPS) and news (Yahoo Finance RSS). All inference runs locally via Ollama — your data never leaves this machine.
 
-## Useful Links 🔗
+**What you can ask:**
 
-- **Documentation:** Get started with our comprehensive [Chainlit Documentation](https://docs.chainlit.io) 📚
-- **Discord Community:** Join our friendly [Chainlit Discord](https://discord.gg/k73SQ3FyUh) to ask questions, share your projects, and connect with other developers! 💬
+- "What was AAPL's revenue in the latest quarter?"
+- "What is TSMC (2330)'s gross margin in the latest quarter?"
+- "Any negative news about 2330 recently?"
 
-We can't wait to see what you create with Chainlit! Happy coding! 💻😊
+Each answer cites its sources and ends with an investment manager's trend view (with a disclaimer — not investment advice). Every response comes with a downloadable `.md` analysis file. Companies not yet in the database are fetched automatically (listed companies only — the first question may take a few minutes).
 
-## Welcome screen
+---
 
-To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.
+# 財報/新聞 RAG 助理
+
+針對個股的財報(SEC EDGAR / 公開資訊觀測站)與新聞(Yahoo Finance RSS)問答助理。所有推理都透過 Ollama 在本機執行,資料不會外流。
+
+**可以問什麼:**
+
+- 「AAPL 最新一季營收多少?」
+- 「台積電(2330)最新一季的毛利率是多少?」
+- 「2330 最近有沒有負面新聞?」
+
+每則回答都會附引用來源,結尾附投資經理人趨勢觀點(含免責聲明,非投資建議)。每則回應旁都有可下載的 `.md` 分析檔。未匯入的公司會自動抓取資料(僅限上市公司,首次提問約需數分鐘)。
