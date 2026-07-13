@@ -11,9 +11,10 @@ A financial report & news RAG assistant for individual stocks, built with LangGr
 
 ### Features
 
-- **Q&A over reports and news** with source citations, plus an investment manager's trend view (with disclaimer) at the end of each answer
-- **One-command data updates**: SEC EDGAR (US reports), TWSE MOPS (TW reports), Yahoo Finance RSS (news); idempotent re-runs
-- **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only)
+- **Q&A over reports and news** with source citations, plus a structured decision card (facts, inference, valuation, stance, triggers, key event, watch metrics) at the end of each answer
+- **Live market snapshot**: price, 52-week range, PE, target price, and analyst view pulled from yfinance and folded into the decision card; any failure degrades gracefully, never breaks the answer
+- **One-command data updates**: SEC EDGAR (US reports), TWSE MOPS (TW reports), Yahoo Finance RSS (news), market-news sweep from udn/cmoney listings; idempotent re-runs
+- **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only); company questions with filings but no news auto-fetch news; company-less questions trigger a market-news sweep instead
 - **Chainlit web UI**: ChatGPT-style token streaming, multi-turn chat, downloadable `.md` analysis per answer
 - **Honest no-result path**: says "no data" instead of hallucinating
 
@@ -53,6 +54,7 @@ chainlit run src/app.py -w    # http://localhost:8000
 | `python -m src.update report --market us --company AAPL [--form 10-K]` | Fetch latest US filing from SEC EDGAR (default 10-Q) |
 | `python -m src.update report --market tw --company 2330` | Fetch latest TW report PDF from MOPS (prints manual steps if blocked) |
 | `python -m src.update news --company 2330 --limit 10` | Fetch news via Yahoo Finance RSS |
+| `python -m src.update market-news [--limit 10]` | Sweep market-news listing pages (udn tw/us, cmoney notes/tag) for general market news |
 | `python -m src.update prune --days 180` | Delete news chunks older than N days (reports are never pruned) |
 | `python -m src.ingest --file data/x.pdf --company 2330 --doc-type financial_report --date 2026-07-15` | Import a local PDF/txt manually |
 | `python -m src.cli` | Terminal chat (single-turn) |
@@ -75,9 +77,10 @@ chainlit run src/app.py -w    # http://localhost:8000
 
 ### 功能
 
-- **財報/新聞問答**:回答附引用來源,結尾附投資經理人趨勢觀點(含免責聲明,非投資建議)
-- **一鍵抓取更新**:SEC EDGAR(美股財報)、公開資訊觀測站 MOPS(台股財報)、Yahoo Finance RSS(新聞);重跑同一來源自動去重
-- **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司)
+- **財報/新聞問答**:回答附引用來源,結尾附結構化決策卡(事實、推論、估值、立場、觸發條件、關鍵事件、觀察指標)
+- **即時市場快照**:用 yfinance 抓股價、52 週區間、本益比、目標價、分析師評等,併入決策卡;抓取失敗時優雅降級,不影響回答
+- **一鍵抓取更新**:SEC EDGAR(美股財報)、公開資訊觀測站 MOPS(台股財報)、Yahoo Finance RSS(新聞)、udn/cmoney 市場新聞列表頁掃描;重跑同一來源自動去重
+- **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司);有財報缺新聞的公司只補抓新聞;沒指定公司的問題則觸發市場新聞掃描
 - **Chainlit 網頁介面**:ChatGPT 風格逐字串流、多輪對話、每則回答附可下載 `.md` 分析檔
 - **查無資料時誠實告知**,不幻覺
 
@@ -117,6 +120,7 @@ chainlit run src/app.py -w    # 開 http://localhost:8000
 | `python -m src.update report --market us --company AAPL [--form 10-K]` | 抓美股最新財報(SEC EDGAR,預設 10-Q) |
 | `python -m src.update report --market tw --company 2330` | 抓台股最新財報 PDF(MOPS,被擋時印手動下載步驟) |
 | `python -m src.update news --company 2330 --limit 10` | 抓新聞(Yahoo Finance RSS) |
+| `python -m src.update market-news [--limit 10]` | 掃市場總覽新聞列表頁（udn tw/us、cmoney notes/tag） |
 | `python -m src.update prune --days 180` | 刪除超過 N 天的新聞 chunk(財報一律保留) |
 | `python -m src.ingest --file data/x.pdf --company 2330 --doc-type financial_report --date 2026-07-15` | 手動匯入本地 PDF/txt |
 | `python -m src.cli` | 終端問答(單輪) |
