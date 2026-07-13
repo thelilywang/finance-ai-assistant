@@ -83,6 +83,7 @@ async def on_message(message: cl.Message):
         msg.elements = [cl.File(
             name=f"analysis-{now:%Y%m%d-%H%M%S}.md",
             content=report.encode("utf-8"),
+            mime="text/markdown",
             display="inline",
         )]
 
