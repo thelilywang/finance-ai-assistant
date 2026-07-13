@@ -9,14 +9,47 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # chainlit run 以 src/ 為 sys.path[0]
 
 import datetime as dt
+from urllib.parse import urlsplit
 
 import chainlit as cl
 from chainlit.input_widget import Select
 
 from src.graph import build_graph
-from src.i18n import detect_lang, t
+from src.i18n import STRINGS, detect_lang, t
 
 graph = build_graph()
+
+
+@cl.set_starters
+async def starters(user=None, language=None):
+    # language 由 Chainlit 帶入瀏覽器語言（如 "zh-TW"）；拿不到就明確用 zh
+    lang = detect_lang(language) if language else "zh"
+    return [cl.Starter(label=label, message=msg) for label, msg in STRINGS[lang]["starters"]]
+
+
+# ponytail: 標題取自 URL slug，要精確標題再存 DB title 欄位
+def _format_source(source: str) -> str:
+    """把原始來源字串轉成可讀的 markdown（EDGAR/本地檔案/URL）。"""
+    if source.startswith("EDGAR:"):
+        parts = source.split(":")
+        ticker = parts[1] if len(parts) > 1 else ""
+        return f"SEC EDGAR filing ({ticker})" if ticker else "SEC EDGAR filing"
+
+    if source.startswith(("http://", "https://")):
+        split = urlsplit(source)
+        clean_url = f"{split.scheme}://{split.netloc}{split.path}"
+        domain = split.netloc.removeprefix("www.")
+        title = split.path.rstrip("/").rsplit("/", 1)[-1]
+        title = title.replace("-", " ").replace("_", " ").strip()
+        title = (title[:60] + "…") if len(title) > 60 else title
+        if title:
+            title = title[0].upper() + title[1:]
+        else:
+            title = domain
+        return f"[{title} — {domain}]({clean_url})"
+
+    # 本地路徑：只留檔名
+    return source.rsplit("/", 1)[-1]
 
 
 @cl.on_chat_start
@@ -55,9 +88,26 @@ async def on_message(message: cl.Message):
     msg = cl.Message(content="")
     final_state = None
     in_think = False  # 保險：reasoning=False 失效時過濾 <think>...</think>
-    fetch_notified = False  # auto_fetch 提示只送一次
-    # 同時訂閱 messages（逐 token）與 values（節點完成後的完整 state）
-    async for mode, payload in graph.astream(state, stream_mode=["messages", "values"]):
+
+    step = cl.Step(name=t(lang, "step_analyze"), type="tool")
+    await step.send()
+
+    async def _advance(name: str):
+        """關閉目前 step，開下一個。"""
+        nonlocal step
+        if step is not None:  # auto_fetch 後 step 已關閉，直接開新的
+            await step.remove()
+        step = cl.Step(name=name, type="tool")
+        await step.send()
+
+    async def _close_step():
+        nonlocal step
+        if step is not None:
+            await step.remove()
+            step = None
+
+    # 同時訂閱 messages（逐 token）、updates（節點完成通知）與 values（完整 state）
+    async for mode, payload in graph.astream(state, stream_mode=["messages", "updates", "values"]):
         if mode == "messages":
             chunk, metadata = payload
             if metadata.get("langgraph_node") != "generate" or not chunk.content:
@@ -72,12 +122,27 @@ async def on_message(message: cl.Message):
                 else:
                     continue
             if token:
+                if step is not None:  # 第一個 generate token 到，關掉還開著的 step
+                    await _close_step()
                 await msg.stream_token(token)
+        elif mode == "updates":
+            node = next(iter(payload))
+            if node == "extract_filters":
+                if step is not None:
+                    await _advance(t(lang, "step_retrieve"))
+            elif node == "retrieve":
+                partial = payload[node]
+                if not partial.get("retrieved") and partial.get("company") and not partial.get("fetched"):
+                    await _advance(t(lang, "step_fetch"))
+                else:
+                    await _advance(t(lang, "step_generate"))
+            elif node == "auto_fetch":
+                # 關閉 fetch step；重新檢索會再走一次 retrieve update 開下一個 step
+                await _close_step()
         else:  # values：最後一筆就是 final state
             final_state = payload
-            if payload.get("fetched") and not fetch_notified:
-                fetch_notified = True
-                await cl.Message(content=t(lang, "fetch_notice")).send()
+
+    await _close_step()  # 保險：no_result 路徑沒有 generate token，可能還開著
 
     answer = final_state["answer"] if final_state else ""
     if not msg.content:
@@ -87,13 +152,14 @@ async def on_message(message: cl.Message):
     if final_state and final_state["retrieved"]:
         body = msg.content  # 先留存純回答，避免下載檔重複附上來源列
         sources = sorted({doc["source"] for doc in final_state["retrieved"]})
-        await msg.stream_token(f"\n\n---\n{t(lang, 'sources_label')}: {', '.join(sources)}")
+        source_list = "\n".join(f"- {_format_source(s)}" for s in sources)
+        await msg.stream_token(f"\n\n---\n**{t(lang, 'sources_label')}:**\n{source_list}")
 
         # 附上可下載的分析 .md（no_result 不附）
         now = dt.datetime.now()
         report = (
             f"# {message.content}\n\n{body}\n\n---\n"
-            f"{t(lang, 'sources_label')}: {', '.join(sources)}\n\n"
+            f"**{t(lang, 'sources_label')}:**\n{source_list}\n\n"
             f"{t(lang, 'report_generated_at')}: {now:%Y-%m-%d %H:%M:%S}\n"
         )
         msg.elements = [cl.File(
