@@ -90,7 +90,14 @@ def extract_filters(state: GraphState) -> GraphState:
     def _clean(v):  # 模型偶爾回字串 "null"，一律正規化成 None
         return None if not v or (isinstance(v, str) and v.strip().lower() == "null") else v
 
-    return {**state, "company": _clean(parsed.get("company")), "doc_type": _clean(parsed.get("doc_type"))}
+    company = _clean(parsed.get("company"))
+    if not company:
+        # ponytail: LLM 漏抽時的確定性 fallback；純英文問題可能誤抓一般單字，屆時改成僅在含中文時啟用
+        m = re.search(r"(?<![A-Za-z])[A-Za-z]{1,5}(?![A-Za-z])", state["question"])
+        if m:
+            company = m.group(0).upper()
+
+    return {**state, "company": company, "doc_type": _clean(parsed.get("doc_type"))}
 
 
 def retrieve(state: GraphState) -> GraphState:
@@ -101,12 +108,22 @@ def retrieve(state: GraphState) -> GraphState:
         query_vec, company=state.get("company"), doc_type=state.get("doc_type"),
         news_since_days=90 if recent else None,
     )
+    if not docs and state.get("doc_type"):
+        # ponytail: doc_type 濾到空就放寬重查，避免問「財報」時把僅有的新聞全濾光
+        docs = similarity_search(
+            query_vec, company=state.get("company"),
+            news_since_days=90 if recent else None,
+        )
     return {**state, "retrieved": docs}
 
 
 def auto_fetch(state: GraphState) -> GraphState:
     """檢索不到時自動抓該公司的財報+新聞入庫。單一來源失敗不中斷，抓完標記 fetched。"""
-    from .update import fetch_edgar, fetch_mops, fetch_news  # 延遲 import，避免循環依賴
+    try:
+        from .update import fetch_edgar, fetch_mops, fetch_news  # 延遲 import，避免循環依賴
+    except ImportError as e:  # 環境缺套件時降級成查無資料，不炸整個對話
+        print(f"[auto_fetch] 匯入失敗（環境缺套件？）：{e}")
+        return {**state, "fetched": True}
 
     company = state["company"]
     if company.isdigit() and len(company) == 4:

@@ -50,10 +50,13 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
     )
     resp.raise_for_status()
     recent = resp.json()["filings"]["recent"]
-    try:
-        idx = recent["form"].index(form)
-    except ValueError:
-        print(f"[update] {ticker} 近期沒有 {form} 申報。")
+    # ponytail: 新上市公司還沒有 10-Q/10-K，退回 424B4/S-1 招股書（含財務數據）
+    for f in (form, "10-K", "424B4", "S-1"):
+        if f in recent["form"]:
+            form, idx = f, recent["form"].index(f)
+            break
+    else:
+        print(f"[update] {ticker} 近期沒有 {form}/10-K/424B4/S-1 申報。")
         return
 
     accession = recent["accessionNumber"][idx]
