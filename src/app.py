@@ -137,41 +137,34 @@ async def on_settings_update(settings):
     await _chat_settings(new_lang, setting).send()
 
 
-@cl.on_message
-async def on_message(message: cl.Message):
-    history = cl.user_session.get("history")
-    setting = cl.user_session.get("lang_setting", "auto")
-    browser = cl.user_session.get("browser_lang", "zh")
-    # ui_lang：介面字串（step 名稱等）跟隨設定/瀏覽器語言，不受提問語言影響
-    # content_lang：回答/來源/報告內容，auto 時跟隨提問語言（中文問→中文答），判斷不了（純代號）才退回瀏覽器語言
-    ui_lang = setting if setting != "auto" else browser
-    content_lang = setting if setting != "auto" else (detect_question_lang(message.content) or browser)
-    state = {
-        "question": message.content, "history": history,
-        "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
-        "lang": content_lang,
-    }
+class _StepTracker:
+    """管理分析進度用的單一 cl.Step，同時間只有一個 step 開著。"""
 
-    msg = cl.Message(content="")
+    def __init__(self, ui_lang: str):
+        self.ui_lang = ui_lang
+        self.step: cl.Step | None = None
+
+    async def start(self):
+        self.step = cl.Step(name=t(self.ui_lang, "step_analyze"), type="tool")
+        await self.step.send()
+
+    async def advance(self, name: str):
+        """關閉目前 step，開下一個。"""
+        if self.step is not None:  # auto_fetch 後 step 已關閉，直接開新的
+            await self.step.remove()
+        self.step = cl.Step(name=name, type="tool")
+        await self.step.send()
+
+    async def close(self):
+        if self.step is not None:
+            await self.step.remove()
+            self.step = None
+
+
+async def _stream_answer(state: dict, msg: cl.Message, tracker: _StepTracker) -> dict:
+    """跑 graph，邊串流 generate 的 token 邊推進 step 顯示，回傳 final state。"""
     final_state = None
     in_think = False  # 保險：reasoning=False 失效時過濾 <think>...</think>
-
-    step = cl.Step(name=t(ui_lang, "step_analyze"), type="tool")
-    await step.send()
-
-    async def _advance(name: str):
-        """關閉目前 step，開下一個。"""
-        nonlocal step
-        if step is not None:  # auto_fetch 後 step 已關閉，直接開新的
-            await step.remove()
-        step = cl.Step(name=name, type="tool")
-        await step.send()
-
-    async def _close_step():
-        nonlocal step
-        if step is not None:
-            await step.remove()
-            step = None
 
     # 同時訂閱 messages（逐 token）、updates（節點完成通知）與 values（完整 state）
     async for mode, payload in graph.astream(state, stream_mode=["messages", "updates", "values"]):
@@ -189,61 +182,90 @@ async def on_message(message: cl.Message):
                 else:
                     continue
             if token:
-                if step is not None:  # 第一個 generate token 到，關掉還開著的 step
-                    await _close_step()
+                if tracker.step is not None:  # 第一個 generate token 到，關掉還開著的 step
+                    await tracker.close()
                 await msg.stream_token(token)
         elif mode == "updates":
             node = next(iter(payload))
             if node == "extract_filters":
-                if step is not None:
-                    await _advance(t(ui_lang, "step_retrieve"))
+                if tracker.step is not None:
+                    await tracker.advance(t(tracker.ui_lang, "step_retrieve"))
             elif node == "retrieve":
                 partial = payload[node]
                 if route_after_retrieve(partial) == "auto_fetch":
-                    await _advance(t(ui_lang, "step_fetch"))
+                    await tracker.advance(t(tracker.ui_lang, "step_fetch"))
                 else:
-                    await _advance(t(ui_lang, "step_generate"))
+                    await tracker.advance(t(tracker.ui_lang, "step_generate"))
             elif node == "auto_fetch":
                 # 關閉 fetch step；重新檢索會再走一次 retrieve update 開下一個 step
-                await _close_step()
+                await tracker.close()
         else:  # values：最後一筆就是 final state
             final_state = payload
 
-    await _close_step()  # 保險：no_result 路徑沒有 generate token，可能還開著
+    await tracker.close()  # 保險：no_result 路徑沒有 generate token，可能還開著
+    return final_state
+
+
+async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, content_lang: str):
+    """來源列附加到訊息 + 產生可下載分析報告（no_result 略過）。"""
+    if not final_state["retrieved"]:
+        return
+
+    unique = unique_sources(final_state["retrieved"])
+    label = t(content_lang, "citation_label")
+    urls = [_clean_url(s) for s in unique]
+    body = _link_citations(msg.content, label, content_lang, urls)
+    msg.content = body
+
+    titles = {}
+    for doc in final_state["retrieved"]:
+        if doc.get("title") and doc["source"] not in titles:
+            titles[doc["source"]] = doc["title"]
+    source_list = "\n".join(f"{i}. {_format_source(s, titles.get(s))}" for i, s in enumerate(unique, start=1))
+    await msg.stream_token(f"\n\n---\n**{t(content_lang, 'sources_label')}:**\n{source_list}")
+
+    now = dt.datetime.now()
+    report = (
+        f"# {question}\n\n{body}\n\n---\n"
+        f"**{t(content_lang, 'sources_label')}:**\n{source_list}\n\n"
+        f"{t(content_lang, 'report_generated_at')}: {now:%Y-%m-%d %H:%M:%S}\n"
+    )
+    msg.elements = [cl.File(
+        name=f"analysis-{now:%Y%m%d-%H%M%S}.md",
+        content=report.encode("utf-8"),
+        mime="text/markdown",
+        display="inline",
+    )]
+
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    history = cl.user_session.get("history")
+    setting = cl.user_session.get("lang_setting", "auto")
+    browser = cl.user_session.get("browser_lang", "zh")
+    # ui_lang：介面字串（step 名稱等）跟隨設定/瀏覽器語言，不受提問語言影響
+    # content_lang：回答/來源/報告內容，auto 時跟隨提問語言（中文問→中文答），判斷不了（純代號）才退回瀏覽器語言
+    ui_lang = setting if setting != "auto" else browser
+    content_lang = setting if setting != "auto" else (detect_question_lang(message.content) or browser)
+    state = {
+        "question": message.content, "history": history,
+        "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
+        "lang": content_lang,
+    }
+
+    msg = cl.Message(content="")
+    tracker = _StepTracker(ui_lang)
+    await tracker.start()
+
+    final_state = await _stream_answer(state, msg, tracker)
 
     answer = final_state["answer"] if final_state else ""
     if not msg.content:
         # no_result 路徑沒有 generate token，用 final state 的 answer 補上
         msg.content = answer
 
-    if final_state and final_state["retrieved"]:
-        unique = unique_sources(final_state["retrieved"])
-        label = t(content_lang, "citation_label")
-        urls = [_clean_url(s) for s in unique]
-        body_with_links = _link_citations(msg.content, label, content_lang, urls)
-        msg.content = body_with_links
-        body = body_with_links  # 先留存純回答（引用已轉連結），避免下載檔重複附上來源列
-
-        titles = {}
-        for doc in final_state["retrieved"]:
-            if doc.get("title") and doc["source"] not in titles:
-                titles[doc["source"]] = doc["title"]
-        source_list = "\n".join(f"{i}. {_format_source(s, titles.get(s))}" for i, s in enumerate(unique, start=1))
-        await msg.stream_token(f"\n\n---\n**{t(content_lang, 'sources_label')}:**\n{source_list}")
-
-        # 附上可下載的分析 .md（no_result 不附）
-        now = dt.datetime.now()
-        report = (
-            f"# {message.content}\n\n{body}\n\n---\n"
-            f"**{t(content_lang, 'sources_label')}:**\n{source_list}\n\n"
-            f"{t(content_lang, 'report_generated_at')}: {now:%Y-%m-%d %H:%M:%S}\n"
-        )
-        msg.elements = [cl.File(
-            name=f"analysis-{now:%Y%m%d-%H%M%S}.md",
-            content=report.encode("utf-8"),
-            mime="text/markdown",
-            display="inline",
-        )]
+    if final_state:
+        await _send_with_sources(msg, final_state, message.content, content_lang)
 
     await msg.send()
 
