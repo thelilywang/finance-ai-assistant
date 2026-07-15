@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import email.utils
+import html as html_lib
 import re
 import xml.etree.ElementTree as ET
 
@@ -37,6 +38,12 @@ MARKET_SOURCES = {
     "cmoney_tag": ("https://www.cmoney.tw/notes/?tag=12367",
                    r"note-detail\.aspx\?nid=(\d+)",
                    lambda m: f"https://www.cmoney.tw/notes/note-detail.aspx?nid={m.group(1)}"),
+    "cnyes_us": ("https://news.cnyes.com/news/cat/us_stock",
+                 r"/news/id/(\d+)",
+                 lambda m: f"https://news.cnyes.com/news/id/{m.group(1)}"),
+    "cnyes_tw": ("https://news.cnyes.com/news/cat/tw_stock_news",
+                 r"/news/id/(\d+)",
+                 lambda m: f"https://news.cnyes.com/news/id/{m.group(1)}"),
 }
 
 MOPS_MANUAL_GUIDE = """[update] MOPS 抓取失敗（介面脆弱，隨時可能變動）。手動下載步驟：
@@ -67,8 +74,9 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
     )
     resp.raise_for_status()
     recent = resp.json()["filings"]["recent"]
-    # ponytail: 新上市公司還沒有 10-Q/10-K，退回 424B4/S-1 招股書（含財務數據）
-    for f in (form, "10-K", "424B4", "S-1"):
+    # ponytail: 外國發行人（如 ASML/TSM）不申報 10-Q/10-K，季報走 6-K、年報走 20-F；
+    # 新上市公司退回 424B4/S-1 招股書。6-K 也可能是非財報公告，先取最新一份，誤抓再精修。
+    for f in (form, "10-K", "6-K", "20-F", "424B4", "S-1"):
         if f in recent["form"]:
             form, idx = f, recent["form"].index(f)
             break
@@ -90,8 +98,8 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
 
     text = trafilatura.extract(resp.text)
     if not text:
-        # ponytail: trafilatura 抽不到就整包去 tag 粗抽，財報 HTML 幾乎都抽得到，先不精修
-        text = re.sub(r"<[^>]+>", " ", resp.text)
+        # ponytail: trafilatura 抽不到就整包去 tag 粗抽 + 解 HTML entities（€ 等符號），財報 HTML 幾乎都抽得到
+        text = html_lib.unescape(re.sub(r"<[^>]+>", " ", resp.text))
     ingest_text(
         text,
         source=f"EDGAR:{ticker.upper()}:{accession}",

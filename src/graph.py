@@ -12,6 +12,7 @@ Graph 結構：
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 from typing import TypedDict
@@ -107,9 +108,12 @@ def extract_filters(state: GraphState) -> GraphState:
     return {**state, "company": company, "doc_type": _clean(parsed.get("doc_type"))}
 
 
+# ponytail: 關鍵字啟發式判斷時效性，要更準再交給 extract_filters 的 LLM 判斷
+_RECENT_RE = re.compile(r"最近|近期|這幾天|本週|近日|最新|即時|今天|重抓|更新|recent|lately|latest|today", re.I)
+
+
 def retrieve(state: GraphState) -> GraphState:
-    # ponytail: 關鍵字啟發式判斷時效性，要更準再交給 extract_filters 的 LLM 判斷
-    recent = re.search(r"最近|近期|這幾天|本週|近日|最新|recent|lately|latest", state["question"], re.I)
+    recent = _RECENT_RE.search(state["question"])
     query_vec = embeddings.embed_query(state["question"])
     docs = similarity_search(
         query_vec, company=state.get("company"), doc_type=state.get("doc_type"),
@@ -152,7 +156,8 @@ def auto_fetch(state: GraphState) -> GraphState:
             calls = [lambda: fetch_mops(company), lambda: fetch_news(company)]
         else:
             calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]
-        if state["retrieved"]:  # 已有財報資料，只缺新聞
+        # 已有該公司財報才只補新聞；只有新聞時財報照抓（原本檢查整個 retrieved，害外國發行人的財報永遠沒抓）
+        if any(d["doc_type"] == "financial_report" for d in state["retrieved"]):
             calls = calls[-1:]
     # ponytail: 市場總覽新聞一律補掃，source_exists 會跳過已入庫的，重複觸發便宜
     calls.append(lambda: fetch_market_news(3))
@@ -168,9 +173,16 @@ def auto_fetch(state: GraphState) -> GraphState:
 
 def route_after_retrieve(state: GraphState) -> str:
     if state["retrieved"]:
-        if (state.get("company") and not state.get("fetched")
-                and not any(d["doc_type"] == "news" for d in state["retrieved"])):
-            return "auto_fetch"  # 有財報但沒新聞：補抓新聞給趨勢段
+        if state.get("company") and not state.get("fetched"):
+            news_dates = [d["published_at"] for d in state["retrieved"]
+                          if d["doc_type"] == "news" and d.get("published_at")]
+            if not news_dates:
+                return "auto_fetch"  # 有財報但沒新聞：補抓新聞給趨勢段
+            # ponytail: 最新新聞超過 2 天視為過期重抓一次（財報日當天舊新聞會誤導），source_exists 去重讓重抓便宜；
+            # 使用者明講要最新/即時資料時門檻收緊到 0 天（新聞必須是今天的，否則馬上重抓）
+            stale_days = 0 if _RECENT_RE.search(state["question"]) else 2
+            if max(news_dates) < dt.date.today() - dt.timedelta(days=stale_days):
+                return "auto_fetch"
         return "generate"
     if not state.get("fetched"):
         return "auto_fetch"  # 沒指名公司也掃市場新聞，別直接舉手投降
