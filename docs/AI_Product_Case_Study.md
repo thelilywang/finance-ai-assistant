@@ -778,15 +778,15 @@ flowchart TD
     U[User question] --> RW[rewrite_question]
     RW --> EF[extract_filters]
     EF --> RT[retrieve]
-    RT -->|hits, company + news present| GEN[generate]
-    RT -->|company hits but no news, or empty| AF[auto_fetch]
+    RT -->|"hits, news fresh enough"| GEN[generate]
+    RT -->|"empty, news missing, or news stale (>2d; must be today's when asked for 'latest')"| AF[auto_fetch]
     AF --> RT
     RT -->|still empty after fetch| NR[no_result]
     GEN --> A[Answer + sources + decision card]
     NR --> B["Honest 'no data' reply + market snapshot"]
 
     subgraph Data pipeline
-        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney sweep] --> UP[src/update.py]
+        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
         UP --> ING[src/ingest.py: chunk + embed]
         ING --> PG[(pgvector: doc_chunks)]
     end
@@ -1854,15 +1854,15 @@ flowchart TD
     U[使用者提問] --> RW[rewrite_question]
     RW --> EF[extract_filters]
     EF --> RT[retrieve]
-    RT -->|有結果,公司+新聞都有| GEN[generate]
-    RT -->|有公司資料但無新聞,或是空結果| AF[auto_fetch]
+    RT -->|"有結果且新聞夠新"| GEN[generate]
+    RT -->|"全空、缺新聞或新聞過期（超過 2 天；問「最新」時須為今日）"| AF[auto_fetch]
     AF --> RT
     RT -->|抓取後仍是空的| NR[no_result]
     GEN --> A[回答 + 來源 + 決策卡]
     NR --> B["誠實的「查無資料」回覆 + 市場快照"]
 
     subgraph 資料 pipeline
-        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney 掃描] --> UP[src/update.py]
+        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
         UP --> ING[src/ingest.py: 切分 + embedding]
         ING --> PG[(pgvector: doc_chunks)]
     end
