@@ -4,3 +4,4 @@ __pycache__/
 data/
 .files/
 .chainlit/translations/
+.claude/scheduled_tasks.lock
