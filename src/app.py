@@ -227,15 +227,45 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
     now = dt.datetime.now()
     report = (
         f"# {question}\n\n{body}\n\n---\n"
-        f"**{t(content_lang, 'sources_label')}:**\n{source_list}\n\n"
+        # 標題與清單間留空行，markdown 才會把來源渲染成逐項換行的編號清單（PDF 用）
+        f"**{t(content_lang, 'sources_label')}:**\n\n{source_list}\n\n"
         f"{t(content_lang, 'report_generated_at')}: {now:%Y-%m-%d %H:%M:%S}\n"
     )
-    msg.elements = [cl.File(
-        name=f"analysis-{now:%Y%m%d-%H%M%S}.md",
-        content=report.encode("utf-8"),
-        mime="text/markdown",
-        display="inline",
-    )]
+
+    from src.charts import eps_chart, price_chart, report_pdf
+
+    # 真資料圖表：同一份 figures 供互動顯示與 PDF 嵌入，生成失敗不影響文字回答
+    figures = []
+    company = final_state.get("company")
+    if company:
+        for name, fn in (("price", price_chart), ("eps", eps_chart)):
+            try:
+                fig = fn(company)
+                if fig is not None:
+                    figures.append((name, fig))
+            except Exception as e:  # noqa: BLE001
+                print(f"[app] {name} 圖表生成失敗：{e}")
+
+    msg.elements = [
+        cl.Plotly(name=name, figure=fig, display="inline") for name, fig in figures
+    ]
+
+    # 優先附 PDF（含圖表），生成失敗退回 .md 下載
+    pdf = report_pdf(report, [fig for _, fig in figures])
+    if pdf:
+        msg.elements.append(cl.File(
+            name=f"analysis-{now:%Y%m%d-%H%M%S}.pdf",
+            content=pdf,
+            mime="application/pdf",
+            display="inline",
+        ))
+    else:
+        msg.elements.append(cl.File(
+            name=f"analysis-{now:%Y%m%d-%H%M%S}.md",
+            content=report.encode("utf-8"),
+            mime="text/markdown",
+            display="inline",
+        ))
 
 
 @cl.on_message
