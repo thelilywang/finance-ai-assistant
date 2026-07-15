@@ -92,8 +92,10 @@ def extract_filters(state: GraphState) -> GraphState:
     except (json.JSONDecodeError, AttributeError):
         parsed = {"company": None, "doc_type": None}
 
-    def _clean(v):  # 模型偶爾回字串 "null"，一律正規化成 None
-        return None if not v or (isinstance(v, str) and v.strip().lower() == "null") else v
+    def _clean(v):  # 模型偶爾回字串 "null" 或多值 list（如問兩間公司），一律正規化成 None
+        if not v or not isinstance(v, str):
+            return None
+        return None if v.strip().lower() == "null" else v
 
     company = _clean(parsed.get("company"))
     if not company:
