@@ -5,3 +5,5 @@ data/
 .files/
 .chainlit/translations/
 .claude/scheduled_tasks.lock
+PROJECT_OVERVIEW.md
+CODE_WALKTHROUGH.md
