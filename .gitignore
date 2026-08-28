@@ -7,3 +7,4 @@ data/
 .claude/scheduled_tasks.lock
 PROJECT_OVERVIEW.md
 CODE_WALKTHROUGH.md
+docs/PRODUCT_DESIGN_NOTES.md
