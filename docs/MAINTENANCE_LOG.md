@@ -12,16 +12,17 @@
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
-| `requirements.txt` chainlit 版本落差 | `chainlit>=1.1.0` → `chainlit>=2.11.0,<3.0.0`（實際安裝版本 2.11.1，1.x→2.x 有 breaking changes，舊約束會讓新環境裝到不相容版本） | 本次 |
+| `requirements.txt` chainlit 版本落差 | `chainlit>=1.1.0` → `chainlit>=2.11.0,<3.0.0`（實際安裝版本 2.11.1，1.x→2.x 有 breaking changes，舊約束會讓新環境裝到不相容版本） | `66a5400` |
+| LLM retry/backoff | `src/graph.py:41-44` 的 `llm` 定義加上 `.with_retry(stop_after_attempt=3)`；`RunnableRetry` 仍保有 `.invoke()`，`rewrite_question`/`extract_filters`/`generate` 三處呼叫端不用改。Ollama 冷啟動/短暫逾時時會重試，不再直接中斷整個 graph 節點。 | 本次 |
 
 ### 待辦（依 CP 值排序）
 
 1. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
-   目前為 TODO。難度：小（0.5-1 天）。影響第一印象，優先度僅次於已修復項。
+   目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 
-2. **LLM retry/backoff**（`src/graph.py:72`, `:88`, `:248`）
-   三處 `llm.invoke()` 皆為裸呼叫，無 try/except，Ollama 逾時/OOM 會直接中斷整個 graph 執行。
-   難度：小（0.5 天）— `llm.with_retry(stop_after_attempt=3)` 包一層即可，非自建重試邏輯。
+### 過程中發現、非本次範圍的既有問題
+
+- `tests/test_route.py` 目前在 main 上就是失敗的（與本次改動無關，`git stash` 驗證過改動前後皆失敗）：`assert route_after_retrieve(...) == "generate"` 對不上，需要另外排查 `route_after_retrieve` 邏輯或測試案例本身是否過期。未修，留待下次處理測試覆蓋時一併檢查。
 
 ### 保持現狀（已知，僅口頭說明，不列入近期修復）
 
