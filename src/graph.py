@@ -13,16 +13,17 @@ Graph 結構：
 from __future__ import annotations
 
 import datetime as dt
-import json
 import re
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.graph import StateGraph, END
+from pydantic import BaseModel, field_validator
 
 from . import config
 from .i18n import t
 from .market import get_market_snapshot
+from .tickers import is_tw_ticker, normalize_ticker
 from .vectorstore import similarity_search
 
 
@@ -38,10 +39,11 @@ class GraphState(TypedDict):
 
 
 # reasoning=False 關閉 qwen3.5 的 <think> 推理段，避免污染 JSON 解析與串流輸出
-# with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
-llm = ChatOllama(
+_base_llm = ChatOllama(
     model=config.LLM_MODEL, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False
-).with_retry(stop_after_attempt=3)
+)
+# with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
+llm = _base_llm.with_retry(stop_after_attempt=3)
 embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
 
 
@@ -74,39 +76,44 @@ def rewrite_question(state: GraphState) -> GraphState:
     return {**state, "question": rewritten or state["question"]}
 
 
+class ExtractedFilters(BaseModel):
+    status: Literal["ok", "error"] = "ok"
+    error_message: str | None = None
+    company: str | None = None
+    doc_type: Literal["financial_report", "news"] | None = None
+
+    @field_validator("company")
+    @classmethod
+    def _normalize_company(cls, v: str | None) -> str | None:
+        return normalize_ticker(v) if v else None
+
+
+# structured output 要包在 base llm 上：RunnableRetry（llm）沒有 with_structured_output 方法
+_filter_extractor = _base_llm.with_structured_output(ExtractedFilters).with_retry(stop_after_attempt=3)
+
+
 def extract_filters(state: GraphState) -> GraphState:
     """從問題中抽取公司代號 / 文件類型，抽不出來就設為 None（不過濾）。"""
     prompt = f"""你是財經助理的前處理模組。請從使用者問題中判斷：
-1. company: 台股代號（4 碼數字，如 "2330"）或美股 ticker（1-5 個大寫英文字母，如 "AAPL"、"TSLA"），
-   沒有明確提到就填 null；公司名稱要轉成代號/ticker（如 台積電→"2330"、蘋果→"AAPL"）
-2. doc_type: "financial_report"（財報相關）或 "news"（新聞相關），不確定就填 null
-
-只回傳 JSON，不要有其他文字，格式：
-{{"company": "2330" 或 "AAPL" 或 null, "doc_type": "financial_report" 或 "news" 或 null}}
+1. company: 台股代號（4-6 碼數字，如 "2330"）或美股 ticker（1-5 個大寫英文字母，如 "AAPL"），
+   沒有明確提到就設為 null；公司名稱要轉成代號/ticker（如 台積電→"2330"、蘋果→"AAPL"）
+2. doc_type: "financial_report"（財報相關）或 "news"（新聞相關），不確定就設為 null
+3. 若問題同時指名多個不同公司，company 設為 null，status 設為 "error"，
+   error_message 說明偵測到哪些標的、目前僅支援單一標的查詢
+4. 正常情況（含完全抽不到 company 的情況）status 設為 "ok"，error_message 設為 null
 
 使用者問題：{state['question']}
 """
-    resp = llm.invoke(prompt).content.strip()
     try:
-        # 有些模型會包 markdown code block，去掉
-        cleaned = resp.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(cleaned)
-    except (json.JSONDecodeError, AttributeError):
-        parsed = {"company": None, "doc_type": None}
+        parsed = _filter_extractor.invoke(prompt)
+    except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
+        print(f"[extract_filters] 結構化輸出失敗：{e}")
+        return {**state, "company": None, "doc_type": None}
 
-    def _clean(v):  # 模型偶爾回字串 "null" 或多值 list（如問兩間公司），一律正規化成 None
-        if not v or not isinstance(v, str):
-            return None
-        return None if v.strip().lower() == "null" else v
+    if parsed.status == "error":
+        print(f"[extract_filters] {parsed.error_message}")
 
-    company = _clean(parsed.get("company"))
-    if not company:
-        # ponytail: LLM 漏抽時的確定性 fallback；純英文問題可能誤抓一般單字，屆時改成僅在含中文時啟用
-        m = re.search(r"(?<![A-Za-z])[A-Za-z]{1,5}(?![A-Za-z])", state["question"])
-        if m:
-            company = m.group(0).upper()
-
-    return {**state, "company": company, "doc_type": _clean(parsed.get("doc_type"))}
+    return {**state, "company": parsed.company, "doc_type": parsed.doc_type}
 
 
 # ponytail: 關鍵字啟發式判斷時效性，要更準再交給 extract_filters 的 LLM 判斷
@@ -153,7 +160,7 @@ def auto_fetch(state: GraphState) -> GraphState:
     company = state.get("company")
     calls = []
     if company:
-        if company.isdigit() and len(company) == 4:
+        if is_tw_ticker(company):
             calls = [lambda: fetch_mops(company), lambda: fetch_news(company)]
         else:
             calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]

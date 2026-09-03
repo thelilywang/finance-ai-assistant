@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sys
 
+from .tickers import is_tw_ticker
+
 
 def format_snapshot(info: dict) -> str:
     lines = []
@@ -71,8 +73,8 @@ def format_consensus(ticker) -> str:
 
 
 def to_symbol(company: str) -> str:
-    """台股 4 碼代號加 .TW，其他視為美股 ticker。"""
-    return f"{company}.TW" if company.isdigit() and len(company) == 4 else company.upper()
+    """台股代號加 .TW，其他視為美股 ticker。"""
+    return f"{company}.TW" if is_tw_ticker(company) else company.upper()
 
 
 def get_market_snapshot(company: str) -> str | None:

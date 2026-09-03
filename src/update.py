@@ -21,6 +21,7 @@ import trafilatura
 
 from . import config
 from .ingest import ingest_file, ingest_text
+from .tickers import is_tw_ticker
 
 TIMEOUT = 30
 
@@ -164,8 +165,8 @@ def fetch_mops(co_id: str) -> None:
 
 
 def fetch_news(company: str, limit: int = 10) -> None:
-    """從 Yahoo Finance RSS 抓最新新聞並匯入。台股 4 碼代號自動加 .TW。"""
-    symbol = f"{company}.TW" if company.isdigit() and len(company) == 4 else company
+    """從 Yahoo Finance RSS 抓最新新聞並匯入。台股代號自動加 .TW。"""
+    symbol = f"{company}.TW" if is_tw_ticker(company) else company
     url = (
         "https://feeds.finance.yahoo.com/rss/2.0/headline"
         f"?s={symbol}&region=US&lang=en-US"
