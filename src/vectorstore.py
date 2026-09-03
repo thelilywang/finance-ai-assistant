@@ -7,14 +7,33 @@ from __future__ import annotations
 
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg_pool import ConnectionPool
 
 from . import config
 
 
-def get_connection() -> psycopg.Connection:
-    conn = psycopg.connect(config.DATABASE_URL, autocommit=True)
+def _configure(conn: psycopg.Connection) -> None:
     register_vector(conn)
-    return conn
+
+
+# open=False：延遲到第一次真的要用連線才連 DB，避免 import 這個模組就連線
+# timeout=2：DB 連不上時 2 秒內放棄（原本 psycopg.connect() 是毫秒級失敗，
+# ConnectionPool 預設 timeout=30 秒會讓「DB 沒開」的降級路徑變得很慢；
+# 正常連線本該在毫秒等級完成，2 秒內連不上代表 DB 真的掛了，拖久也救不回來）
+pool = ConnectionPool(
+    config.DATABASE_URL,
+    min_size=1, max_size=5,
+    kwargs={"autocommit": True},
+    configure=_configure,
+    open=False,
+    timeout=2,
+)
+
+
+def get_connection():
+    """回傳池化連線的 context manager；用法與原本 `with get_connection() as conn:` 相同。"""
+    pool.open()  # 已開過是 no-op
+    return pool.connection()
 
 
 def delete_by_source(source: str) -> None:
