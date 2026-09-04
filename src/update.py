@@ -110,6 +110,22 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
     )
 
 
+def _select_report_file(files: list[str]) -> str | None:
+    """從 MOPS 回傳的財報檔名中選出最新月份的中文主文，退而求其次選同月份的英文版。
+
+    檔名格式為 YYYYMM_公司代號_類型.pdf，同月份常見 _AI1（中文合併財報）與
+    _AIA（英文版）兩份；字典序排序 'AIA' > 'AI1'，若用 sorted(files)[-1] 會固定選到
+    英文版，因此改用明確規則優先抓最新月份的中文主文。
+    """
+    if not files:
+        return None
+    files = sorted(set(files))
+    latest_month = files[-1][:6]
+    month_files = [f for f in files if f.startswith(latest_month)]
+    zh_main = [f for f in month_files if f.endswith("_AI1.pdf")]
+    return zh_main[0] if zh_main else month_files[-1]
+
+
 def fetch_mops(co_id: str) -> None:
     """從 MOPS（公開資訊觀測站）抓最新財報 PDF 並匯入。
 
@@ -129,13 +145,16 @@ def fetch_mops(co_id: str) -> None:
             )
             resp.raise_for_status()
             files = re.findall(r"(\d{6}_%s_\w+\.pdf)" % re.escape(co_id), resp.text)
-            if files:
-                filename = sorted(files)[-1]  # 檔名以 YYYYMM 開頭，排序取最新
+            filename = _select_report_file(files)
+            if filename:
                 break
         if not filename:
             print(f"[update] MOPS 查無 {co_id} 的財報檔案。")
             print(MOPS_MANUAL_GUIDE)
             return
+        if not filename.endswith("_AI1.pdf"):
+            # 中文主文缺席才會退而求其次選到這份，主動告警而非靜默接受降級結果
+            print(f"[update] {co_id} 查無中文主文，改抓 {filename}。")
 
         resp = requests.post(
             endpoint,
