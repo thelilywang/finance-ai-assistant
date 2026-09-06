@@ -15,6 +15,7 @@ import email.utils
 import html as html_lib
 import re
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 
 import requests
 import trafilatura
@@ -24,6 +25,13 @@ from .ingest import ingest_file, ingest_text
 from .tickers import is_tw_ticker
 
 TIMEOUT = 30
+
+
+@dataclass
+class FetchResult:
+    """fetch_mops/fetch_edgar 的結構化回傳值，供程式化呼叫端（如未來的 MCP tool）判斷成敗。"""
+    ok: bool
+    detail: str
 
 # 市場總覽新聞列表頁：{名稱: (列表 URL, 文章連結 regex, 連結 match -> 正規化文章 URL)}
 MARKET_SOURCES = {
@@ -54,7 +62,7 @@ MOPS_MANUAL_GUIDE = """[update] MOPS 抓取失敗（介面脆弱，隨時可能�
        --doc-type financial_report --date <YYYY-MM-DD>"""
 
 
-def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
+def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
     """從 SEC EDGAR 抓最新一份指定表單（10-K/10-Q），抽純文字後匯入。"""
     headers = {"User-Agent": config.SEC_USER_AGENT}
 
@@ -66,8 +74,9 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
         (v for v in resp.json().values() if v["ticker"].upper() == ticker.upper()), None
     )
     if entry is None:
-        print(f"[update] 找不到 ticker {ticker} 對應的 CIK。")
-        return
+        msg = f"找不到 ticker {ticker} 對應的 CIK。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
     cik = entry["cik_str"]
 
     resp = requests.get(
@@ -82,8 +91,9 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
             form, idx = f, recent["form"].index(f)
             break
     else:
-        print(f"[update] {ticker} 近期沒有 {form}/10-K/424B4/S-1 申報。")
-        return
+        msg = f"{ticker} 近期沒有 {form}/10-K/424B4/S-1 申報。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
 
     accession = recent["accessionNumber"][idx]
     filing_date = recent["filingDate"][idx]
@@ -108,6 +118,7 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> None:
         doc_type="financial_report",
         published_at=filing_date,
     )
+    return FetchResult(True, f"已匯入 {ticker.upper()} {form}（{filing_date}）")
 
 
 def _select_report_file(files: list[str]) -> str | None:
@@ -126,7 +137,7 @@ def _select_report_file(files: list[str]) -> str | None:
     return zh_main[0] if zh_main else month_files[-1]
 
 
-def fetch_mops(co_id: str) -> None:
+def fetch_mops(co_id: str) -> FetchResult:
     """從 MOPS（公開資訊觀測站）抓最新財報 PDF 並匯入。
 
     # ponytail: MOPS 無官方 API，此爬取流程隨時可能失效；掛掉時印手動下載指引，不 raise。
@@ -149,9 +160,10 @@ def fetch_mops(co_id: str) -> None:
             if filename:
                 break
         if not filename:
-            print(f"[update] MOPS 查無 {co_id} 的財報檔案。")
+            msg = f"MOPS 查無 {co_id} 的財報檔案。"
+            print(f"[update] {msg}")
             print(MOPS_MANUAL_GUIDE)
-            return
+            return FetchResult(False, msg)
         if not filename.endswith("_AI1.pdf"):
             # 中文主文缺席才會退而求其次選到這份，主動告警而非靜默接受降級結果
             print(f"[update] {co_id} 查無中文主文，改抓 {filename}。")
@@ -164,9 +176,10 @@ def fetch_mops(co_id: str) -> None:
         resp.raise_for_status()
         m = re.search(r"href=['\"](/pdf/[^'\"]+)['\"]", resp.text)
         if not m:
-            print(f"[update] MOPS 第二步找不到 PDF 連結（{filename}）。")
+            msg = f"MOPS 第二步找不到 PDF 連結（{filename}）。"
+            print(f"[update] {msg}")
             print(MOPS_MANUAL_GUIDE)
-            return
+            return FetchResult(False, msg)
 
         resp = requests.get(f"https://doc.twse.com.tw{m.group(1)}", timeout=TIMEOUT)
         resp.raise_for_status()
@@ -178,9 +191,11 @@ def fetch_mops(co_id: str) -> None:
         # 檔名開頭為西元 YYYYMM（如 202601_2330_AI1.pdf），推出發布日期
         published_at = f"{filename[:4]}-{filename[4:6]}-01"
         ingest_file(path, company=co_id, doc_type="financial_report", published_at=published_at)
+        return FetchResult(True, f"已匯入 {co_id} 財報（{filename}）")
     except Exception as e:  # noqa: BLE001
         print(f"[update] MOPS 抓取異常：{e}")
         print(MOPS_MANUAL_GUIDE)
+        return FetchResult(False, f"MOPS 抓取異常：{e}")
 
 
 def fetch_news(company: str, limit: int = 10) -> None:

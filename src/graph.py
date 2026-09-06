@@ -147,15 +147,17 @@ def retrieve(state: GraphState) -> GraphState:
     return {**state, "retrieved": docs}
 
 
-def auto_fetch(state: GraphState) -> GraphState:
-    """資料不足時自動補抓：有指名公司抓其財報+新聞，一律加掃市場總覽新聞。單一來源失敗不中斷，抓完標記 fetched。"""
+def fetch_missing_data(company: str | None, has_report: bool) -> None:
+    """company 為 None 時只補市場總覽新聞；has_report=True 時只補新聞不重抓財報。
+
+    不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。單一來源失敗不中斷。
+    """
     try:
         from .update import fetch_edgar, fetch_mops, fetch_news, fetch_market_news  # 延遲 import，避免循環依賴
-    except ImportError as e:  # 環境缺套件時降級成查無資料，不炸整個對話
+    except ImportError as e:  # 環境缺套件時降級成不抓，不炸整個對話
         print(f"[auto_fetch] 匯入失敗（環境缺套件？）：{e}")
-        return {**state, "fetched": True}
+        return
 
-    company = state.get("company")
     calls = []
     if company:
         if is_tw_ticker(company):
@@ -163,7 +165,7 @@ def auto_fetch(state: GraphState) -> GraphState:
         else:
             calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]
         # 已有該公司財報才只補新聞；只有新聞時財報照抓（原本檢查整個 retrieved，害外國發行人的財報永遠沒抓）
-        if any(d["doc_type"] == "financial_report" for d in state["retrieved"]):
+        if has_report:
             calls = calls[-1:]
     # ponytail: 市場總覽新聞一律補掃，source_exists 會跳過已入庫的，重複觸發便宜
     calls.append(lambda: fetch_market_news(3))
@@ -174,6 +176,12 @@ def auto_fetch(state: GraphState) -> GraphState:
         except Exception as e:  # noqa: BLE001  單一來源失敗不中斷
             print(f"[auto_fetch] 抓取失敗：{e}")
 
+
+def auto_fetch(state: GraphState) -> GraphState:
+    """資料不足時自動補抓：有指名公司抓其財報+新聞，一律加掃市場總覽新聞。抓完標記 fetched（保證只重試一次）。"""
+    company = state.get("company")
+    has_report = any(d["doc_type"] == "financial_report" for d in state["retrieved"])
+    fetch_missing_data(company, has_report)
     return {**state, "fetched": True}
 
 

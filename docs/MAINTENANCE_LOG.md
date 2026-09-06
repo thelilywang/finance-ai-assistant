@@ -10,6 +10,8 @@
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步改 `retrieve`/`auto_fetch`/`route_after_retrieve`/`generate` 的 context 組裝邏輯（依公司分組），影響面較大，刻意留待下一階段獨立處理。
+3. **MCP server 對外開放核心工具**（`src/update.py`、`src/graph.py`）
+   評估後決定：Chainlit UI 維持現有的 in-process 函式呼叫不變，另外新增 MCP server 作為第二個入口，讓 Claude Desktop 等外部 MCP client 也能呼叫同一套抓取/檢索邏輯（兩個入口共用同一份核心函式，不是重寫兩份）。前置重構已完成（見下方本日章節），下一步是把 `similarity_search`/`retrieve` 的檢索路徑也整理成可獨立呼叫的純函式，再寫 `src/mcp_server.py`（`FastMCP` + `@mcp.tool()`）。
 
 ## 保持現狀（已知，僅口頭說明，不列入近期修復）
 
@@ -89,7 +91,26 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
-| Rewrite regex bypass 誤判追問 | 拿掉 `graph.py` 裡的 regex bypass，`rewrite_question` 在有歷史時一律呼叫 LLM 改寫。rewrite prompt 本身已寫明「若新問題本身已經獨立完整，原樣輸出即可」，所以完整問題不會被改壞，只是多一次 LLM 呼叫確認。代價：每輪有歷史的對話都固定多跑一次 LLM（現有 `llm.with_retry()` 已處理偶發逾時，非本次新增風險）。 | 待補 |
+| Rewrite regex bypass 誤判追問 | 拿掉 `graph.py` 裡的 regex bypass，`rewrite_question` 在有歷史時一律呼叫 LLM 改寫。rewrite prompt 本身已寫明「若新問題本身已經獨立完整，原樣輸出即可」，所以完整問題不會被改壞，只是多一次 LLM 呼叫確認。代價：每輪有歷史的對話都固定多跑一次 LLM（現有 `llm.with_retry()` 已處理偶發逾時，非本次新增風險）。 | `f2ff695` |
+
+---
+
+## 2026-09-07　抓取邏輯抽離 GraphState，為 MCP 對外開放鋪路
+
+### 背景
+
+評估將股價/財報抓取與 RAG 檢索包裝成 MCP tool、讓 Claude Desktop 等外部 client 可直接呼叫。確認架構方向：Chainlit UI 維持原本的 in-process 函式呼叫不動，MCP server 是新增的獨立入口，兩者共用同一份核心邏輯函式，而非各自維護一份。此架構的前提是核心抓取函式不能耦合 LangGraph 的 `GraphState`，也需要有結構化的成功/失敗回傳值供程式判斷（原本只用 `print()` 給人看，呼叫端無法得知結果）。
+
+### 修復
+
+| 項目 | 修復內容 | commit |
+|---|---|---|
+| `fetch_mops`/`fetch_edgar` 缺乏結構化回傳值 | `src/update.py` 新增 `FetchResult(ok, detail)` dataclass，兩個函式所有的成功/失敗出口都改成回傳 `FetchResult`，原本的 `print()` 訊息全部保留（CLI 行為不變），只是額外把同樣資訊包進回傳值供程式化呼叫端使用。 | 待補 |
+| `auto_fetch` 耦合 `GraphState` | `src/graph.py` 抽出 `fetch_missing_data(company, has_report)` 純函式，把「決定要抓什麼、執行抓取」的邏輯搬出 `auto_fetch` 節點；`auto_fetch(state)` 節點瘦身成從 `state` 取值、呼叫這個純函式、標記 `fetched=True`。行為完全不變（單一來源失敗不中斷、市場新聞一律補掃等既有邏輯原樣搬移），但 `fetch_missing_data` 現在可被未來的 MCP tool handler 直接呼叫，不需要組一份假的 `GraphState`。 | 待補 |
+
+### 未變動範圍
+
+檢索路徑（`retrieve`/`route_after_retrieve`/`extract_filters`/`generate`）這次刻意不動，仍耦合 `GraphState`；留到「多標的查詢支援」那一階段一併處理，避免這次改動範圍擴散。MCP server 本身（`src/mcp_server.py`）尚未建立。
 
 ---
 
