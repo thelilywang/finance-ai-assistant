@@ -10,8 +10,6 @@
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步改 `retrieve`/`auto_fetch`/`route_after_retrieve`/`generate` 的 context 組裝邏輯（依公司分組），影響面較大，刻意留待下一階段獨立處理。
-3. **MCP server 對外開放核心工具**（`src/update.py`、`src/graph.py`）
-   評估後決定：Chainlit UI 維持現有的 in-process 函式呼叫不變，另外新增 MCP server 作為第二個入口，讓 Claude Desktop 等外部 MCP client 也能呼叫同一套抓取/檢索邏輯（兩個入口共用同一份核心函式，不是重寫兩份）。前置重構已完成（見下方本日章節），下一步是把 `similarity_search`/`retrieve` 的檢索路徑也整理成可獨立呼叫的純函式，再寫 `src/mcp_server.py`（`FastMCP` + `@mcp.tool()`）。
 
 ## 保持現狀（已知，僅口頭說明，不列入近期修復）
 
@@ -158,6 +156,30 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 - 爬蟲層加入 rate-limit 防護、失敗降級（回傳資料庫中最接近當下的舊資料並標註時間戳）。
 
 **暫不採用**：目前抓取皆為同步 `requests`，單次呼叫數秒內完成，非長跑背景任務；MOPS 已評估過不需要 Playwright 化（結構性限制，見「保持現狀」區塊）；單人本地 app 沒有遇過真實的 rate-limit 或高併發問題。Task Queue/Proxy Pool/雙軌爬蟲屬於解決尚未出現問題的預先架構，先記錄方向，待真的換抓取引擎或遇到穩定性問題時再評估。
+
+---
+
+## 2026-09-06　新增 MCP server，開放核心工具給外部 client
+
+### 背景
+
+評估將股價/財報抓取與 RAG 檢索包裝成 MCP tool，讓 Claude Desktop 等外部 MCP client 也能使用同一套邏輯。確認架構：Chainlit UI 維持現有的 in-process 函式呼叫不變，MCP server 是新增的獨立入口，兩者共用同一份核心函式（`fetch_missing_data`/`retrieve_context`/`needs_refetch`，見前兩節的重構）。
+
+`query_market_context` 的 tool 拆法在方案 A（單一門面 tool，內部自動判斷+補抓）與方案 B（拆成 `query_market_context` 純查詢 + `fetch_latest_financial_data` 主動補抓兩個 tool，交給 LLM client 自行接力呼叫）之間，選擇方案 A：確定性優先於擴充性，避免 MCP 這條路徑的資料新鮮度弱於 Chainlit（B 方案的接力呼叫是否發生取決於呼叫端 LLM 的推理品質，非確定性保證）。
+
+### 新增
+
+| 項目 | 內容 | commit |
+|---|---|---|
+| `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次）。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | 待補 |
+
+### 驗證
+
+實際啟動 Ollama + pgvector（透過現有 docker-compose 服務），呼叫 `get_stock_data("2330")` 與 `query_market_context("台積電最新財報營收如何？", "2330")` 端到端測試：前者正確觸發財報/新聞抓取並回傳行情快照；後者正確判斷需要補抓、觸發後重新檢索到財報 PDF 相關內容，`source_exists` 去重也如預期跳過已入庫項目。
+
+### 未變動範圍
+
+`get_stock_data` 目前固定以 `has_report=False` 呼叫 `fetch_missing_data`（一律嘗試抓財報+新聞），未做「已存在財報只補新聞」的判斷，因為 MCP tool 呼叫當下沒有現成的檢索結果可供判斷；`query_market_context` 沒有把「完全查無資料」與「查得到但需要重抓」的旗標往上暴露給 client，統一以文字說明呈現。這些是刻意先求可用的最小版本，非遺漏。
 
 ---
 

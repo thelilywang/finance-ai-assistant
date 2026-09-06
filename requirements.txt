@@ -18,3 +18,4 @@ yfinance
 plotly
 markdown
 kaleido
+mcp>=1.28.0
