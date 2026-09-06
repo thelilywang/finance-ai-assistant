@@ -194,18 +194,29 @@ def auto_fetch(state: GraphState) -> GraphState:
     return {**state, "fetched": True}
 
 
+def needs_refetch(docs: list[dict], company: str | None, question: str) -> bool:
+    """已有指名公司的檢索結果時，判斷是否需要補抓：沒新聞，或最新新聞已過期。
+
+    不處理「完全查無資料」的情況，那由呼叫端另外判斷（見 route_after_retrieve）。
+    不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
+    """
+    if not company:
+        return False
+    news_dates = [d["published_at"] for d in docs if d["doc_type"] == "news" and d.get("published_at")]
+    if not news_dates:
+        return True  # 有財報但沒新聞：補抓新聞給趨勢段
+    # ponytail: 最新新聞超過 2 天視為過期重抓一次（財報日當天舊新聞會誤導），source_exists 去重讓重抓便宜；
+    # 使用者明講要最新/即時資料時門檻收緊到 0 天（新聞必須是今天的，否則馬上重抓）
+    stale_days = 0 if _RECENT_RE.search(question) else 2
+    return max(news_dates) < dt.date.today() - dt.timedelta(days=stale_days)
+
+
 def route_after_retrieve(state: GraphState) -> str:
     if state["retrieved"]:
-        if state.get("company") and not state.get("fetched"):
-            news_dates = [d["published_at"] for d in state["retrieved"]
-                          if d["doc_type"] == "news" and d.get("published_at")]
-            if not news_dates:
-                return "auto_fetch"  # 有財報但沒新聞：補抓新聞給趨勢段
-            # ponytail: 最新新聞超過 2 天視為過期重抓一次（財報日當天舊新聞會誤導），source_exists 去重讓重抓便宜；
-            # 使用者明講要最新/即時資料時門檻收緊到 0 天（新聞必須是今天的，否則馬上重抓）
-            stale_days = 0 if _RECENT_RE.search(state["question"]) else 2
-            if max(news_dates) < dt.date.today() - dt.timedelta(days=stale_days):
-                return "auto_fetch"
+        if state.get("company") and not state.get("fetched") and needs_refetch(
+            state["retrieved"], state["company"], state["question"]
+        ):
+            return "auto_fetch"
         return "generate"
     if not state.get("fetched"):
         return "auto_fetch"  # 沒指名公司也掃市場新聞，別直接舉手投降

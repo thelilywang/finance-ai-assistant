@@ -7,12 +7,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.graph import route_after_retrieve
+from src.graph import needs_refetch, route_after_retrieve
 
 report = {"doc_type": "financial_report"}
 news = {"doc_type": "news", "published_at": dt.date.today()}  # 今天的新聞，不算過期
 stale_news = {"doc_type": "news", "published_at": dt.date(2000, 1, 1)}
 base = {"question": "近況如何？"}  # route_after_retrieve 會用 question 判斷是否要求「最新」
+
+# needs_refetch 獨立斷言
+assert needs_refetch([report, news], "AAPL", "近況如何？") is False
+assert needs_refetch([report], "AAPL", "近況如何？") is True  # 有財報沒新聞
+assert needs_refetch([report, stale_news], "AAPL", "近況如何？") is True  # 新聞過舊
+assert needs_refetch([report, stale_news], "AAPL", "最新消息？") is True  # 要求最新，門檻收緊
+assert needs_refetch([report], None, "近況如何？") is False  # 沒指名公司不判斷
 
 # 有新聞在結果裡（且夠新）→ 直接 generate
 assert route_after_retrieve({**base, "retrieved": [report, news], "company": "AAPL", "fetched": False}) == "generate"

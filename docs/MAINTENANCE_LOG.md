@@ -132,6 +132,35 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 ---
 
+## 2026-09-07　抽出 needs_refetch，確定 MCP tool 拆法
+
+### 背景
+
+規劃 MCP tool `query_market_context` 時討論了是否要在其內部自動判斷資料時效性並觸發補抓：
+- **方案 A（單一門面 tool）**：`query_market_context` 內部自動判斷+補抓，一次呼叫保證拿到盡量更新過的結果，行為與 Chainlit 現有的 `route_after_retrieve` 對齊，不依賴外部 LLM client 的推理品質。
+- **方案 B（拆成兩個 tool）**：`query_market_context`（純查詢）+ `fetch_latest_financial_data`（主動補抓），靠 tool description 引導 LLM client 自行接力呼叫，換取未來疊加更多細粒度 tool 的擴充性，但不保證每次都會被正確接力呼叫。
+
+**決定採方案 A**：確定性優先於擴充性——這條 MCP 路徑若比 Chainlit 的資料新鮮度弱一截，會是使用者體驗上的不一致，且目前只有兩個候選 tool，B 的「擴充性優勢」尚未有實際場景兌現。
+
+為讓判斷邏輯能被 MCP handler 與既有的 `route_after_retrieve` 共用，抽出 `needs_refetch` 純函式。
+
+### 修復
+
+| 項目 | 修復內容 | commit |
+|---|---|---|
+| `route_after_retrieve` 過期判斷邏輯無法重用 | `src/graph.py` 抽出 `needs_refetch(docs, company, question)`：有指名公司但沒新聞、或新聞已過期（依問題是否要求「最新」收緊門檻）時回傳 `True`。`route_after_retrieve` 呼叫它取代原本內聯的判斷，行為完全不變。`tests/test_route.py` 補上獨立斷言。 | 待補 |
+
+### 未來爬蟲化的架構評估（記錄討論，暫不實作）
+
+若未來資料抓取從現行的同步 API/套件（`requests`/`yfinance`）全面轉向動態或高併發爬蟲，曾討論的演進方向：
+- 拆出領域服務層（如 `MarketContextService`），把「檢索→判斷時效→調度抓取→重新檢索」的流程集中管理，MCP tool 介面維持不變。
+- 依資料特性分「即時輕量」（`httpx.AsyncClient`，秒級同步等待）與「重量級背景」（Task Queue，如 Celery/Redis，超時先回傳現有摘要並提示背景更新中）兩種抓取管道。
+- 爬蟲層加入 rate-limit 防護、失敗降級（回傳資料庫中最接近當下的舊資料並標註時間戳）。
+
+**暫不採用**：目前抓取皆為同步 `requests`，單次呼叫數秒內完成，非長跑背景任務；MOPS 已評估過不需要 Playwright 化（結構性限制，見「保持現狀」區塊）；單人本地 app 沒有遇過真實的 rate-limit 或高併發問題。Task Queue/Proxy Pool/雙軌爬蟲屬於解決尚未出現問題的預先架構，先記錄方向，待真的換抓取引擎或遇到穩定性問題時再評估。
+
+---
+
 ## 待補紀錄
 
 後續每次修復或有新決策時，於本檔案新增一節（日期 + 標題），保留「做了什麼／為什麼／取捨」，不需重複貼完整程式碼片段，指向檔案路徑 + 行號即可。新完成的修復項目同時要移出「目前待辦」或「保持現狀」區塊。
