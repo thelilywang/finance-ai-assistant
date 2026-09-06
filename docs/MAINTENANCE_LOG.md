@@ -105,8 +105,8 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
-| `fetch_mops`/`fetch_edgar` 缺乏結構化回傳值 | `src/update.py` 新增 `FetchResult(ok, detail)` dataclass，兩個函式所有的成功/失敗出口都改成回傳 `FetchResult`，原本的 `print()` 訊息全部保留（CLI 行為不變），只是額外把同樣資訊包進回傳值供程式化呼叫端使用。 | 待補 |
-| `auto_fetch` 耦合 `GraphState` | `src/graph.py` 抽出 `fetch_missing_data(company, has_report)` 純函式，把「決定要抓什麼、執行抓取」的邏輯搬出 `auto_fetch` 節點；`auto_fetch(state)` 節點瘦身成從 `state` 取值、呼叫這個純函式、標記 `fetched=True`。行為完全不變（單一來源失敗不中斷、市場新聞一律補掃等既有邏輯原樣搬移），但 `fetch_missing_data` 現在可被未來的 MCP tool handler 直接呼叫，不需要組一份假的 `GraphState`。 | 待補 |
+| `fetch_mops`/`fetch_edgar` 缺乏結構化回傳值 | `src/update.py` 新增 `FetchResult(ok, detail)` dataclass，兩個函式所有的成功/失敗出口都改成回傳 `FetchResult`，原本的 `print()` 訊息全部保留（CLI 行為不變），只是額外把同樣資訊包進回傳值供程式化呼叫端使用。 | `b2f796c` |
+| `auto_fetch` 耦合 `GraphState` | `src/graph.py` 抽出 `fetch_missing_data(company, has_report)` 純函式，把「決定要抓什麼、執行抓取」的邏輯搬出 `auto_fetch` 節點；`auto_fetch(state)` 節點瘦身成從 `state` 取值、呼叫這個純函式、標記 `fetched=True`。行為完全不變（單一來源失敗不中斷、市場新聞一律補掃等既有邏輯原樣搬移），但 `fetch_missing_data` 現在可被未來的 MCP tool handler 直接呼叫，不需要組一份假的 `GraphState`。 | `b2f796c` |
 
 ### 未變動範圍
 
