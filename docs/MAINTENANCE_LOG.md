@@ -12,6 +12,8 @@
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步改 `retrieve`/`auto_fetch`/`route_after_retrieve`/`generate` 的 context 組裝邏輯（依公司分組），影響面較大，刻意留待下一階段獨立處理。
 3. **MCP tool 的資料判斷粒度較粗**（`src/mcp_server.py`）
    `get_stock_data` 固定一律嘗試抓財報+新聞，沒有像 Chainlit 的 `auto_fetch` 那樣先判斷「已有財報就只補新聞」，因為 MCP tool 單次呼叫當下沒有現成的檢索結果可供判斷；`query_market_context` 也未區分「完全查無資料」與「查得到但已過期重抓」回傳給 client，統一以文字說明呈現。難度：小，皆為在既有函式呼叫點補上判斷條件。
+4. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+   若未來資料抓取從現行的同步 API/套件（`requests`/`yfinance`）全面轉向動態或高併發爬蟲，可行方向：拆出領域服務層集中管理「檢索→判斷時效→調度抓取→重新檢索」流程、依資料特性分「即時輕量」（`httpx.AsyncClient` 同步等待）與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種抓取管道、爬蟲層加入 rate-limit 防護與失敗降級。目前抓取皆為同步 `requests`，單次呼叫數秒內完成，非長跑背景任務，且單人本地 app 未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現問題的預先架構，先記錄方向，待真的更換抓取引擎或遇到穩定性問題時再評估。
 
 ## 保持現狀（已知，僅口頭說明，不列入近期修復）
 
@@ -95,93 +97,27 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 ---
 
-## 2026-09-07　抓取邏輯抽離 GraphState，為 MCP 對外開放鋪路
+## 2026-09-07　抽離 GraphState 並新增 MCP server
 
 ### 背景
 
-評估將股價/財報抓取與 RAG 檢索包裝成 MCP tool、讓 Claude Desktop 等外部 client 可直接呼叫。確認架構方向：Chainlit UI 維持原本的 in-process 函式呼叫不動，MCP server 是新增的獨立入口，兩者共用同一份核心邏輯函式，而非各自維護一份。此架構的前提是核心抓取函式不能耦合 LangGraph 的 `GraphState`，也需要有結構化的成功/失敗回傳值供程式判斷（原本只用 `print()` 給人看，呼叫端無法得知結果）。
-
-### 修復
-
-| 項目 | 修復內容 | commit |
-|---|---|---|
-| `fetch_mops`/`fetch_edgar` 缺乏結構化回傳值 | `src/update.py` 新增 `FetchResult(ok, detail)` dataclass，兩個函式所有的成功/失敗出口都改成回傳 `FetchResult`，原本的 `print()` 訊息全部保留（CLI 行為不變），只是額外把同樣資訊包進回傳值供程式化呼叫端使用。 | `b2f796c` |
-| `auto_fetch` 耦合 `GraphState` | `src/graph.py` 抽出 `fetch_missing_data(company, has_report)` 純函式，把「決定要抓什麼、執行抓取」的邏輯搬出 `auto_fetch` 節點；`auto_fetch(state)` 節點瘦身成從 `state` 取值、呼叫這個純函式、標記 `fetched=True`。行為完全不變（單一來源失敗不中斷、市場新聞一律補掃等既有邏輯原樣搬移），但 `fetch_missing_data` 現在可被未來的 MCP tool handler 直接呼叫，不需要組一份假的 `GraphState`。 | `b2f796c` |
-
-### 未變動範圍
-
-檢索路徑（`retrieve`/`route_after_retrieve`/`extract_filters`/`generate`）這次刻意不動，仍耦合 `GraphState`；留到「多標的查詢支援」那一階段一併處理，避免這次改動範圍擴散。MCP server 本身（`src/mcp_server.py`）尚未建立。
-
----
-
-## 2026-09-07　檢索邏輯抽離 GraphState
-
-### 背景
-
-延續上一節「為 MCP 對外開放鋪路」的方向，補上檢索路徑的純函式抽出，讓兩個候選 MCP tool（`get_stock_data`/`query_market_context`）的底層邏輯都能被 LangGraph 節點與 MCP tool handler 共用。
-
-### 修復
-
-| 項目 | 修復內容 | commit |
-|---|---|---|
-| `retrieve` 耦合 `GraphState` | `src/graph.py` 抽出 `retrieve_context(question, company, doc_type)` 純函式，把向量檢索與既有的補資料規則（doc_type 濾空放寬重查、財報問題補新聞、補全域市場新聞）搬出 `retrieve` 節點；節點瘦身成呼叫這個純函式並寫回 `state["retrieved"]`。逐行原樣搬移，行為不變。 | `aae5871` |
-
-### 未變動範圍
-
-`route_after_retrieve`/`extract_filters`/`generate` 仍耦合 `GraphState`，暫不處理。至此 `fetch_missing_data`（抓取）與 `retrieve_context`（檢索）兩個純函式已就緒，下一步是寫 `src/mcp_server.py`。
-
----
-
-## 2026-09-07　抽出 needs_refetch，確定 MCP tool 拆法
-
-### 背景
-
-規劃 MCP tool `query_market_context` 時討論了是否要在其內部自動判斷資料時效性並觸發補抓：
-- **方案 A（單一門面 tool）**：`query_market_context` 內部自動判斷+補抓，一次呼叫保證拿到盡量更新過的結果，行為與 Chainlit 現有的 `route_after_retrieve` 對齊，不依賴外部 LLM client 的推理品質。
-- **方案 B（拆成兩個 tool）**：`query_market_context`（純查詢）+ `fetch_latest_financial_data`（主動補抓），靠 tool description 引導 LLM client 自行接力呼叫，換取未來疊加更多細粒度 tool 的擴充性，但不保證每次都會被正確接力呼叫。
-
-**決定採方案 A**：確定性優先於擴充性——這條 MCP 路徑若比 Chainlit 的資料新鮮度弱一截，會是使用者體驗上的不一致，且目前只有兩個候選 tool，B 的「擴充性優勢」尚未有實際場景兌現。
-
-為讓判斷邏輯能被 MCP handler 與既有的 `route_after_retrieve` 共用，抽出 `needs_refetch` 純函式。
-
-### 修復
-
-| 項目 | 修復內容 | commit |
-|---|---|---|
-| `route_after_retrieve` 過期判斷邏輯無法重用 | `src/graph.py` 抽出 `needs_refetch(docs, company, question)`：有指名公司但沒新聞、或新聞已過期（依問題是否要求「最新」收緊門檻）時回傳 `True`。`route_after_retrieve` 呼叫它取代原本內聯的判斷，行為完全不變。`tests/test_route.py` 補上獨立斷言。 | `c9dd94a` |
-
-### 未來爬蟲化的架構評估（記錄討論，暫不實作）
-
-若未來資料抓取從現行的同步 API/套件（`requests`/`yfinance`）全面轉向動態或高併發爬蟲，曾討論的演進方向：
-- 拆出領域服務層（如 `MarketContextService`），把「檢索→判斷時效→調度抓取→重新檢索」的流程集中管理，MCP tool 介面維持不變。
-- 依資料特性分「即時輕量」（`httpx.AsyncClient`，秒級同步等待）與「重量級背景」（Task Queue，如 Celery/Redis，超時先回傳現有摘要並提示背景更新中）兩種抓取管道。
-- 爬蟲層加入 rate-limit 防護、失敗降級（回傳資料庫中最接近當下的舊資料並標註時間戳）。
-
-**暫不採用**：目前抓取皆為同步 `requests`，單次呼叫數秒內完成，非長跑背景任務；MOPS 已評估過不需要 Playwright 化（結構性限制，見「保持現狀」區塊）；單人本地 app 沒有遇過真實的 rate-limit 或高併發問題。Task Queue/Proxy Pool/雙軌爬蟲屬於解決尚未出現問題的預先架構，先記錄方向，待真的換抓取引擎或遇到穩定性問題時再評估。
-
----
-
-## 2026-09-07　新增 MCP server，開放核心工具給外部 client
-
-### 背景
-
-評估將股價/財報抓取與 RAG 檢索包裝成 MCP tool，讓 Claude Desktop 等外部 MCP client 也能使用同一套邏輯。確認架構：Chainlit UI 維持現有的 in-process 函式呼叫不變，MCP server 是新增的獨立入口，兩者共用同一份核心函式（`fetch_missing_data`/`retrieve_context`/`needs_refetch`，見前兩節的重構）。
+評估將股價/財報抓取與 RAG 檢索包裝成 MCP tool，讓 Claude Desktop 等外部 MCP client 也能使用同一套邏輯。確認架構：Chainlit UI 維持現有的 in-process 函式呼叫不變，MCP server 是新增的獨立入口，兩者共用同一份核心邏輯，而非各自維護一份。此架構的前提是核心函式不能耦合 LangGraph 的 `GraphState`，也需要有結構化的成功/失敗回傳值供程式判斷（原本只用 `print()` 給人看，呼叫端無法得知結果）。
 
 `query_market_context` 採單一門面 tool 設計：內部自動判斷資料時效性並在需要時補抓，一次呼叫即可拿到盡量更新過的結果，行為與 Chainlit 既有的路由邏輯一致，不依賴外部 LLM client 自行判斷、接力呼叫多個 tool 的推理品質。
 
-### 新增
+### 修復 / 新增
 
 | 項目 | 內容 | commit |
 |---|---|---|
-| `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次）。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | `41c1e1d` |
+| `fetch_mops`/`fetch_edgar` 缺乏結構化回傳值 | `src/update.py` 新增 `FetchResult(ok, detail)` dataclass，兩個函式所有的成功/失敗出口都改成回傳 `FetchResult`，原本的 `print()` 訊息全部保留（CLI 行為不變），只是額外把同樣資訊包進回傳值供程式化呼叫端使用。 | `b2f796c` |
+| `auto_fetch` 耦合 `GraphState` | `src/graph.py` 抽出 `fetch_missing_data(company, has_report)` 純函式，把「決定要抓什麼、執行抓取」的邏輯搬出 `auto_fetch` 節點；節點瘦身成從 `state` 取值、呼叫這個純函式、標記 `fetched=True`。行為完全不變，`fetch_missing_data` 現在可被 MCP tool handler 直接呼叫。 | `b2f796c` |
+| `retrieve` 耦合 `GraphState` | `src/graph.py` 抽出 `retrieve_context(question, company, doc_type)` 純函式，把向量檢索與既有的補資料規則（doc_type 濾空放寬重查、財報問題補新聞、補全域市場新聞）搬出 `retrieve` 節點。逐行原樣搬移，行為不變。 | `aae5871` |
+| `route_after_retrieve` 過期判斷邏輯無法重用 | `src/graph.py` 抽出 `needs_refetch(docs, company, question)`：有指名公司但沒新聞、或新聞已過期（依問題是否要求「最新」收緊門檻）時回傳 `True`。`route_after_retrieve` 呼叫它取代原本內聯的判斷，行為完全不變。`tests/test_route.py` 補上獨立斷言。 | `c9dd94a` |
+| `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次），共用上述三個純函式。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | `41c1e1d` |
 
 ### 驗證
 
 實際啟動 Ollama + pgvector（透過現有 docker-compose 服務），呼叫 `get_stock_data("2330")` 與 `query_market_context("台積電最新財報營收如何？", "2330")` 端到端測試：前者正確觸發財報/新聞抓取並回傳行情快照；後者正確判斷需要補抓、觸發後重新檢索到財報 PDF 相關內容，`source_exists` 去重也如預期跳過已入庫項目。
-
-### 未變動範圍
-
-`get_stock_data` 目前固定一律嘗試抓財報+新聞，未做「已存在財報只補新聞」的判斷；`query_market_context` 未區分「完全查無資料」與「查得到但需要重抓」，統一以文字說明呈現。刻意先求可用的最小版本，已列入「目前待辦」。
 
 ---
 
