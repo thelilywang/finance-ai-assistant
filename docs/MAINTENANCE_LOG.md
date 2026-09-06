@@ -171,7 +171,7 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 | 項目 | 內容 | commit |
 |---|---|---|
-| `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次）。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | 待補 |
+| `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次）。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | `41c1e1d` |
 
 ### 驗證
 
