@@ -112,7 +112,7 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 | `retrieve` 耦合 `GraphState` | `src/graph.py` 抽出 `retrieve_context(question, company, doc_type)` 純函式，把向量檢索與既有的補資料規則（doc_type 濾空放寬重查、財報問題補新聞、補全域市場新聞）搬出 `retrieve` 節點。逐行原樣搬移，行為不變。 | `aae5871` |
 | `route_after_retrieve` 過期判斷邏輯無法重用 | `src/graph.py` 抽出 `needs_refetch(docs, company, question)`：有指名公司但沒新聞、或新聞已過期（依問題是否要求「最新」收緊門檻）時回傳 `True`。`route_after_retrieve` 呼叫它取代原本內聯的判斷，行為完全不變。`tests/test_route.py` 補上獨立斷言。 | `c9dd94a` |
 | `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次），共用上述三個純函式。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | `41c1e1d` |
-| MCP tool 資料判斷粒度較粗 | `src/mcp_server.py` 抽出 `_get_fresh_context(question, company)`：封裝「檢索 → 判斷是否過期 → 需要就補抓 → 重新檢索」流程，`get_stock_data`/`query_market_context` 共用，取代原本 `get_stock_data` 固定一律嘗試抓取、不判斷是否已有財報的做法。`query_market_context` 的回應也依是否觸發過補抓加註提示句，區分「使用現有資料」與「已自動補抓最新資料」兩種情況。 | 待補 |
+| MCP tool 資料判斷粒度較粗 | `src/mcp_server.py` 抽出 `_get_fresh_context(question, company)`：封裝「檢索 → 判斷是否過期 → 需要就補抓 → 重新檢索」流程，`get_stock_data`/`query_market_context` 共用，取代原本 `get_stock_data` 固定一律嘗試抓取、不判斷是否已有財報的做法。`query_market_context` 的回應也依是否觸發過補抓加註提示句，區分「使用現有資料」與「已自動補抓最新資料」兩種情況。 | `18c0639` |
 
 ### 驗證
 
