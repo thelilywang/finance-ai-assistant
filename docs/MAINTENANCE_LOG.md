@@ -124,7 +124,7 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
-| `retrieve` 耦合 `GraphState` | `src/graph.py` 抽出 `retrieve_context(question, company, doc_type)` 純函式，把向量檢索與既有的補資料規則（doc_type 濾空放寬重查、財報問題補新聞、補全域市場新聞）搬出 `retrieve` 節點；節點瘦身成呼叫這個純函式並寫回 `state["retrieved"]`。逐行原樣搬移，行為不變。 | 待補 |
+| `retrieve` 耦合 `GraphState` | `src/graph.py` 抽出 `retrieve_context(question, company, doc_type)` 純函式，把向量檢索與既有的補資料規則（doc_type 濾空放寬重查、財報問題補新聞、補全域市場新聞）搬出 `retrieve` 節點；節點瘦身成呼叫這個純函式並寫回 `state["retrieved"]`。逐行原樣搬移，行為不變。 | `aae5871` |
 
 ### 未變動範圍
 
