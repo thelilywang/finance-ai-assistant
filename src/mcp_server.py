@@ -19,6 +19,22 @@ from .tickers import normalize_ticker
 mcp = FastMCP("finance-ai-assistant")
 
 
+async def _get_fresh_context(question: str, company: str | None) -> tuple[list[dict], bool]:
+    """檢索一次；資料不足或已過期（needs_refetch）時觸發補抓並重新檢索一次。
+
+    回傳 (docs, 是否觸發過補抓)。get_stock_data/query_market_context 共用，
+    避免「查→判斷是否夠新→不夠就補抓→再查」這段邏輯在兩個 tool 各自重複一份。
+    """
+    docs = await asyncio.to_thread(retrieve_context, question, company, None)
+    if docs and not needs_refetch(docs, company, question):
+        return docs, False
+
+    has_report = any(d["doc_type"] == "financial_report" for d in docs)
+    await asyncio.to_thread(fetch_missing_data, company, has_report)
+    docs = await asyncio.to_thread(retrieve_context, question, company, None)
+    return docs, True
+
+
 @mcp.tool()
 async def get_stock_data(ticker: str) -> str:
     """抓取指定股票的最新財報/新聞並匯入資料庫，回傳即時行情快照。
@@ -29,7 +45,7 @@ async def get_stock_data(ticker: str) -> str:
     if normalized is None:
         return f"無法辨識的股票代號：{ticker}"
 
-    await asyncio.to_thread(fetch_missing_data, normalized, False)
+    await _get_fresh_context(normalized, normalized)
     snapshot = await asyncio.to_thread(get_market_snapshot, normalized)
     return snapshot or f"查無 {normalized} 的行情資料，可能是代號錯誤或資料來源暫時無法存取。"
 
@@ -43,22 +59,17 @@ async def query_market_context(question: str, ticker: str | None = None) -> str:
     ticker: 台股代號或美股 ticker，留空表示不限公司。
     """
     company = normalize_ticker(ticker) if ticker else None
-    docs = await asyncio.to_thread(retrieve_context, question, company, None)
-
-    should_fetch = not docs or needs_refetch(docs, company, question)
-    if should_fetch:
-        has_report = any(d["doc_type"] == "financial_report" for d in docs)
-        await asyncio.to_thread(fetch_missing_data, company, has_report)
-        docs = await asyncio.to_thread(retrieve_context, question, company, None)
+    docs, refetched = await _get_fresh_context(question, company)
 
     if not docs:
-        return "查無相關資料。"
+        return "查無相關資料（已嘗試補抓）。" if refetched else "查無相關資料。"
 
+    note = "（已自動補抓最新資料）\n\n" if refetched else ""
     blocks = [
         f"[{d['source']}]（{d.get('published_at') or '日期未知'}）\n{d['content']}"
         for d in docs
     ]
-    return "\n\n".join(blocks)
+    return note + "\n\n".join(blocks)
 
 
 if __name__ == "__main__":
