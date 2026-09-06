@@ -118,32 +118,41 @@ def extract_filters(state: GraphState) -> GraphState:
 _RECENT_RE = re.compile(r"最近|近期|這幾天|本週|近日|最新|即時|今天|重抓|更新|recent|lately|latest|today", re.I)
 
 
-def retrieve(state: GraphState) -> GraphState:
-    recent = _RECENT_RE.search(state["question"])
-    query_vec = embeddings.embed_query(state["question"])
+def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None) -> list[dict]:
+    """向量檢索 + 既有的補資料規則（doc_type 濾空放寬重查、財報補新聞、補全域市場新聞）。
+
+    不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
+    """
+    recent = _RECENT_RE.search(question)
+    query_vec = embeddings.embed_query(question)
     docs = similarity_search(
-        query_vec, company=state.get("company"), doc_type=state.get("doc_type"),
+        query_vec, company=company, doc_type=doc_type,
         news_since_days=90 if recent else None,
     )
-    if not docs and state.get("doc_type"):
+    if not docs and doc_type:
         # ponytail: doc_type 濾到空就放寬重查，避免問「財報」時把僅有的新聞全濾光
         docs = similarity_search(
-            query_vec, company=state.get("company"),
+            query_vec, company=company,
             news_since_days=90 if recent else None,
         )
-    if state.get("company") and docs and not any(d["doc_type"] == "news" for d in docs):
+    if company and docs and not any(d["doc_type"] == "news" for d in docs):
         # ponytail: 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 route 觸發 auto_fetch
         news = similarity_search(
-            query_vec, top_k=3, company=state["company"], doc_type="news",
+            query_vec, top_k=3, company=company, doc_type="news",
             news_since_days=90 if recent else None,
         )
         docs = docs + news
-    if state.get("company") and docs:
+    if company and docs:
         # ponytail: 補 2 條全域市場新聞給決策卡當市場脈絡（market-news 入庫多為 company=NULL）
         seen_ids = {d["id"] for d in docs}
         market = similarity_search(query_vec, top_k=2, doc_type="news",
                                    news_since_days=90 if recent else None)
         docs = docs + [d for d in market if d["id"] not in seen_ids]
+    return docs
+
+
+def retrieve(state: GraphState) -> GraphState:
+    docs = retrieve_context(state["question"], state.get("company"), state.get("doc_type"))
     return {**state, "retrieved": docs}
 
 

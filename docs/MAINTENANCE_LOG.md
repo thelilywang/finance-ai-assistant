@@ -114,6 +114,24 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 ---
 
+## 2026-09-07　檢索邏輯抽離 GraphState
+
+### 背景
+
+延續上一節「為 MCP 對外開放鋪路」的方向，補上檢索路徑的純函式抽出，讓兩個候選 MCP tool（`get_stock_data`/`query_market_context`）的底層邏輯都能被 LangGraph 節點與 MCP tool handler 共用。
+
+### 修復
+
+| 項目 | 修復內容 | commit |
+|---|---|---|
+| `retrieve` 耦合 `GraphState` | `src/graph.py` 抽出 `retrieve_context(question, company, doc_type)` 純函式，把向量檢索與既有的補資料規則（doc_type 濾空放寬重查、財報問題補新聞、補全域市場新聞）搬出 `retrieve` 節點；節點瘦身成呼叫這個純函式並寫回 `state["retrieved"]`。逐行原樣搬移，行為不變。 | 待補 |
+
+### 未變動範圍
+
+`route_after_retrieve`/`extract_filters`/`generate` 仍耦合 `GraphState`，暫不處理。至此 `fetch_missing_data`（抓取）與 `retrieve_context`（檢索）兩個純函式已就緒，下一步是寫 `src/mcp_server.py`。
+
+---
+
 ## 待補紀錄
 
 後續每次修復或有新決策時，於本檔案新增一節（日期 + 標題），保留「做了什麼／為什麼／取捨」，不需重複貼完整程式碼片段，指向檔案路徑 + 行號即可。新完成的修復項目同時要移出「目前待辦」或「保持現狀」區塊。
