@@ -16,6 +16,7 @@ Graph 結構：
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 from typing import Annotated, Literal, TypedDict
@@ -51,6 +52,13 @@ class GraphState(TypedDict):
 # reasoning=False 關閉 qwen3.5 的 <think> 推理段，避免污染 JSON 解析與串流輸出
 _base_llm = ChatOllama(
     model=config.LLM_MODEL, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False
+)
+# tool-calling 專用：reasoning=False 會讓模型把「我要呼叫某工具」寫成文字而非產生
+# 結構化 tool_calls（實測 A/B：關推理時同一情境完全不發 tool call，開啟則正常），
+# 因此 agent 節點改用未關推理的實例。它的輸出不進使用者可見的串流（只有 generate 會），
+# 所以 <think> 不會外洩。
+_tool_llm = ChatOllama(
+    model=config.LLM_MODEL, base_url=config.OLLAMA_BASE_URL, temperature=0
 )
 # with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
 llm = _base_llm.with_retry(stop_after_attempt=3)
@@ -214,8 +222,12 @@ _mcp_client = MultiServerMCPClient({
 
 
 def _seed_prompt(state: GraphState) -> str:
-    """組 agent 首次進入迴圈的引導訊息，把已知條件交代清楚免得 LLM 重猜。"""
-    known = []
+    """組 agent 首次進入迴圈的引導訊息，把已知條件交代清楚免得 LLM 重猜。
+
+    # ponytail: 一定要帶今天日期——實測模型會正確讀出資料的發布日期，卻因為不知道
+    # 今天是哪天而判定兩個月前的資料「已足夠」，導致該補抓時沒補抓。
+    """
+    known = [f"今天日期：{dt.date.today()}"]
     if state.get("company"):
         known.append(f"已知公司代號：{state['company']}")
     if state.get("doc_type"):
@@ -224,7 +236,8 @@ def _seed_prompt(state: GraphState) -> str:
     return f"""使用者問題：{state['question']}
 {known_block}
 
-請用工具查詢財經資料庫回答上述問題所需的資料。資料不足或過期時，可自行補抓後再查一次。
+請用工具查詢財經資料庫回答上述問題所需的資料。檢索結果會標明每筆資料距今幾天，
+請依工具說明判斷是否夠新；不夠新就補抓後再查一次。
 取得足夠資料後就停止呼叫工具即可，不需要自己寫出回答——後續會有另一個步驟根據你查到的
 資料生成最終回覆。"""
 
@@ -233,7 +246,7 @@ async def agent(state: GraphState) -> GraphState:
     """把 MCP tool 綁給 LLM，由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。"""
     tools = await _mcp_client.get_tools()
     messages = state.get("messages") or [HumanMessage(content=_seed_prompt(state))]
-    resp = await _base_llm.bind_tools(tools).ainvoke(messages)
+    resp = await _tool_llm.bind_tools(tools).ainvoke(messages)
     return {**state, "messages": [resp]}
 
 

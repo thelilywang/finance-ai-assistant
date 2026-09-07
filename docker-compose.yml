@@ -7,6 +7,7 @@ services:
       POSTGRES_USER: finrag
       POSTGRES_PASSWORD: finrag
       POSTGRES_DB: finrag
+      TZ: ${TZ:-Asia/Taipei}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -28,6 +29,9 @@ services:
     environment:
       PGVECTOR_URL: postgresql://finrag:finrag@db:5432/finrag
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # 容器預設 UTC，會比台北時間慢 8 小時：台灣半夜 0-8 點時整個系統認定的「今天」
+      # 會少一天，讓資料時效判斷與 MOPS 民國年計算全部偏移
+      TZ: ${TZ:-Asia/Taipei}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "src.mcp_server"]
@@ -52,6 +56,9 @@ services:
     environment:
       PGVECTOR_URL: postgresql://finrag:finrag@db:5432/finrag
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # 容器預設 UTC，會比台北時間慢 8 小時：台灣半夜 0-8 點時整個系統認定的「今天」
+      # 會少一天，讓資料時效判斷與 MOPS 民國年計算全部偏移
+      TZ: ${TZ:-Asia/Taipei}
       MCP_SERVER_URL: http://mcp-server:8000/mcp
     extra_hosts:
       - "host.docker.internal:host-gateway"

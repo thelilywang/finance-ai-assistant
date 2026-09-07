@@ -5,6 +5,7 @@ tool 是 async def（MCP 規範），所以用 asyncio.run 呼叫，與其他同
 執行：python tests/test_mcp_tools.py
 """
 import asyncio
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -14,20 +15,52 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import src.mcp_server as mcp_server
 from src.update import FetchResult
 
+TODAY = dt.date.today()
 chunks = [
     {"id": 1, "source": "EDGAR:AAPL:x", "title": None, "doc_type": "financial_report",
-     "company": "AAPL", "published_at": "2026-08-01", "content": "財報內容"},
+     "company": "AAPL", "published_at": TODAY - dt.timedelta(days=60), "content": "財報內容"},
     {"id": 2, "source": "https://news/1", "title": "新聞標題", "doc_type": "news",
-     "company": "AAPL", "published_at": "2026-09-06", "content": "新聞內容"},
+     "company": "AAPL", "published_at": TODAY - dt.timedelta(days=1), "content": "新聞內容"},
 ]
 
 # --- search_knowledge_base：回傳 JSON 須同時給 LLM 讀的文字與程式用的結構化 chunks ---
 mcp_server.retrieve_context = lambda q, c=None, d=None: chunks
 out = json.loads(asyncio.run(mcp_server.search_knowledge_base("AAPL 財報", "AAPL")))
 assert set(out) == {"summary_for_llm", "chunks"}
-assert out["chunks"] == chunks  # 原封不動帶回，generate 要靠它組來源編號
+assert len(out["chunks"]) == len(chunks)  # 原封不動帶回，generate 要靠它組來源編號
 assert "EDGAR:AAPL:x" in out["summary_for_llm"]
-assert "2026-08-01" in out["summary_for_llm"]  # 日期要在文字裡，LLM 才判斷得出是否過期
+
+# 時效性判斷的關鍵：LLM 讀得到日期卻不會自己跟今天相減，所以要直接給「距今 N 天」與今天日期
+summary = out["summary_for_llm"]
+assert f"今天是 {TODAY}" in summary
+assert "距今 60 天" in summary
+assert "距今 1 天" in summary
+# 時效結論只看新聞：財報 60 天不該被拿來當過期依據（實測模型會混用兩者的天數）
+assert "最新的「新聞」距今 1 天" in summary
+assert "[財報｜EDGAR:AAPL:x]" in summary and "[新聞｜https://news/1]" in summary
+
+# 只有財報沒有新聞時要明講，否則模型會誤以為新聞夠新
+mcp_server.retrieve_context = lambda q, c=None, d=None: [chunks[0]]
+only_report = json.loads(asyncio.run(mcp_server.search_knowledge_base("x")))
+assert "沒有任何新聞" in only_report["summary_for_llm"]
+
+# 日期不明的資料不應該炸，也不該硬掰天數
+mcp_server.retrieve_context = lambda q, c=None, d=None: [
+    {"id": 3, "source": "s", "title": None, "doc_type": "news",
+     "company": None, "published_at": None, "content": "無日期"}
+]
+no_date = json.loads(asyncio.run(mcp_server.search_knowledge_base("x")))
+assert "發布日期：不明" in no_date["summary_for_llm"]
+
+# doc_type 只接受單一合法值：LLM 實測會塞 "financial_report,news"，那樣過濾會查空
+seen = {}
+mcp_server.retrieve_context = lambda q, c=None, d=None: seen.update(doc_type=d) or chunks
+asyncio.run(mcp_server.search_knowledge_base("x", None, "financial_report,news"))
+assert seen["doc_type"] is None  # 多值 → 不過濾，而非照字面查
+asyncio.run(mcp_server.search_knowledge_base("x", None, "news"))
+assert seen["doc_type"] == "news"  # 單一合法值照常傳遞
+asyncio.run(mcp_server.search_knowledge_base("x", None, "亂填"))
+assert seen["doc_type"] is None
 
 # 查無資料時仍是合法 JSON，chunks 為空
 mcp_server.retrieve_context = lambda q, c=None, d=None: []

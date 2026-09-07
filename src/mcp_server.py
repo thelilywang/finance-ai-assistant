@@ -17,6 +17,7 @@ stdio 沒有 per-request 驗證的概念。
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 
 from mcp.server.fastmcp import FastMCP
@@ -46,26 +47,57 @@ async def search_knowledge_base(
 
     question: 使用者問題（用於語意檢索，通常直接帶原問題即可）。
     company: 台股代號（如 "2330"）或美股 ticker（如 "AAPL"），留空表示不限公司。
-    doc_type: "financial_report" 或 "news"，留空表示兩種都查。
+    doc_type: 只能填 "financial_report" 或 "news" 其中一個，或留空表示兩種都查。
+        不可填多個值（例如 "financial_report,news" 是錯的），想兩種都查就留空。
 
     回傳 JSON 字串：{"summary_for_llm": 整理過的可讀文字, "chunks": 結構化資料陣列}。
-    你只需要讀 summary_for_llm，裡面每個片段都標了來源與發布日期；chunks 是給程式
-    後續組引用用的，你不需要處理。
+    你只需要讀 summary_for_llm，chunks 是給程式組引用用的，不需處理。summary 開頭會
+    直接告訴你「目前最新的新聞距今 N 天」，時效判斷請只依據這個數字，不要自己推算日期，
+    也不要拿財報的天數來判斷（財報按季發布，距今數十天屬正常，不代表資料過期）。
 
-    判斷資料是否足夠新（若不夠新，請自行呼叫 fetch_company_data 或 fetch_market_overview
-    補抓，本工具不會幫你補）：
-    - 完全查無資料，而問題有指名公司 → 應該補抓該公司資料。
-    - 只查到財報、沒有任何新聞 → 通常代表新聞還沒入庫，建議補抓。
-    - 問題含「最近／最新／今天／即時／近期」等字眼，但最新一筆新聞不是今天 → 應該補抓。
-    - 問題沒有上述字眼，但最新一筆新聞距今超過 2-3 天 → 可以考慮補抓。
+    依上述「最新新聞距今 N 天」決定是否補抓（若要補抓，呼叫 fetch_company_data 或
+    fetch_market_overview，本工具不會幫你補）：
+    - 完全查無資料，而問題有指名公司 → 補抓該公司資料。
+    - 檢索結果中沒有任何新聞 → 補抓。
+    - 問題含「最近／最新／今天／即時／近期」等字眼，且 N 大於 0 → 補抓。
+    - 問題沒有上述字眼，且 N 大於 3 → 補抓。
+    - 以上皆不符合（例如問題不要求最新、且 N 是 0 到 3）→ 不要補抓，直接停止呼叫工具。
     - 補抓完成後，請再呼叫一次本工具重新檢索，確認新資料已入庫，不要直接回報查無資料。
     """
+    # LLM 有時會把多個值塞成 "financial_report,news"，那樣過濾會查出空結果；
+    # 只認單一合法值，其餘（含多值、空字串）一律視為不過濾
+    if doc_type not in ("financial_report", "news"):
+        doc_type = None
+
     docs = await asyncio.to_thread(retrieve_context, question, company, doc_type)
-    blocks = [
-        f"[{d['source']}]（發布日期：{d.get('published_at') or '日期未知'}）\n{d['content']}"
-        for d in docs
-    ]
-    summary = "\n\n".join(blocks) if blocks else "查無相關資料。"
+    today = dt.date.today()
+    _LABEL = {"news": "新聞", "financial_report": "財報"}
+    blocks = []
+    news_ages = []
+    for d in docs:
+        published = d.get("published_at")
+        kind = _LABEL.get(d["doc_type"], d["doc_type"])
+        if published:
+            # 直接算好距今天數：模型讀得到日期卻不見得會跟「今天」相減（實測過的失敗案例）
+            age = (today - published).days if isinstance(published, dt.date) else None
+            when = f"發布日期：{published}" + (f"，距今 {age} 天" if age is not None else "")
+            if age is not None and d["doc_type"] == "news":
+                news_ages.append(age)
+        else:
+            when = "發布日期：不明"
+        blocks.append(f"[{kind}｜{d['source']}]（{when}）\n{d['content']}")
+
+    # 時效判斷只看新聞（財報本來就是季度發布，幾十天前很正常），所以直接把
+    # 「最新新聞距今幾天」算好放在開頭，免得模型拿財報的天數去套新聞的門檻
+    if blocks:
+        if news_ages:
+            freshness = f"目前最新的「新聞」距今 {min(news_ages)} 天。"
+        else:
+            freshness = "檢索結果中沒有任何新聞（只有財報）。"
+        header = f"今天是 {today}。{freshness}以下是檢索結果：\n\n"
+    else:
+        header = ""
+    summary = header + "\n\n".join(blocks) if blocks else "查無相關資料。"
     return json.dumps(
         {"summary_for_llm": summary, "chunks": docs}, default=str, ensure_ascii=False
     )
