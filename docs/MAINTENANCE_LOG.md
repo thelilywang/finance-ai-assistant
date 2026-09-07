@@ -113,10 +113,11 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 | `route_after_retrieve` 過期判斷邏輯無法重用 | `src/graph.py` 抽出 `needs_refetch(docs, company, question)`：有指名公司但沒新聞、或新聞已過期（依問題是否要求「最新」收緊門檻）時回傳 `True`。`route_after_retrieve` 呼叫它取代原本內聯的判斷，行為完全不變。`tests/test_route.py` 補上獨立斷言。 | `c9dd94a` |
 | `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次），共用上述三個純函式。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | `41c1e1d` |
 | MCP tool 資料判斷粒度較粗 | `src/mcp_server.py` 抽出 `_get_fresh_context(question, company)`：封裝「檢索 → 判斷是否過期 → 需要就補抓 → 重新檢索」流程，`get_stock_data`/`query_market_context` 共用，取代原本 `get_stock_data` 固定一律嘗試抓取、不判斷是否已有財報的做法。`query_market_context` 的回應也依是否觸發過補抓加註提示句，區分「使用現有資料」與「已自動補抓最新資料」兩種情況。 | `18c0639` |
+| 抓取失敗被吞掉，呼叫端無法分辨「查無資料」與「爬蟲已壞」 | `src/update.py` 的 `fetch_news`/`fetch_market_news` 比照 `fetch_mops`/`fetch_edgar` 改回傳 `FetchResult`，四個抓取函式介面統一。`fetch_missing_data`（`src/graph.py`）不再丟棄各來源的回傳結果，改為收集成 `list[str]` 往上傳。Chainlit 路徑：`GraphState` 新增 `fetch_results` 欄位，`auto_fetch` 寫入、`no_result` 在「已嘗試抓取仍查無資料」時將各來源結果附加在回答中。MCP 路徑：`_get_fresh_context` 回傳值從「是否補抓過」的布林值改成補抓結果訊息列表，`get_stock_data`/`query_market_context` 的錯誤與提示文字都附上具體來源結果，不再只是「已嘗試補抓」這種無資訊量的提示。`tests/test_route.py` 新增 `fetch_missing_data` 的 mock 測試，涵蓋單一來源失敗不中斷、例外訊息正確收集兩種情況。 | `7defe46` |
 
 ### 驗證
 
-實際啟動 Ollama + pgvector（透過現有 docker-compose 服務），呼叫 `get_stock_data` 與 `query_market_context` 端到端測試：對已有完整資料的標的（AAPL）正確跳過補抓、直接回傳；對資料已過期的標的（2330）正確觸發補抓並在回應加註提示句，`source_exists` 去重也如預期跳過已入庫項目。
+實際啟動 Ollama + pgvector（透過現有 docker-compose 服務），呼叫 `get_stock_data` 與 `query_market_context` 端到端測試：對已有完整資料的標的（AAPL）正確跳過補抓、直接回傳；對資料已過期的標的（2330）正確觸發補抓並在回應加註提示句，`source_exists` 去重也如預期跳過已入庫項目。抓取失敗訊息傳遞邏輯另以 `tests/test_route.py` 的 mock 測試驗證（`fetch_missing_data` 單元行為），未另外重跑端到端測試。
 
 ---
 
