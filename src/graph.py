@@ -1,23 +1,31 @@
 """LangGraph 主流程。
 
 Graph 結構：
-    rewrite_question -> extract_filters -> retrieve -> (generate | auto_fetch -> retrieve | no_result)
+    rewrite_question -> extract_filters -> agent <-> tools -> assemble -> (generate | no_result)
 
 - rewrite_question: 多輪對話時把追問改寫成獨立問題，讓 embedding 檢索有效
-- extract_filters: 用 LLM 從問題中抽出公司代號/文件類型，作為檢索 filter
-- retrieve: 把問題 embedding 後去 pgvector 找最相似的 chunk
-- auto_fetch: 檢索不到且問題有指名公司時，自動抓財報/新聞入庫後重新檢索（只重試一次）
+- extract_filters: 用 LLM 從問題中抽出公司代號/文件類型，供 agent 呼叫 tool 時當已知條件
+- agent: 把 MCP tool 綁給 LLM，由 LLM 自行決定檢索/補抓、要不要再呼叫下一個 tool
+- tools: 執行 LLM 選定的 MCP tool（ToolNode）
+- assemble: 把 tool 回傳結果整理回 retrieved/fetch_results，供下游節點沿用既有格式
 - generate: 根據檢索到的 chunk 生成回答，並附上出處來源
 - no_result: 找不到相關資料時，誠實告知使用者，避免幻覺
+
+「資料夠不夠新、要不要補抓」不再由程式規則判斷（原 needs_refetch/route_after_retrieve），
+改由 LLM 讀 MCP tool 的說明自行決定，判斷準則寫在 src/mcp_server.py 的 tool docstring。
 """
 from __future__ import annotations
 
-import datetime as dt
+import json
 import re
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, field_validator
 
 from . import config
@@ -34,9 +42,10 @@ class GraphState(TypedDict):
     doc_type: str | None
     retrieved: list[dict]
     answer: str
-    fetched: bool  # auto_fetch 是否已執行過（保證只重試一次）
-    fetch_results: list[str]  # auto_fetch 各來源的結果訊息，no_result 用來提示抓取是否失敗
+    fetched: bool  # 本輪是否呼叫過補抓 tool，no_result 用來決定提示語
+    fetch_results: list[str]  # 各補抓 tool 的結果訊息，no_result 用來提示抓取是否失敗
     lang: str
+    messages: Annotated[list[BaseMessage], add_messages]  # agent <-> tools 的往返記錄
 
 
 # reasoning=False 關閉 qwen3.5 的 <think> 推理段，避免污染 JSON 解析與串流輸出
@@ -137,7 +146,7 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
             news_since_days=90 if recent else None,
         )
     if company and docs and not any(d["doc_type"] == "news" for d in docs):
-        # ponytail: 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 route 觸發 auto_fetch
+        # ponytail: 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 LLM 決定要不要補抓
         news = similarity_search(
             query_vec, top_k=3, company=company, doc_type="news",
             news_since_days=90 if recent else None,
@@ -150,11 +159,6 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
                                    news_since_days=90 if recent else None)
         docs = docs + [d for d in market if d["id"] not in seen_ids]
     return docs
-
-
-def retrieve(state: GraphState) -> GraphState:
-    docs = retrieve_context(state["question"], state.get("company"), state.get("doc_type"))
-    return {**state, "retrieved": docs}
 
 
 def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
@@ -193,41 +197,95 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
     return results
 
 
-def auto_fetch(state: GraphState) -> GraphState:
-    """資料不足時自動補抓：有指名公司抓其財報+新聞，一律加掃市場總覽新聞。抓完標記 fetched（保證只重試一次）。"""
-    company = state.get("company")
-    has_report = any(d["doc_type"] == "financial_report" for d in state["retrieved"])
-    results = fetch_missing_data(company, has_report)
-    return {**state, "fetched": True, "fetch_results": results}
+# ponytail: tool 呼叫輪數上限，取代原本 fetched 布林的「只重試一次」保護。
+# LLM 補抓失敗時可能反覆重試，每次都是真實的外部網路請求，必須有硬上限。
+_MAX_TOOL_ROUNDS = 4
+
+_mcp_client = MultiServerMCPClient({
+    "finance": {
+        "transport": "streamable_http",
+        "url": config.MCP_SERVER_URL,
+        "headers": (
+            {"Authorization": f"Bearer {config.MCP_AUTH_TOKEN}"}
+            if config.MCP_AUTH_TOKEN else None
+        ),
+    }
+})
 
 
-def needs_refetch(docs: list[dict], company: str | None, question: str) -> bool:
-    """已有指名公司的檢索結果時，判斷是否需要補抓：沒新聞，或最新新聞已過期。
+def _seed_prompt(state: GraphState) -> str:
+    """組 agent 首次進入迴圈的引導訊息，把已知條件交代清楚免得 LLM 重猜。"""
+    known = []
+    if state.get("company"):
+        known.append(f"已知公司代號：{state['company']}")
+    if state.get("doc_type"):
+        known.append(f"已知文件類型：{state['doc_type']}")
+    known_block = "\n".join(known)
+    return f"""使用者問題：{state['question']}
+{known_block}
 
-    不處理「完全查無資料」的情況，那由呼叫端另外判斷（見 route_after_retrieve）。
-    不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
+請用工具查詢財經資料庫回答上述問題所需的資料。資料不足或過期時，可自行補抓後再查一次。
+取得足夠資料後就停止呼叫工具即可，不需要自己寫出回答——後續會有另一個步驟根據你查到的
+資料生成最終回覆。"""
+
+
+async def agent(state: GraphState) -> GraphState:
+    """把 MCP tool 綁給 LLM，由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。"""
+    tools = await _mcp_client.get_tools()
+    messages = state.get("messages") or [HumanMessage(content=_seed_prompt(state))]
+    resp = await _base_llm.bind_tools(tools).ainvoke(messages)
+    return {**state, "messages": [resp]}
+
+
+def agent_route(state: GraphState) -> str:
+    """LLM 還要呼叫 tool 就去 tools，否則收工；超過輪數上限一律強制收工。"""
+    rounds = sum(1 for m in state["messages"] if isinstance(m, AIMessage) and m.tool_calls)
+    if rounds >= _MAX_TOOL_ROUNDS:
+        print(f"[agent] 已達 tool 呼叫輪數上限（{_MAX_TOOL_ROUNDS}），停止呼叫工具。")
+        return "assemble"
+    last = state["messages"][-1]
+    return "tools" if getattr(last, "tool_calls", None) else "assemble"
+
+
+def _tool_text(content) -> str:
+    """取出 ToolMessage 的文字內容。
+
+    MCP tool 經 langchain-mcp-adapters 回來的是 content block 陣列
+    （[{"type": "text", "text": ...}]），本地 tool 則是純字串，兩種都要能讀。
     """
-    if not company:
-        return False
-    news_dates = [d["published_at"] for d in docs if d["doc_type"] == "news" and d.get("published_at")]
-    if not news_dates:
-        return True  # 有財報但沒新聞：補抓新聞給趨勢段
-    # ponytail: 最新新聞超過 2 天視為過期重抓一次（財報日當天舊新聞會誤導），source_exists 去重讓重抓便宜；
-    # 使用者明講要最新/即時資料時門檻收緊到 0 天（新聞必須是今天的，否則馬上重抓）
-    stale_days = 0 if _RECENT_RE.search(question) else 2
-    return max(news_dates) < dt.date.today() - dt.timedelta(days=stale_days)
+    if isinstance(content, list):
+        return "".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return str(content)
 
 
-def route_after_retrieve(state: GraphState) -> str:
-    if state["retrieved"]:
-        if state.get("company") and not state.get("fetched") and needs_refetch(
-            state["retrieved"], state["company"], state["question"]
-        ):
-            return "auto_fetch"
-        return "generate"
-    if not state.get("fetched"):
-        return "auto_fetch"  # 沒指名公司也掃市場新聞，別直接舉手投降
-    return "no_result"
+def assemble(state: GraphState) -> GraphState:
+    """把 tool 回傳結果整理回下游節點沿用的既有欄位。
+
+    retrieved 取最後一次 search_knowledge_base 的 chunks（工具已回傳結構化資料，
+    不再重查一次）；補抓類 tool 的訊息填進 fetched/fetch_results 供 no_result 使用。
+    """
+    retrieved: list[dict] = []
+    fetch_results: list[str] = []
+    fetched = False
+    for msg in state["messages"]:
+        if not isinstance(msg, ToolMessage):
+            continue
+        if msg.name == "search_knowledge_base":
+            try:
+                retrieved = json.loads(_tool_text(msg.content)).get("chunks", [])
+            except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                print(f"[assemble] 解析檢索結果失敗，視為查無資料：{e}")
+        elif msg.name in ("fetch_company_data", "fetch_market_overview"):
+            fetched = True
+            fetch_results.append(_tool_text(msg.content))
+    return {**state, "retrieved": retrieved, "fetched": fetched, "fetch_results": fetch_results}
+
+
+def route_after_assemble(state: GraphState) -> str:
+    return "generate" if state["retrieved"] else "no_result"
 
 
 def unique_sources(retrieved: list[dict]) -> list[str]:
@@ -306,23 +364,30 @@ def no_result(state: GraphState) -> GraphState:
     return {**state, "answer": answer}
 
 
-def build_graph():
+async def build_graph():
+    """建 graph。async 是因為要先跟 MCP server 拿 tool 清單（連不上會 raise，由呼叫端處理）。"""
+    tools = await _mcp_client.get_tools()
+
     graph = StateGraph(GraphState)
     graph.add_node("rewrite_question", rewrite_question)
     graph.add_node("extract_filters", extract_filters)
-    graph.add_node("retrieve", retrieve)
-    graph.add_node("auto_fetch", auto_fetch)
+    graph.add_node("agent", agent)
+    graph.add_node("tools", ToolNode(tools))
+    graph.add_node("assemble", assemble)
     graph.add_node("generate", generate)
     graph.add_node("no_result", no_result)
 
     graph.set_entry_point("rewrite_question")
     graph.add_edge("rewrite_question", "extract_filters")
-    graph.add_edge("extract_filters", "retrieve")
+    graph.add_edge("extract_filters", "agent")
     graph.add_conditional_edges(
-        "retrieve", route_after_retrieve,
-        {"generate": "generate", "auto_fetch": "auto_fetch", "no_result": "no_result"},
+        "agent", agent_route, {"tools": "tools", "assemble": "assemble"},
     )
-    graph.add_edge("auto_fetch", "retrieve")  # 抓完重新檢索；fetched=True 保證不會無限迴圈
+    graph.add_edge("tools", "agent")  # 執行完回 agent 決定要不要再呼叫；輪數上限保證會收斂
+    graph.add_conditional_edges(
+        "assemble", route_after_assemble,
+        {"generate": "generate", "no_result": "no_result"},
+    )
     graph.add_edge("generate", END)
     graph.add_edge("no_result", END)
 

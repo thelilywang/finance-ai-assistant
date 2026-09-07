@@ -4,6 +4,12 @@ import re
 STRINGS = {
     "zh": {
         "fetch_notice": "🔍 資料庫沒有這檔股票的資料，已自動抓取最新財報/新聞（首次約需 1-3 分鐘 embedding），正在重新檢索…",
+        "connecting": "正在連接資料服務…",
+        "connect_failed": (
+            "⚠️ 資料服務連線失敗，暫時無法查詢。\n\n"
+            "請確認 mcp-server 服務已啟動（`docker compose up -d mcp-server`），"
+            "並檢查 MCP_SERVER_URL / MCP_AUTH_TOKEN 設定是否正確。\n\n錯誤訊息：{error}"
+        ),
         "sources_label": "參考來源",
         "report_generated_at": "產生時間",
         "no_result_fetched": (
@@ -57,6 +63,12 @@ STRINGS = {
     "en": {
         "fetch_notice": "🔍 No data for this ticker yet — fetching the latest filings/news now "
         "(first time takes ~1-3 min to embed), retrying retrieval…",
+        "connecting": "Connecting to the data service…",
+        "connect_failed": (
+            "⚠️ Could not reach the data service, queries are unavailable right now.\n\n"
+            "Check that the mcp-server service is running (`docker compose up -d mcp-server`) "
+            "and that MCP_SERVER_URL / MCP_AUTH_TOKEN are set correctly.\n\nError: {error}"
+        ),
         "sources_label": "Sources",
         "report_generated_at": "Generated at",
         "no_result_fetched": (

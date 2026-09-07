@@ -16,9 +16,9 @@ services:
       timeout: 5s
       retries: 5
 
-  app:
+  mcp-server:
     build: .
-    container_name: finance_ai_assistant_app
+    container_name: finance_ai_assistant_mcp
     restart: unless-stopped
     depends_on:
       db:
@@ -28,6 +28,31 @@ services:
     environment:
       PGVECTOR_URL: postgresql://finrag:finrag@db:5432/finrag
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "src.mcp_server"]
+    # 不對 host 開 port：目前只有 app 需要連。要讓 Claude Desktop 等外部 client 連進來時，
+    # 再單獨評估開放（屆時 MCP_AUTH_TOKEN 的 Bearer 驗證就是把關依據）
+    volumes:
+      - ./data:/app/data
+
+  app:
+    build: .
+    container_name: finance_ai_assistant_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      mcp-server:
+        # FastMCP 沒有現成的 health endpoint，只能確認程序起來；真正的就緒檢查
+        # 在 app 端（on_chat_start 連不上會顯示錯誤訊息）
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      PGVECTOR_URL: postgresql://finrag:finrag@db:5432/finrag
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      MCP_SERVER_URL: http://mcp-server:8000/mcp
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

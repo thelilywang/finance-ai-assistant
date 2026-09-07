@@ -19,3 +19,4 @@ plotly
 markdown
 kaleido
 mcp>=1.28.0
+langchain-mcp-adapters>=0.3.2

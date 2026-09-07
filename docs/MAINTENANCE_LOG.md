@@ -6,17 +6,24 @@
 
 ## 目前待辦（依 CP 值排序）
 
-1. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
+1. **LLM 未依 tool 說明觸發補抓（功能退化，最高優先）**（`src/mcp_server.py` 的 tool docstring、`src/graph.py` 的 `agent`）
+   實測「MSFT 最新財報和近況如何？」時，資料庫資料停在兩個月前，tool 說明已載明此情境應補抓，但 `qwen3.5:9b` 未照做，直接以過期資料作答（詳見 2026-09-07 驗證）。改造前的確定性規則在同情境必定補抓，屬實際功能退化。可行方向：強化 docstring 指引（把日期比較寫得更像可執行步驟）、在 seed prompt 中補上今天日期與資料新舊的顯性提示、換用 tool-calling 表現較好的模型，或在 agent 迴圈前保留一道確定性的過期檢查作為保底（等於把部分決策權收回程式，需權衡與本次改造目標的取捨）。應在正式使用前處理。
+2. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
-2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
-   目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步改 `retrieve`/`auto_fetch`/`route_after_retrieve`/`generate` 的 context 組裝邏輯（依公司分組），影響面較大，刻意留待下一階段獨立處理。
-3. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
-   若未來資料抓取從現行的同步 API/套件（`requests`/`yfinance`）全面轉向動態或高併發爬蟲，可行方向：拆出領域服務層集中管理「檢索→判斷時效→調度抓取→重新檢索」流程、依資料特性分「即時輕量」（`httpx.AsyncClient` 同步等待）與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種抓取管道、爬蟲層加入 rate-limit 防護與失敗降級。目前抓取皆為同步 `requests`，單次呼叫數秒內完成，非長跑背景任務，且單人本地 app 未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現問題的預先架構，先記錄方向，待真的更換抓取引擎或遇到穩定性問題時再評估。
+3. **回應延遲過長**（`src/graph.py` 的 `agent` 節點）
+   改為 LLM 自主決策後，每題的 LLM 呼叫次數從 3 次增為至少 4 次（多一次 agent 決策），LLM 決定補抓時再多 1-2 輪。實測本機 `qwen3.5:9b` 單題總耗時約 470 秒，各節點分佈為：`extract_filters` 157 秒、`agent` 決策兩輪合計 156 秒、`generate` 152 秒、實際檢索僅 4 秒——瓶頸全在本地模型推理，非架構本身。可行方向：換用推理更快的模型或量化版本、合併 `rewrite_question`/`extract_filters` 為單次呼叫、資料明顯足夠時跳過 agent 迴圈（等於把部分決策權收回程式，需與待辦 1 一併權衡）。
+4. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
+   目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
+5. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+   若未來資料抓取從現行的同步 API/套件（`requests`/`yfinance`）全面轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」（`httpx.AsyncClient` 同步等待）與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種抓取管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前用 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 只有在需要同時服務多個併發 client（多個外部 MCP client、或支援多標的並行抓取）時才有實質效益。目前抓取皆為同步 `requests`，單次呼叫數秒內完成，非長跑背景任務，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現問題的預先架構，先記錄方向，待真的更換抓取引擎或遇到穩定性問題時再評估。
+6. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+   `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
 ## 保持現狀（已知，僅口頭說明，不列入近期修復）
 
-- **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前僅覆蓋純函式（`route_after_retrieve`、`unique_sources`、格式化函式等），核心節點 `retrieve`/`auto_fetch`/`generate` 因直接耦合 DB 與本地 LLM，未做 mock 層、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測核心節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
-- **MOPS 爬蟲改用 Playwright/MCP 化——評估後不採用**（`src/update.py:112-163`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。關注點分離的目標已達成（`fetch_mops()` 是獨立函式，呼叫端已用 try/except 全包）；MCP 協定的價值在多個呼叫端共用同一工具，這裡呼叫端只有一處，改用跨進程 RPC 只會多一層失敗模式與部署成本。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會導致失效，屬結構性限制。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04 章節。
+- **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前覆蓋純函式與資料轉換層（`assemble`、`agent_route`、MCP tool 的回傳格式、`fetch_missing_data`、格式化函式等），`generate` 因直接耦合本地 LLM 未做 mock、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測生成節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
+- **LLM 選用 tool 的正確性無自動化測試**（`src/mcp_server.py` 的 tool docstring）— 改為 LLM 自主決策後，「資料過期時會不會主動補抓」取決於模型讀 docstring 的判斷，結果不確定、需真實 Ollama 呼叫，不適合寫成自動化斷言。目前靠端到端手動驗證（見 2026-09-07 章節）。若日後模型換版或 docstring 調整，需重跑手動驗證。
+- **MOPS 爬蟲改用 Playwright——評估後不採用**（`src/update.py`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會導致失效，屬結構性限制。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04 章節。（原本一併記錄的「MCP 化不採用」判斷已不適用：當時的理由是呼叫端只有一處、跨進程 RPC 不划算，2026-09-07 改造後 LangGraph agent 與外部 client 成為兩個呼叫端，MCP 化的前提已成立。）
 
 ---
 
@@ -95,29 +102,50 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 ---
 
-## 2026-09-07　抽離 GraphState 並新增 MCP server
+## 2026-09-07　改為 MCP tool-calling 架構，補資料決策交給 LLM
 
 ### 背景
 
-評估將股價/財報抓取與 RAG 檢索包裝成 MCP tool，讓 Claude Desktop 等外部 MCP client 也能使用同一套邏輯。確認架構：Chainlit UI 維持現有的 in-process 函式呼叫不變，MCP server 是新增的獨立入口，兩者共用同一份核心邏輯，而非各自維護一份。此架構的前提是核心函式不能耦合 LangGraph 的 `GraphState`，也需要有結構化的成功/失敗回傳值供程式判斷（原本只用 `print()` 給人看，呼叫端無法得知結果）。
+原本補資料的決策完全寫死在程式裡：`route_after_retrieve()` 依 `needs_refetch()` 的日期門檻決定要不要抓資料。這個做法在既有情境下穩定可靠，但有兩個限制——判斷準則只認「新聞日期距今幾天」這個單一維度，無法理解「問法暗示需要多新的資料」；而且對外開放的 MCP tool 是門面式的（內部把檢索、判斷、補抓、重查整套跑完才回傳），外部 client 拿不到中間決策點，只能接受既定流程。
 
-`query_market_context` 採單一門面 tool 設計：內部自動判斷資料時效性並在需要時補抓，一次呼叫即可拿到盡量更新過的結果，行為與 Chainlit 既有的路由邏輯一致，不依賴外部 LLM client 自行判斷、接力呼叫多個 tool 的推理品質。
+本次改造把決策權交給 LLM，並讓兩個呼叫端（Chainlit 內部的 LangGraph agent、外部的 Claude Desktop 等 client）走相同協定、共用同一份 tool 定義，避免同樣的判斷邏輯維護兩套。MCP server 同時從 stdio 改為 HTTP transport 並加上 Bearer token 驗證——stdio 沒有 per-request 驗證的概念，要做身分驗證必須是網路服務。
 
-### 修復 / 新增
+**已知代價**：每題多一次 LLM 往返（決策用），且判斷從確定性規則變成模型推理，穩定性取決於模型的指令遵從能力——實測顯示這個代價確實發生了，詳見下方驗證。延遲方面本機實測單題約 470 秒，但瓶頸在本地模型推理速度（檢索本身僅 4 秒），非架構所致。
+
+### 架構
+
+```
+rewrite_question → extract_filters → agent ⇄ tools → assemble → (generate | no_result)
+```
+
+`agent` 綁定三個 MCP tool 交由 LLM 選用，`tools` 執行選定的 tool，兩者往返直到 LLM 不再要求呼叫工具（上限 4 輪）；`assemble` 把 tool 結果整理回既有欄位，下游 `generate`/`no_result` 與前端的來源編號、引用連結、報告輸出皆不受影響。
+
+### 改動內容
 
 | 項目 | 內容 | commit |
 |---|---|---|
-| `fetch_mops`/`fetch_edgar` 缺乏結構化回傳值 | `src/update.py` 新增 `FetchResult(ok, detail)` dataclass，兩個函式所有的成功/失敗出口都改成回傳 `FetchResult`，原本的 `print()` 訊息全部保留（CLI 行為不變），只是額外把同樣資訊包進回傳值供程式化呼叫端使用。 | `b2f796c` |
-| `auto_fetch` 耦合 `GraphState` | `src/graph.py` 抽出 `fetch_missing_data(company, has_report)` 純函式，把「決定要抓什麼、執行抓取」的邏輯搬出 `auto_fetch` 節點；節點瘦身成從 `state` 取值、呼叫這個純函式、標記 `fetched=True`。行為完全不變，`fetch_missing_data` 現在可被 MCP tool handler 直接呼叫。 | `b2f796c` |
-| `retrieve` 耦合 `GraphState` | `src/graph.py` 抽出 `retrieve_context(question, company, doc_type)` 純函式，把向量檢索與既有的補資料規則（doc_type 濾空放寬重查、財報問題補新聞、補全域市場新聞）搬出 `retrieve` 節點。逐行原樣搬移，行為不變。 | `aae5871` |
-| `route_after_retrieve` 過期判斷邏輯無法重用 | `src/graph.py` 抽出 `needs_refetch(docs, company, question)`：有指名公司但沒新聞、或新聞已過期（依問題是否要求「最新」收緊門檻）時回傳 `True`。`route_after_retrieve` 呼叫它取代原本內聯的判斷，行為完全不變。`tests/test_route.py` 補上獨立斷言。 | `c9dd94a` |
-| `src/mcp_server.py` | 新增 `FastMCP` server，開放兩個 tool：`get_stock_data(ticker)`（抓取財報/新聞並回傳即時行情快照）、`query_market_context(question, ticker=None)`（向量檢索，查無資料或新聞過期時自動補抓再重查一次），共用上述三個純函式。同步邏輯用 `asyncio.to_thread()` 包裝避免卡住 event loop。`requirements.txt` 補上 `mcp>=1.28.0`（先前只裝在 venv，未列入依賴清單）。 | `41c1e1d` |
-| MCP tool 資料判斷粒度較粗 | `src/mcp_server.py` 抽出 `_get_fresh_context(question, company)`：封裝「檢索 → 判斷是否過期 → 需要就補抓 → 重新檢索」流程，`get_stock_data`/`query_market_context` 共用，取代原本 `get_stock_data` 固定一律嘗試抓取、不判斷是否已有財報的做法。`query_market_context` 的回應也依是否觸發過補抓加註提示句，區分「使用現有資料」與「已自動補抓最新資料」兩種情況。 | `18c0639` |
-| 抓取失敗被吞掉，呼叫端無法分辨「查無資料」與「爬蟲已壞」 | `src/update.py` 的 `fetch_news`/`fetch_market_news` 比照 `fetch_mops`/`fetch_edgar` 改回傳 `FetchResult`，四個抓取函式介面統一。`fetch_missing_data`（`src/graph.py`）不再丟棄各來源的回傳結果，改為收集成 `list[str]` 往上傳。Chainlit 路徑：`GraphState` 新增 `fetch_results` 欄位，`auto_fetch` 寫入、`no_result` 在「已嘗試抓取仍查無資料」時將各來源結果附加在回答中。MCP 路徑：`_get_fresh_context` 回傳值從「是否補抓過」的布林值改成補抓結果訊息列表，`get_stock_data`/`query_market_context` 的錯誤與提示文字都附上具體來源結果，不再只是「已嘗試補抓」這種無資訊量的提示。`tests/test_route.py` 新增 `fetch_missing_data` 的 mock 測試，涵蓋單一來源失敗不中斷、例外訊息正確收集兩種情況。 | `7defe46` |
+| MCP tool 拆為單一職責 | 三個各只做一件事、彼此不自動接力的 tool 取代原本兩個門面式 tool：`search_knowledge_base`（只檢索）、`fetch_company_data`（只抓指定公司財報+新聞）、`fetch_market_overview`（只抓市場總覽）。後兩者分開，是因為「要不要看大盤脈絡」屬語意判斷；台/美股來源分派則留在 tool 內部，屬格式規則不交給 LLM。原本的編排邏輯（`_get_fresh_context()`）整段移除，判斷準則改寫成 tool 說明中的自然語言指引。 | 待補 |
+| transport 改 HTTP 並加身分驗證 | 改用 streamable-http。SDK 內建 `auth=AuthSettings` 是完整 OAuth（`issuer_url` 必填），對單一共享密鑰過重，改以最小 Starlette middleware 檢查 `Authorization: Bearer`，未帶或不符回 401；未設定 token 時不啟用並印警告（本機開發用）。 | 待補 |
+| LangGraph 改為 tool-calling 迴圈 | 刪除 `retrieve`/`auto_fetch` 節點與 `route_after_retrieve()`/`needs_refetch()`；新增 `agent`（LLM 決策）、`tools`（`ToolNode`）、`assemble`（還原 `retrieved`/`fetch_results`）。`GraphState` 增加 `messages` 欄位，其餘欄位不動以維持下游相容。`_MAX_TOOL_ROUNDS = 4` 取代原本 `fetched` 布林的單次重試保護，避免 LLM 反覆抓取外部網站。 | 待補 |
+| agent 改以 MCP client 連線 | 用 `langchain-mcp-adapters` 的 `MultiServerMCPClient` 連自家 MCP server，與外部 client 走相同協定。`docker-compose.yml` 新增 `mcp-server` service（同映像檔、僅內部網路）。 | 待補 |
+| 前端啟動流程與步驟顯示 | graph 建立移到 `@cl.on_chat_start`（因需 async 取得 tool 清單），開新對話時檢查連線，失敗顯示可據以排查的訊息而非無回應介面。tool 呼叫順序由 LLM 動態決定、無法預判，因此整個迴圈只顯示單一步驟。 | 待補 |
+| 測試調整 | 新增 `tests/test_mcp_tools.py`（tool 回傳格式與參數傳遞）、`tests/test_assemble.py`（結果還原、路由分支與輪數上限）；`tests/test_route.py` 更名 `test_fetch.py`，移除已刪函式的斷言。 | 待補 |
 
 ### 驗證
 
-實際啟動 Ollama + pgvector（透過現有 docker-compose 服務），呼叫 `get_stock_data` 與 `query_market_context` 端到端測試：對已有完整資料的標的（AAPL）正確跳過補抓、直接回傳；對資料已過期的標的（2330）正確觸發補抓並在回應加註提示句，`source_exists` 去重也如預期跳過已入庫項目。抓取失敗訊息傳遞邏輯另以 `tests/test_route.py` 的 mock 測試驗證（`fetch_missing_data` 單元行為），未另外重跑端到端測試。
+自動化測試涵蓋確定性部分（tool 回傳格式、`assemble` 還原、`agent_route` 分支與上限），全數通過。LLM 的決策品質無法自動化斷言，以端到端手動測試檢驗：
+
+| 情境 | 預期 | 實際 |
+|---|---|---|
+| 身分驗證 | 無 token／錯誤 token 應被拒 | ✅ 皆回 401；正確 token 可取得三個 tool |
+| 資料足夠（AAPL，新聞更新至前一日且有財報） | 只檢索、不補抓 | ✅ 僅呼叫 `search_knowledge_base`，回 5 筆／4 來源 |
+| 資料過期（MSFT，新聞停在兩個月前，提問含「最新」） | 應判斷過期並補抓後重查 | ❌ 未觸發補抓，直接以兩個月前的資料作答 |
+
+**第三個情境是這次改造最重要的發現**：tool 說明已明確載明「問題含『最新』但新聞不是今天 → 應該補抓」，但 `qwen3.5:9b` 讀取檢索結果（最新日期 2026-07-12）後仍未觸發補抓，兩次獨立執行結果一致，非偶發。同樣情境下，改造前的確定性規則必定會觸發補抓。這驗證了架構風險評估中「判斷準確度取決於模型指令遵從能力」的疑慮確實成立，屬本次改造的實際功能退化，待處理方向見「目前待辦」第 1 項。
+
+過程中另修正兩個實作問題：
+- MCP SDK 內建的 DNS rebinding 防護預設僅允許 localhost，容器間以 service 名稱連線（`Host: mcp-server:8000`）會被擋成 421。改以 `MCP_ALLOWED_HOSTS` 設定允許清單，而非關閉防護。
+- `langchain-mcp-adapters` 回傳的 `ToolMessage.content` 是 MCP content block 陣列而非純字串，直接 `json.loads` 會失敗導致檢索結果遺失。新增 `_tool_text()` 同時支援兩種格式，並補進測試固定此格式。
 
 ---
 

@@ -13,6 +13,13 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 # SEC EDGAR 規定 User-Agent 需含聯絡方式，否則會被 403
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "finance-ai-assistant contact@example.com")
 
+# MCP server：LangGraph agent 與外部 client（如 Claude Desktop）共用的 tool 端點
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp")
+# 空字串代表不啟用驗證（本機開發用）；有設值時 mcp_server 會檢查 Authorization: Bearer
+MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
+# MCP SDK 的 DNS rebinding 防護允許清單：docker 內是 service 名稱，本機開發是 localhost
+MCP_ALLOWED_HOSTS = os.getenv("MCP_ALLOWED_HOSTS", "mcp-server:8000,localhost:8000,127.0.0.1:8000").split(",")
+
 # chunk 切割參數
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120

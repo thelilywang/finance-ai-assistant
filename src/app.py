@@ -17,11 +17,9 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
 from src import config
-from src.graph import build_graph, route_after_retrieve, unique_sources
+from src.graph import build_graph, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.vectorstore import delete_news_older_than
-
-graph = build_graph()
 
 try:  # 啟動時清過期新聞，DB 未起不擋 app
     pruned = delete_news_older_than(config.NEWS_RETENTION_DAYS)
@@ -127,6 +125,18 @@ async def start():
     cl.user_session.set("lang_setting", "auto")
     await _chat_settings(browser, "auto").send()
 
+    # build_graph 需要跟 MCP server 拿 tool 清單，順便當連線健康檢查：
+    # 連不上就明講原因，不讓使用者對著沒反應的輸入框猜
+    loading = cl.Message(content=t(browser, "connecting"))
+    await loading.send()
+    try:
+        cl.user_session.set("graph", await build_graph())
+        await loading.remove()
+    except Exception as e:  # noqa: BLE001
+        print(f"[app] MCP server 連線失敗：{e}")
+        loading.content = t(browser, "connect_failed", error=e)
+        await loading.update()
+
 
 @cl.on_settings_update
 async def on_settings_update(settings):
@@ -163,6 +173,7 @@ class _StepTracker:
 
 async def _stream_answer(state: dict, msg: cl.Message, tracker: _StepTracker) -> dict:
     """跑 graph，邊串流 generate 的 token 邊推進 step 顯示，回傳 final state。"""
+    graph = cl.user_session.get("graph")
     final_state = None
     in_think = False  # 保險：reasoning=False 失效時過濾 <think>...</think>
 
@@ -187,18 +198,13 @@ async def _stream_answer(state: dict, msg: cl.Message, tracker: _StepTracker) ->
                 await msg.stream_token(token)
         elif mode == "updates":
             node = next(iter(payload))
+            # ponytail: tool 呼叫順序由 LLM 動態決定，無法預判下一步是檢索還是補抓，
+            # 因此整個 agent<->tools 迴圈只顯示一個步驟，跑完（assemble）才關掉
             if node == "extract_filters":
                 if tracker.step is not None:
                     await tracker.advance(t(tracker.ui_lang, "step_retrieve"))
-            elif node == "retrieve":
-                partial = payload[node]
-                if route_after_retrieve(partial) == "auto_fetch":
-                    await tracker.advance(t(tracker.ui_lang, "step_fetch"))
-                else:
-                    await tracker.advance(t(tracker.ui_lang, "step_generate"))
-            elif node == "auto_fetch":
-                # 關閉 fetch step；重新檢索會再走一次 retrieve update 開下一個 step
-                await tracker.close()
+            elif node == "assemble":
+                await tracker.advance(t(tracker.ui_lang, "step_generate"))
         else:  # values：最後一筆就是 final state
             final_state = payload
 
@@ -273,6 +279,9 @@ async def on_message(message: cl.Message):
     history = cl.user_session.get("history")
     setting = cl.user_session.get("lang_setting", "auto")
     browser = cl.user_session.get("browser_lang", "zh")
+    if cl.user_session.get("graph") is None:  # on_chat_start 連 MCP 失敗，錯誤訊息已顯示過
+        await cl.Message(content=t(browser, "connect_failed", error="graph unavailable")).send()
+        return
     # ui_lang：介面字串（step 名稱等）跟隨設定/瀏覽器語言，不受提問語言影響
     # content_lang：回答/來源/報告內容，auto 時跟隨提問語言（中文問→中文答），判斷不了（純代號）才退回瀏覽器語言
     ui_lang = setting if setting != "auto" else browser
@@ -280,7 +289,7 @@ async def on_message(message: cl.Message):
     state = {
         "question": message.content, "history": history,
         "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
-        "fetch_results": [], "lang": content_lang,
+        "fetch_results": [], "messages": [], "lang": content_lang,
     }
 
     msg = cl.Message(content="")
