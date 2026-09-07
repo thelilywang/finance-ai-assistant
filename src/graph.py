@@ -35,6 +35,7 @@ class GraphState(TypedDict):
     retrieved: list[dict]
     answer: str
     fetched: bool  # auto_fetch 是否已執行過（保證只重試一次）
+    fetch_results: list[str]  # auto_fetch 各來源的結果訊息，no_result 用來提示抓取是否失敗
     lang: str
 
 
@@ -156,16 +157,18 @@ def retrieve(state: GraphState) -> GraphState:
     return {**state, "retrieved": docs}
 
 
-def fetch_missing_data(company: str | None, has_report: bool) -> None:
+def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
     """company 為 None 時只補市場總覽新聞；has_report=True 時只補新聞不重抓財報。
 
-    不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。單一來源失敗不中斷。
+    不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。單一來源失敗不中斷，
+    回傳每個來源的結果訊息（成功或失敗皆含），供呼叫端判斷是否要提示使用者。
     """
     try:
         from .update import fetch_edgar, fetch_mops, fetch_news, fetch_market_news  # 延遲 import，避免循環依賴
     except ImportError as e:  # 環境缺套件時降級成不抓，不炸整個對話
-        print(f"[auto_fetch] 匯入失敗（環境缺套件？）：{e}")
-        return
+        msg = f"匯入失敗（環境缺套件？）：{e}"
+        print(f"[auto_fetch] {msg}")
+        return [msg]
 
     calls = []
     if company:
@@ -179,19 +182,23 @@ def fetch_missing_data(company: str | None, has_report: bool) -> None:
     # ponytail: 市場總覽新聞一律補掃，source_exists 會跳過已入庫的，重複觸發便宜
     calls.append(lambda: fetch_market_news(3))
 
+    results = []
     for call in calls:
         try:
-            call()
+            results.append(call().detail)
         except Exception as e:  # noqa: BLE001  單一來源失敗不中斷
-            print(f"[auto_fetch] 抓取失敗：{e}")
+            msg = f"抓取失敗：{e}"
+            print(f"[auto_fetch] {msg}")
+            results.append(msg)
+    return results
 
 
 def auto_fetch(state: GraphState) -> GraphState:
     """資料不足時自動補抓：有指名公司抓其財報+新聞，一律加掃市場總覽新聞。抓完標記 fetched（保證只重試一次）。"""
     company = state.get("company")
     has_report = any(d["doc_type"] == "financial_report" for d in state["retrieved"])
-    fetch_missing_data(company, has_report)
-    return {**state, "fetched": True}
+    results = fetch_missing_data(company, has_report)
+    return {**state, "fetched": True, "fetch_results": results}
 
 
 def needs_refetch(docs: list[dict], company: str | None, question: str) -> bool:
@@ -287,6 +294,9 @@ def no_result(state: GraphState) -> GraphState:
     lang = state.get("lang", "zh")
     if state.get("fetched"):
         answer = t(lang, "no_result_fetched", company=state.get("company"))
+        results = state.get("fetch_results") or []
+        if results:
+            answer += "\n\n" + "\n".join(f"- {r}" for r in results)
     else:
         answer = t(lang, "no_result_plain")
     if state.get("company"):

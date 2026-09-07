@@ -198,7 +198,7 @@ def fetch_mops(co_id: str) -> FetchResult:
         return FetchResult(False, f"MOPS 抓取異常：{e}")
 
 
-def fetch_news(company: str, limit: int = 10) -> None:
+def fetch_news(company: str, limit: int = 10) -> FetchResult:
     """從 Yahoo Finance RSS 抓最新新聞並匯入。台股代號自動加 .TW。"""
     symbol = f"{company}.TW" if is_tw_ticker(company) else company
     url = (
@@ -208,13 +208,15 @@ def fetch_news(company: str, limit: int = 10) -> None:
     # Yahoo 會擋預設的 python-requests User-Agent，帶瀏覽器 UA
     resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=TIMEOUT)
     if resp.status_code != 200:
-        print(f"[update] Yahoo RSS 取得失敗（HTTP {resp.status_code}），稍後再試。")
-        return
+        msg = f"Yahoo RSS 取得失敗（HTTP {resp.status_code}），稍後再試。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
 
     items = ET.fromstring(resp.content).findall(".//item")[:limit]
     if not items:
-        print(f"[update] {symbol} 的 RSS 沒有新聞。")
-        return
+        msg = f"{symbol} 的 RSS 沒有新聞。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
 
     total = 0
     for item in items:
@@ -236,7 +238,9 @@ def fetch_news(company: str, limit: int = 10) -> None:
             )
         except Exception as e:  # noqa: BLE001
             print(f"[update] 新聞處理失敗（{link}）：{e}")
-    print(f"[update] 新聞更新完成，共寫入 {total} 筆 chunk。")
+    msg = f"新聞更新完成，共寫入 {total} 筆 chunk。"
+    print(f"[update] {msg}")
+    return FetchResult(total > 0, msg)
 
 
 def _company_from_title(title: str) -> str | None:
@@ -245,7 +249,7 @@ def _company_from_title(title: str) -> str | None:
     return m.group(1) if m else None
 
 
-def fetch_market_news(limit_per_source: int = 10) -> None:
+def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
     """掃 MARKET_SOURCES 列表頁，抓新文章入庫。已入庫的 source 直接跳過。"""
     from .vectorstore import source_exists
 
@@ -295,7 +299,9 @@ def fetch_market_news(limit_per_source: int = 10) -> None:
             except Exception as e:  # noqa: BLE001
                 print(f"[update] {name} 文章處理失敗（{url}）：{e}")
 
-    print(f"[update] 市場新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。")
+    msg = f"市場新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
+    print(f"[update] {msg}")
+    return FetchResult(total > 0 or skipped > 0, msg)
 
 
 def main() -> None:
