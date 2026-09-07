@@ -1,6 +1,6 @@
 # 維護歷程
 
-紀錄專案已知的技術債、優化候選項與決策依據，供面試或交接時說明「已知但刻意延後」的判斷。
+紀錄專案已知的技術債、優化候選項與決策依據。重點不只在「做了什麼」，也在「為什麼這樣取捨」與「什麼是已知但刻意延後的」。
 
 ---
 
@@ -9,25 +9,25 @@
 1. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 2. **回應延遲過長**（`src/graph.py` 的 `agent` 節點）
-   改為 LLM 自主決策後，每題的 LLM 呼叫次數從 3 次增為至少 4 次（多一次 agent 決策），LLM 決定補抓時再多 1-2 輪。實測本機 `qwen3.5:9b` 單題總耗時約 470 秒，各節點分佈為：`extract_filters` 157 秒、`agent` 決策兩輪合計 156 秒、`generate` 152 秒、實際檢索僅 4 秒——瓶頸全在本地模型推理，非架構本身。可行方向：換用推理更快的模型或量化版本、合併 `rewrite_question`/`extract_filters` 為單次呼叫、資料明顯足夠時跳過 agent 迴圈（等於把部分決策權收回程式，需與待辦 1 一併權衡）。
+   改為 LLM 自主決策後，每題的 LLM 呼叫次數從 3 次增為至少 4 次（多一次 agent 決策），LLM 決定補抓時再多 1-2 輪。實測本機 `qwen3.5:9b` 單題總耗時約 470 秒，各節點分佈為：`extract_filters` 157 秒、`agent` 決策兩輪合計 156 秒、`generate` 152 秒、實際檢索僅 4 秒——瓶頸全在本地模型推理，非架構本身。可行方向：換用推理更快的模型或量化版本、合併 `rewrite_question`/`extract_filters` 為單次呼叫、資料明顯足夠時跳過 agent 迴圈（但這等於把部分決策權收回程式，與 09-07 改造的目標相衝突，需權衡）。
 3. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
 4. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
-   若未來資料抓取從現行的同步 API/套件（`requests`/`yfinance`）全面轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」（`httpx.AsyncClient` 同步等待）與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種抓取管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前用 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 只有在需要同時服務多個併發 client（多個外部 MCP client、或支援多標的並行抓取）時才有實質效益。目前抓取皆為同步 `requests`，單次呼叫數秒內完成，非長跑背景任務，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現問題的預先架構，先記錄方向，待真的更換抓取引擎或遇到穩定性問題時再評估。
+   若未來抓取從同步 API/套件轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前以 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 要到需服務多個併發 client 時才有實質效益。現況為同步 `requests`、單次數秒內完成，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現的問題，先記錄方向待實際需要時再評估。
 5. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
-## 保持現狀（已知，僅口頭說明，不列入近期修復）
+## 保持現狀（已評估，判斷暫不處理）
 
 - **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前覆蓋純函式與資料轉換層（`assemble`、`agent_route`、MCP tool 的回傳格式、`fetch_missing_data`、格式化函式等），`generate` 因直接耦合本地 LLM 未做 mock、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測生成節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
-- **LLM 選用 tool 的正確性無自動化測試**（`src/mcp_server.py` 的 tool docstring、`src/graph.py` 的 `_tool_llm`）— 「資料過期時會不會主動補抓」取決於模型行為，需真實 Ollama 呼叫且結果不保證重現，不適合寫成自動化斷言。目前靠端到端手動驗證，且需連續執行多次確認一致性（09-08 有過單次成功、重複執行皆失敗的實例）。模型換版、調整 tool 說明或改動 `_tool_llm` 的參數時都需重跑。
-- **MOPS 爬蟲改用 Playwright——評估後不採用**（`src/update.py`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會導致失效，屬結構性限制。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04 章節。（原本一併記錄的「MCP 化不採用」判斷已不適用：當時的理由是呼叫端只有一處、跨進程 RPC 不划算，2026-09-07 改造後 LangGraph agent 與外部 client 成為兩個呼叫端，MCP 化的前提已成立。）
+- **LLM 選用 tool 的正確性無自動化測試**（`src/mcp_server.py` 的 tool 說明、`src/graph.py` 的 `_tool_llm`）— 「資料過期時會不會主動補抓」取決於模型行為，需真實 Ollama 呼叫且結果不保證重現，不適合寫成自動化斷言。目前靠端到端手動驗證，且需連續執行多次確認一致性（09-08 有過單次成功、重複執行皆失敗的實例）。模型換版、調整 tool 說明或改動 `_tool_llm` 的參數時都需重跑。
+- **MOPS 爬蟲改用 Playwright——評估後不採用**（`src/update.py`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會失效，屬結構性限制。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04 章節。
 
 ---
 
 ## 2026-09-02　依賴版本 / 架構優化評估
 
-對 8 項候選優化點做唯讀評估（不改動邏輯），逐一給出：影響情境、六維評分（效能延遲／成本／維運複雜度／生態成熟度／可擴展性／vendor lock-in）、修復難度、面試話術。完整評分表見本次 commit 前的分析討論記錄；以下為結論與後續追蹤。
+對 8 項候選優化點做唯讀評估（不改動邏輯），逐一就影響情境、六維指標（效能延遲／成本／維運複雜度／生態成熟度／可擴展性／vendor lock-in）與修復難度評分排序。以下為結論與後續追蹤，未列入的項目多屬「已知但當前 CP 值不足」，見上方「目前待辦」與「保持現狀」。
 
 ### 已修復
 
@@ -39,14 +39,16 @@
 
 ## 2026-09-03　LLM 穩定性、連線效能、Ticker 誤判修復
 
+> 本節提及的 `route_after_retrieve`／`auto_fetch` 已於 2026-09-07 改造時移除，內容保留作為當時的決策紀錄。
+
 ### 已修復
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
-| LLM retry/backoff | `src/graph.py:41-44` 的 `llm` 定義加上 `.with_retry(stop_after_attempt=3)`；`RunnableRetry` 仍保有 `.invoke()`，`rewrite_question`/`extract_filters`/`generate` 三處呼叫端不用改。Ollama 冷啟動/短暫逾時時會重試，不再直接中斷整個 graph 節點。 | `b031f5c` |
-| `tests/test_route.py` 過期測試 fixture | 根因：`route_after_retrieve`（`src/graph.py:175-189`）已改成用 `published_at` 判斷新聞是否過期並讀 `state["question"]` 判斷是否要求「最新」，但測試 dict 沒帶這兩個欄位，導致 `d.get("published_at")` 恆為 `None` → `news_dates` 恆空 → 永遠落入 `auto_fetch` 分支。屬測試落後於生產邏輯演進，非 `route_after_retrieve` 本身有 bug。補上 `question` 欄位、`published_at` 改用真實的 `date` 物件（原本錯誤示範會用字串比較日期直接炸 `TypeError`），並新增一筆「新聞過期需重抓」的案例補齊覆蓋。 | `87c989c` |
-| 無連線池 | `src/vectorstore.py` 的 `get_connection()` 改用 `psycopg_pool.ConnectionPool`（`min_size=1, max_size=5, open=False`），每次查詢從共用池借連線而非新開 TCP + PG 認證。所有呼叫端（`app.py`/`ingest.py`/`graph.py`/`update.py`）用法不變，因為 `pool.connection()` 一樣是 context manager。額外加了 `requirements.txt` 的 `psycopg[pool]>=3.1.0`。過程中發現 `ConnectionPool` 預設 `timeout=30` 秒——DB 連不上時要等滿 30 秒才降級，遠比原本 `psycopg.connect()` 的毫秒級失敗慢；改成 `timeout=2` 後測試從 32 秒降到 4-5 秒（正常連線本該是毫秒級，2 秒內連不上代表 DB 真的掛了，拖久沒意義）。 | `c77ff4b` |
-| Ticker regex fallback 誤判 | 治本而非修 regex：`extract_filters`（`src/graph.py`）從手寫 prompt + `json.loads` 改成 `llm.with_structured_output(ExtractedFilters)`，Pydantic schema 含 `status`/`error_message`/`company`/`doc_type`，`company` 用 `field_validator` 呼叫新增的 `src/tickers.py::normalize_ticker()` 正規化（去除 `.TW`/`.PR.A` 等後綴、驗證台股 4-6碼數字+可選字母尾碼／美股 1-5碼大寫字母格式）。原本的 regex fallback（純英文問題會誤抓一般單字當 ticker）直接拿掉，改由 LLM 在 structured prompt 中自行判斷；多標的問題（如「AAPL 和 TSLA 比較」）現在會回報 `status="error"` 而非硬猜一個代號（多標的支援見上方「目前待辦」）。同時發現並修正 3 處既有的 `isdigit() and len==4` 台股判斷（`graph.py`/`market.py`/`update.py`）——ETF 新制 6 碼、特別股/可轉債帶字母尾碼的代號會被這個舊判斷誤判成美股，統一改用 `tickers.py::is_tw_ticker()`。新增 `tests/test_tickers.py` 覆蓋格式邊界案例。過程中發現 `with_structured_output()` 是 `ChatOllama` 專屬方法，`.with_retry()` 包裝後回傳 `RunnableRetry` 不再有這個方法，需要先在原始 `ChatOllama` 物件（`_base_llm`）上呼叫 `with_structured_output`，最後才疊 `with_retry`。 | `2a00991` |
+| LLM retry/backoff | `llm` 定義加上 `.with_retry(stop_after_attempt=3)`；`RunnableRetry` 仍保有 `.invoke()`，三處呼叫端不用改。Ollama 冷啟動或短暫逾時時會重試，不再直接中斷整個 graph 節點。 | `b031f5c` |
+| 測試 fixture 落後於生產邏輯 | `route_after_retrieve` 已改用 `published_at` 判斷新聞是否過期，但測試 dict 沒帶該欄位，導致判斷恆為空、永遠落入補抓分支——屬測試未跟上邏輯演進，非程式本身有 bug。補上缺漏欄位、`published_at` 改用真實 `date` 物件（用字串比較日期會直接拋 `TypeError`），並補一筆「新聞過期需重抓」的案例。 | `87c989c` |
+| 無連線池 | `src/vectorstore.py` 的 `get_connection()` 改用 `psycopg_pool.ConnectionPool`，從共用池借連線而非每次新開 TCP + PG 認證；所有呼叫端用法不變（`pool.connection()` 一樣是 context manager）。過程中發現其預設 `timeout=30` 秒遠慢於原本 `psycopg.connect()` 的毫秒級失敗，改成 `timeout=2` 後測試從 32 秒降到 4-5 秒——正常連線本該是毫秒級，2 秒內連不上即代表 DB 已掛，續等無益。 | `c77ff4b` |
+| Ticker regex fallback 誤判 | 治本而非修 regex：`extract_filters` 從手寫 prompt + `json.loads` 改用 `with_structured_output(ExtractedFilters)`，代號由 Pydantic `field_validator` 呼叫新增的 `normalize_ticker()` 正規化（去除 `.TW`/`.PR.A` 等後綴並驗證格式）。原本的 regex fallback（純英文問題會誤抓一般單字當 ticker）直接移除；多標的問題改為回報錯誤而非硬猜一個代號。同時修正三處既有的 `isdigit() and len==4` 台股判斷——ETF 新制 6 碼、特別股與可轉債的字母尾碼會被誤判成美股，統一改用 `is_tw_ticker()`。 | `2a00991` |
 
 ---
 
@@ -54,17 +56,9 @@
 
 ### 背景
 
-「MOPS 爬蟲脆弱性」在 09-02 的評估中被列為保持現狀——已有 try/except 全包、失敗降級印手動下載指引，判斷為結構性限制而非程式碼品質問題。本次重新檢視時，先評估了「將 `fetch_mops` 抽成獨立 MCP Server、內部改用 Playwright」的架構提案。
+「MOPS 爬蟲脆弱性」在 09-02 的評估中被列為保持現狀——已有 try/except 全包、失敗降級印手動下載指引，判斷為結構性限制而非程式碼品質問題。本次重新檢視時評估了改用 Playwright 的提案，結論為不採用（理由見上方「保持現狀」）。
 
-### 架構提案評估：MCP + Playwright 化
-
-**結論：不採用。** 理由與詳細討論見上方「保持現狀」區塊。
-
-### 發現的實際問題：財報固定選到英文版
-
-評估架構提案的過程中，直接向 MOPS 端點送出真實請求（2330，115年）取得原始回應 HTML，發現同一季度會同時列出 `_AI1.pdf`（IFRSs合併財報，中文主文）與 `_AIA.pdf`（IFRSs英文版）兩份檔案。
-
-原本的選檔邏輯 `sorted(files)[-1]` 依字典序排序，`'AIA' > 'AI1'`，導致每次都固定選到英文版而非中文主文——這是系統性錯誤，不是偶發，且與服務中文財經助理的產品定位不符。
+但評估過程中直接向 MOPS 端點送出真實請求（2330，115 年）取得原始回應，發現同一季度會同時列出 `_AI1.pdf`（IFRSs 合併財報，中文主文）與 `_AIA.pdf`（英文版）兩份檔案。原本的選檔邏輯 `sorted(files)[-1]` 依字典序排序，而 `'AIA' > 'AI1'`，導致每次都固定選到英文版——這是系統性錯誤而非偶發，且與中文財經助理的產品定位不符。
 
 ### 修復
 
@@ -80,7 +74,7 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 ## 2026-09-04　Rewrite 追問改寫誤判修正
 
-### 問題
+### 背景
 
 `rewrite_question`（`src/graph.py`）在有對話歷史時，把使用者追問改寫成不依賴上下文的獨立問題（例如「那毛利率呢？」→「台積電的毛利率是多少？」），讓後續 embedding 檢索有效。改寫前有一段 regex bypass：問題中出現 4 位數字或 2-5 碼大寫字母就視為「已指名代號」，跳過改寫直接放行。
 
@@ -108,7 +102,7 @@ MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面�
 
 本次改造把決策權交給 LLM，並讓兩個呼叫端（Chainlit 內部的 LangGraph agent、外部的 Claude Desktop 等 client）走相同協定、共用同一份 tool 定義，避免同樣的判斷邏輯維護兩套。MCP server 同時從 stdio 改為 HTTP transport 並加上 Bearer token 驗證——stdio 沒有 per-request 驗證的概念，要做身分驗證必須是網路服務。
 
-**已知代價**：每題多一次 LLM 往返（決策用），且判斷從確定性規則變成模型推理，穩定性取決於模型的指令遵從能力——實測顯示這個代價確實發生了，詳見下方驗證。延遲方面本機實測單題約 470 秒，但瓶頸在本地模型推理速度（檢索本身僅 4 秒），非架構所致。
+**取捨**：換來的是判斷能涵蓋規則寫不出的情境（例如依問法語氣調整時效標準），以及外部 client 能自行決定要不要補抓；代價是每題多一次 LLM 往返、延遲增加，且判斷正確性不再有程式保證——這個代價在改造當下即被列為主要風險，實際也確實發生（見下方驗證）。
 
 ### 架構
 
@@ -120,7 +114,7 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 ### 改動內容
 
-| 項目 | 內容 | commit |
+| 項目 | 改動說明 | commit |
 |---|---|---|
 | MCP tool 拆為單一職責 | 三個各只做一件事、彼此不自動接力的 tool 取代原本兩個門面式 tool：`search_knowledge_base`（只檢索）、`fetch_company_data`（只抓指定公司財報+新聞）、`fetch_market_overview`（只抓市場總覽）。後兩者分開，是因為「要不要看大盤脈絡」屬語意判斷；台/美股來源分派則留在 tool 內部，屬格式規則不交給 LLM。原本的編排邏輯（`_get_fresh_context()`）整段移除，判斷準則改寫成 tool 說明中的自然語言指引。 | `ef76670` |
 | transport 改 HTTP 並加身分驗證 | 改用 streamable-http。SDK 內建 `auth=AuthSettings` 是完整 OAuth（`issuer_url` 必填），對單一共享密鑰過重，改以最小 Starlette middleware 檢查 `Authorization: Bearer`，未帶或不符回 401；未設定 token 時不啟用並印警告（本機開發用）。 | `ef76670` |
@@ -128,6 +122,11 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | agent 改以 MCP client 連線 | 用 `langchain-mcp-adapters` 的 `MultiServerMCPClient` 連自家 MCP server，與外部 client 走相同協定。`docker-compose.yml` 新增 `mcp-server` service（同映像檔、僅內部網路）。 | `ef76670` |
 | 前端啟動流程與步驟顯示 | graph 建立移到 `@cl.on_chat_start`（因需 async 取得 tool 清單），開新對話時檢查連線，失敗顯示可據以排查的訊息而非無回應介面。tool 呼叫順序由 LLM 動態決定、無法預判，因此整個迴圈只顯示單一步驟。 | `ef76670` |
 | 測試調整 | 新增 `tests/test_mcp_tools.py`（tool 回傳格式與參數傳遞）、`tests/test_assemble.py`（結果還原、路由分支與輪數上限）；`tests/test_route.py` 更名 `test_fetch.py`，移除已刪函式的斷言。 | `ef76670` |
+
+導入 MCP 協定時另遇到兩個套件層面的問題，一併處理：
+
+- **容器間連線被擋成 421**：MCP SDK 內建的 DNS rebinding 防護預設僅允許 localhost，容器以 service 名稱連線（`Host: mcp-server:8000`）會被拒。改以 `MCP_ALLOWED_HOSTS` 設定允許清單，而非關閉該防護。
+- **檢索結果在傳遞中遺失**：`langchain-mcp-adapters` 回傳的 `ToolMessage.content` 是 MCP content block 陣列而非純字串，直接 `json.loads` 會失敗。新增 `_tool_text()` 同時支援兩種格式，並補進測試固定此格式。
 
 ### 驗證
 
@@ -139,55 +138,41 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 資料足夠（AAPL，新聞更新至前一日且有財報） | 只檢索、不補抓 | ✅ 僅呼叫 `search_knowledge_base`，回 5 筆／4 來源 |
 | 資料過期（MSFT，新聞停在兩個月前，提問含「最新」） | 應判斷過期並補抓後重查 | ❌ 未觸發補抓，直接以兩個月前的資料作答 |
 
-**第三個情境是這次改造最重要的發現**：tool 說明已明確載明「問題含『最新』但新聞不是今天 → 應該補抓」，但 `qwen3.5:9b` 讀取檢索結果（最新日期 2026-07-12）後仍未觸發補抓，兩次獨立執行結果一致，非偶發。同樣情境下，改造前的確定性規則必定會觸發補抓。這驗證了架構風險評估中「判斷準確度取決於模型指令遵從能力」的疑慮確實成立，屬本次改造的實際功能退化（已於 2026-09-08 修復，根因與當時的推測不同，見下一章節）。
-
-過程中另修正兩個實作問題：
-- MCP SDK 內建的 DNS rebinding 防護預設僅允許 localhost，容器間以 service 名稱連線（`Host: mcp-server:8000`）會被擋成 421。改以 `MCP_ALLOWED_HOSTS` 設定允許清單，而非關閉防護。
-- `langchain-mcp-adapters` 回傳的 `ToolMessage.content` 是 MCP content block 陣列而非純字串，直接 `json.loads` 會失敗導致檢索結果遺失。新增 `_tool_text()` 同時支援兩種格式，並補進測試固定此格式。
+第三個情境是相對於改造前的功能退化（同情境下原本的確定性規則必定會補抓），當下判斷為「模型指令遵從能力不足」，後續盤查證實此判斷有誤，真正根因與完整修復見 2026-09-08 章節。
 
 ---
 
-## 2026-09-08　修復補資料決策失效：根因是關閉推理模式壓掉了 tool-calling
+## 2026-09-08　補資料決策失效修復
 
 ### 背景
 
-09-07 改造後留下一個功能退化：資料明顯過期時 LLM 不會觸發補抓。當時推測是「模型判斷力不足、指令遵從度不夠」，實際盤查後發現推測錯誤——模型的判斷全程正確，問題在別處，且一共牽涉五個獨立缺陷。
+09-07 改造後留下一個功能退化：對資料停在兩個月前的標的提問「MSFT 最新財報和近況如何？」，tool 說明已載明此情境應補抓，模型卻直接以過期資料作答。同情境下改造前的確定性規則必定會補抓。
 
-追蹤單輪決策時，模型的回覆是：
-
-> 「距今約 58 天…問題包含「最近／最新」等字眼，而現有資料已超過 3 天的時效限制…因此需要補抓…**我將呼叫 `fetch_company_data`**」
-
-推理完全正確，卻只把工具呼叫寫成文字敘述，沒有產生結構化的 tool call。A／B 對照確認：同一情境下 `reasoning=False` 完全不發 tool call，未關推理則正常發出。真正的根因是**模型設定壓掉了 tool-calling 能力**，而非判斷品質。
+初步假設為模型指令遵從能力不足，但單輪決策的完整回覆顯示模型已正確算出天數、套用規則並得出「需要補抓」的結論，只是把工具呼叫寫成文字敘述而非結構化的 tool call。此落差指向輸出格式而非理解能力，據此轉查模型參數，A／B 對照確認根因為 `reasoning=False`——原為避免 `<think>` 推理段污染回答串流而設，卻連帶壓掉了 tool-calling 能力。排查與修正過程中另發現四項相關缺陷，一併處理。
 
 ### 修復
 
-| 項目 | 內容 | commit |
+| 項目 | 修復內容 | commit |
 |---|---|---|
-| 關閉推理模式導致 tool-calling 失效（主因） | `src/graph.py` 新增 `_tool_llm`（不帶 `reasoning=False`）專供 `agent` 節點；`_base_llm` 維持關閉推理，繼續供 `rewrite_question`/`extract_filters`/`generate` 使用以保持輸出乾淨。agent 的輸出不進使用者可見的串流（`app.py` 只放行 `generate` 的 token），因此 `<think>` 不會外洩。 | `41ac2ec` |
-| 模型無從判斷資料新舊 | prompt 從未提供當日日期，模型讀得出「2026-07-12」卻無法判斷距今多久。`_seed_prompt` 加上今天日期；`search_knowledge_base` 的回傳為每筆資料算好「距今 N 天」，並在開頭標明今天日期，讓模型不需自行做日期運算。 | `41ac2ec` |
-| 財報天數被誤當新聞時效 | 修好 tool-calling 後才浮現：AAPL 有 3 天前的新聞（不該補抓）卻仍觸發補抓，因為摘要把財報（57 天）與新聞（3 天）混列，模型無從分辨該用哪個數字。摘要改為每筆標示「財報｜」或「新聞｜」，並在開頭直接給出「目前最新的『新聞』距今 N 天」；tool 說明同步改為只依這個數字判斷，並註明財報按季發布、距今數十天屬正常。 | `41ac2ec` |
+| 關閉推理模式導致 tool-calling 失效（根因） | 依用途拆成兩個模型實例：`agent` 節點改用不帶 `reasoning=False` 的 `_tool_llm`，其餘節點沿用 `_base_llm` 維持輸出乾淨。`agent` 的輸出不進使用者可見的串流（前端只放行 `generate` 的 token），`<think>` 不會外洩。 | `41ac2ec` |
+| 模型無從判斷資料新舊 | prompt 從未提供當日日期，模型讀得出「2026-07-12」卻無法判斷距今多久。`_seed_prompt` 與 `search_knowledge_base` 的回傳都補上今天日期，並為每筆資料預先算好「距今 N 天」，讓模型不需自行做日期運算。 | `41ac2ec` |
+| 財報天數被誤當新聞時效 | 工具呼叫恢復後才顯現：檢索摘要把財報（57 天）與新聞（3 天）混列，模型分不出該依哪個數字判斷，導致資料夠新時也觸發補抓。摘要改為每筆標示「財報｜」或「新聞｜」，開頭直接給出「目前最新的『新聞』距今 N 天」；tool 說明同步改為只依這個數字判斷，並註明財報按季發布、距今數十天屬正常。 | `41ac2ec` |
 | `doc_type` 參數被填入多值 | 模型會傳 `"financial_report,news"`，但該參數只接受單一值，照字面過濾會查出空結果。tool 說明明確限定可填值並說明「想兩種都查就留空」，同時在 tool 內部容錯：非單一合法值一律降級為不過濾。 | `41ac2ec` |
 | 容器時區為 UTC，日期偏移一天 | 容器未設時區，比台北時間慢 8 小時，台灣半夜 0-8 點期間整個系統認定的「今天」會少一天，使新增的「距今 N 天」全面偏移，也會影響 MOPS 民國年計算跨年時的年度判斷。`docker-compose.yml` 為三個服務設定 `TZ`（可用環境變數覆寫）。 | `41ac2ec` |
 
 ### 驗證
 
-自動化測試新增「距今天數正確」「今天日期出現在摘要」「只有財報時明確標示無新聞」「多值 `doc_type` 降級為不過濾」等斷言，11 個測試檔全數通過。
-
-端到端手動測試（真實 Ollama + MCP + pgvector），兩情境各連續執行三次確認穩定：
+自動化測試補上距今天數計算、摘要標示與 `doc_type` 容錯的斷言，11 個測試檔全數通過。模型是否依說明決策無法自動化斷言，另以端到端測試（真實 Ollama + MCP + pgvector）驗證，兩情境各連續執行三次確認穩定：
 
 | 情境 | 摘要開頭 | 決策 | 結果 |
 |---|---|---|---|
 | 資料過期（MSFT，提問含「最新」） | 最新「新聞」距今 58 天 | 呼叫 `fetch_company_data` | ✅ 3/3 一致 |
 | 資料足夠（AAPL） | 最新「新聞」距今 3 天 | 停止呼叫工具，直接作答 | ✅ 3/3 一致 |
 
-先前曾出現「單次成功但重複執行皆失敗」的情況，因此本次以連續執行確認一致性，而非單次通過即認定修復。
-
-### 反思
-
-最初把問題歸因於「模型判斷力不足」，據此的修正方向（強化 docstring 措辭、考慮換模型）並未解決問題。實際根因是一個為了其他目的而設的參數（`reasoning=False` 原用於避免 `<think>` 污染串流）壓掉了 tool-calling 能力——同一個設定同時服務兩種用途相衝突的節點。教訓是：模型行為異常時，先確認輸出格式與參數設定，再質疑模型能力；本案的關鍵線索是模型「說出了正確判斷卻沒有實際行動」，這個落差本身就指向格式問題而非理解問題。
+之所以連續執行而非單次驗收：本次修復過程中曾有一版單次測試通過、重跑三次卻全數失敗，涉及模型行為的修復需以重複執行確認一致性。
 
 ---
 
 ## 待補紀錄
 
-後續每次修復或有新決策時，於本檔案新增一節（日期 + 標題），保留「做了什麼／為什麼／取捨」，不需重複貼完整程式碼片段，指向檔案路徑 + 行號即可。新完成的修復項目同時要移出「目前待辦」或「保持現狀」區塊。
+後續每次修復或有新決策時，於本檔案新增一節（日期 + 標題），保留「做了什麼／為什麼／取捨」，不需重複貼完整程式碼片段，指向檔案路徑或函式名即可。新完成的修復項目同時要移出「目前待辦」或「保持現狀」區塊。
