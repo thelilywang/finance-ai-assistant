@@ -7,7 +7,9 @@
 ## 目前待辦（依 CP 值排序）
 
 1. **LLM 未依 tool 說明觸發補抓（功能退化，最高優先）**（`src/mcp_server.py` 的 tool docstring、`src/graph.py` 的 `agent`）
-   實測「MSFT 最新財報和近況如何？」時，資料庫資料停在兩個月前，tool 說明已載明此情境應補抓，但 `qwen3.5:9b` 未照做，直接以過期資料作答（詳見 2026-09-07 驗證）。改造前的確定性規則在同情境必定補抓，屬實際功能退化。可行方向：強化 docstring 指引（把日期比較寫得更像可執行步驟）、在 seed prompt 中補上今天日期與資料新舊的顯性提示、換用 tool-calling 表現較好的模型，或在 agent 迴圈前保留一道確定性的過期檢查作為保底（等於把部分決策權收回程式，需權衡與本次改造目標的取捨）。應在正式使用前處理。
+   實測「MSFT 最新財報和近況如何？」時，資料庫資料停在兩個月前，tool 說明已載明此情境應補抓，但 `qwen3.5:9b` 未照做，直接以過期資料作答（詳見 2026-09-07 驗證）。改造前的確定性規則在同情境必定補抓，屬實際功能退化。
+   **已定位根因**：追蹤單輪決策發現，模型回覆「資料已足夠…最新發布日期為 2026-07-12」——它正確讀出了日期，卻判定資料夠新。關鍵在於 prompt 從未提供「今天是哪一天」，模型無從判斷 07-12 距今兩個月。優先修正方向是在 seed prompt 或 tool 回傳內容中帶入當日日期與距今天數，讓時效性判斷有可比基準，再重測是否仍需其他手段（換模型、或保留一道確定性過期檢查作保底）。
+   同一次追蹤另發現：模型把 `doc_type` 填成 `"financial_report,news"`（逗號串接），但該參數只接受單一值，會使過濾條件失效。需在 docstring 明確限定可用值，或改為在 tool 內容忍並正規化這種輸入。
 2. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 3. **回應延遲過長**（`src/graph.py` 的 `agent` 節點）
@@ -124,12 +126,12 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 | 項目 | 內容 | commit |
 |---|---|---|
-| MCP tool 拆為單一職責 | 三個各只做一件事、彼此不自動接力的 tool 取代原本兩個門面式 tool：`search_knowledge_base`（只檢索）、`fetch_company_data`（只抓指定公司財報+新聞）、`fetch_market_overview`（只抓市場總覽）。後兩者分開，是因為「要不要看大盤脈絡」屬語意判斷；台/美股來源分派則留在 tool 內部，屬格式規則不交給 LLM。原本的編排邏輯（`_get_fresh_context()`）整段移除，判斷準則改寫成 tool 說明中的自然語言指引。 | 待補 |
-| transport 改 HTTP 並加身分驗證 | 改用 streamable-http。SDK 內建 `auth=AuthSettings` 是完整 OAuth（`issuer_url` 必填），對單一共享密鑰過重，改以最小 Starlette middleware 檢查 `Authorization: Bearer`，未帶或不符回 401；未設定 token 時不啟用並印警告（本機開發用）。 | 待補 |
-| LangGraph 改為 tool-calling 迴圈 | 刪除 `retrieve`/`auto_fetch` 節點與 `route_after_retrieve()`/`needs_refetch()`；新增 `agent`（LLM 決策）、`tools`（`ToolNode`）、`assemble`（還原 `retrieved`/`fetch_results`）。`GraphState` 增加 `messages` 欄位，其餘欄位不動以維持下游相容。`_MAX_TOOL_ROUNDS = 4` 取代原本 `fetched` 布林的單次重試保護，避免 LLM 反覆抓取外部網站。 | 待補 |
-| agent 改以 MCP client 連線 | 用 `langchain-mcp-adapters` 的 `MultiServerMCPClient` 連自家 MCP server，與外部 client 走相同協定。`docker-compose.yml` 新增 `mcp-server` service（同映像檔、僅內部網路）。 | 待補 |
-| 前端啟動流程與步驟顯示 | graph 建立移到 `@cl.on_chat_start`（因需 async 取得 tool 清單），開新對話時檢查連線，失敗顯示可據以排查的訊息而非無回應介面。tool 呼叫順序由 LLM 動態決定、無法預判，因此整個迴圈只顯示單一步驟。 | 待補 |
-| 測試調整 | 新增 `tests/test_mcp_tools.py`（tool 回傳格式與參數傳遞）、`tests/test_assemble.py`（結果還原、路由分支與輪數上限）；`tests/test_route.py` 更名 `test_fetch.py`，移除已刪函式的斷言。 | 待補 |
+| MCP tool 拆為單一職責 | 三個各只做一件事、彼此不自動接力的 tool 取代原本兩個門面式 tool：`search_knowledge_base`（只檢索）、`fetch_company_data`（只抓指定公司財報+新聞）、`fetch_market_overview`（只抓市場總覽）。後兩者分開，是因為「要不要看大盤脈絡」屬語意判斷；台/美股來源分派則留在 tool 內部，屬格式規則不交給 LLM。原本的編排邏輯（`_get_fresh_context()`）整段移除，判斷準則改寫成 tool 說明中的自然語言指引。 | `ef76670` |
+| transport 改 HTTP 並加身分驗證 | 改用 streamable-http。SDK 內建 `auth=AuthSettings` 是完整 OAuth（`issuer_url` 必填），對單一共享密鑰過重，改以最小 Starlette middleware 檢查 `Authorization: Bearer`，未帶或不符回 401；未設定 token 時不啟用並印警告（本機開發用）。 | `ef76670` |
+| LangGraph 改為 tool-calling 迴圈 | 刪除 `retrieve`/`auto_fetch` 節點與 `route_after_retrieve()`/`needs_refetch()`；新增 `agent`（LLM 決策）、`tools`（`ToolNode`）、`assemble`（還原 `retrieved`/`fetch_results`）。`GraphState` 增加 `messages` 欄位，其餘欄位不動以維持下游相容。`_MAX_TOOL_ROUNDS = 4` 取代原本 `fetched` 布林的單次重試保護，避免 LLM 反覆抓取外部網站。 | `ef76670` |
+| agent 改以 MCP client 連線 | 用 `langchain-mcp-adapters` 的 `MultiServerMCPClient` 連自家 MCP server，與外部 client 走相同協定。`docker-compose.yml` 新增 `mcp-server` service（同映像檔、僅內部網路）。 | `ef76670` |
+| 前端啟動流程與步驟顯示 | graph 建立移到 `@cl.on_chat_start`（因需 async 取得 tool 清單），開新對話時檢查連線，失敗顯示可據以排查的訊息而非無回應介面。tool 呼叫順序由 LLM 動態決定、無法預判，因此整個迴圈只顯示單一步驟。 | `ef76670` |
+| 測試調整 | 新增 `tests/test_mcp_tools.py`（tool 回傳格式與參數傳遞）、`tests/test_assemble.py`（結果還原、路由分支與輪數上限）；`tests/test_route.py` 更名 `test_fetch.py`，移除已刪函式的斷言。 | `ef76670` |
 
 ### 驗證
 
