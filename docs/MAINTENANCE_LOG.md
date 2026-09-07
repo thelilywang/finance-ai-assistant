@@ -163,11 +163,11 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 | 項目 | 內容 | commit |
 |---|---|---|
-| 關閉推理模式導致 tool-calling 失效（主因） | `src/graph.py` 新增 `_tool_llm`（不帶 `reasoning=False`）專供 `agent` 節點；`_base_llm` 維持關閉推理，繼續供 `rewrite_question`/`extract_filters`/`generate` 使用以保持輸出乾淨。agent 的輸出不進使用者可見的串流（`app.py` 只放行 `generate` 的 token），因此 `<think>` 不會外洩。 | 待補 |
-| 模型無從判斷資料新舊 | prompt 從未提供當日日期，模型讀得出「2026-07-12」卻無法判斷距今多久。`_seed_prompt` 加上今天日期；`search_knowledge_base` 的回傳為每筆資料算好「距今 N 天」，並在開頭標明今天日期，讓模型不需自行做日期運算。 | 待補 |
-| 財報天數被誤當新聞時效 | 修好 tool-calling 後才浮現：AAPL 有 3 天前的新聞（不該補抓）卻仍觸發補抓，因為摘要把財報（57 天）與新聞（3 天）混列，模型無從分辨該用哪個數字。摘要改為每筆標示「財報｜」或「新聞｜」，並在開頭直接給出「目前最新的『新聞』距今 N 天」；tool 說明同步改為只依這個數字判斷，並註明財報按季發布、距今數十天屬正常。 | 待補 |
-| `doc_type` 參數被填入多值 | 模型會傳 `"financial_report,news"`，但該參數只接受單一值，照字面過濾會查出空結果。tool 說明明確限定可填值並說明「想兩種都查就留空」，同時在 tool 內部容錯：非單一合法值一律降級為不過濾。 | 待補 |
-| 容器時區為 UTC，日期偏移一天 | 容器未設時區，比台北時間慢 8 小時，台灣半夜 0-8 點期間整個系統認定的「今天」會少一天，使新增的「距今 N 天」全面偏移，也會影響 MOPS 民國年計算跨年時的年度判斷。`docker-compose.yml` 為三個服務設定 `TZ`（可用環境變數覆寫）。 | 待補 |
+| 關閉推理模式導致 tool-calling 失效（主因） | `src/graph.py` 新增 `_tool_llm`（不帶 `reasoning=False`）專供 `agent` 節點；`_base_llm` 維持關閉推理，繼續供 `rewrite_question`/`extract_filters`/`generate` 使用以保持輸出乾淨。agent 的輸出不進使用者可見的串流（`app.py` 只放行 `generate` 的 token），因此 `<think>` 不會外洩。 | `41ac2ec` |
+| 模型無從判斷資料新舊 | prompt 從未提供當日日期，模型讀得出「2026-07-12」卻無法判斷距今多久。`_seed_prompt` 加上今天日期；`search_knowledge_base` 的回傳為每筆資料算好「距今 N 天」，並在開頭標明今天日期，讓模型不需自行做日期運算。 | `41ac2ec` |
+| 財報天數被誤當新聞時效 | 修好 tool-calling 後才浮現：AAPL 有 3 天前的新聞（不該補抓）卻仍觸發補抓，因為摘要把財報（57 天）與新聞（3 天）混列，模型無從分辨該用哪個數字。摘要改為每筆標示「財報｜」或「新聞｜」，並在開頭直接給出「目前最新的『新聞』距今 N 天」；tool 說明同步改為只依這個數字判斷，並註明財報按季發布、距今數十天屬正常。 | `41ac2ec` |
+| `doc_type` 參數被填入多值 | 模型會傳 `"financial_report,news"`，但該參數只接受單一值，照字面過濾會查出空結果。tool 說明明確限定可填值並說明「想兩種都查就留空」，同時在 tool 內部容錯：非單一合法值一律降級為不過濾。 | `41ac2ec` |
+| 容器時區為 UTC，日期偏移一天 | 容器未設時區，比台北時間慢 8 小時，台灣半夜 0-8 點期間整個系統認定的「今天」會少一天，使新增的「距今 N 天」全面偏移，也會影響 MOPS 民國年計算跨年時的年度判斷。`docker-compose.yml` 為三個服務設定 `TZ`（可用環境變數覆寫）。 | `41ac2ec` |
 
 ### 驗證
 
