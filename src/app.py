@@ -280,7 +280,7 @@ async def on_message(message: cl.Message):
     state = {
         "question": message.content, "history": history,
         "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
-        "lang": content_lang,
+        "fetch_results": [], "lang": content_lang,
     }
 
     msg = cl.Message(content="")
