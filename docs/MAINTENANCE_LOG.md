@@ -203,8 +203,8 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 | 項目 | 改動說明 | commit |
 |---|---|---|
-| 保留決策依據 | `src/graph.py` 的註解改為記錄實測數據與已排除的方案。 | `5c9ccc3` |
-| 移除失效的防護程式碼 | `src/app.py` 過濾 `<think>` 標籤的邏輯，原作為「`reasoning=False` 失效時的保險」。但它只作用於 `generate` 的串流，而該節點的 `_base_llm` 已關閉推理；唯一未指定 `reasoning` 的 `_tool_llm` 輸出不進使用者可見的串流。此分支永遠不會執行。 | `5c9ccc3` |
+| 保留決策依據 | `src/graph.py` 的註解改為記錄實測數據與已排除的方案。 | `ca4d857` |
+| 移除失效的防護程式碼 | `src/app.py` 過濾 `<think>` 標籤的邏輯，原作為「`reasoning=False` 失效時的保險」。但它只作用於 `generate` 的串流，而該節點的 `_base_llm` 已關閉推理；唯一未指定 `reasoning` 的 `_tool_llm` 輸出不進使用者可見的串流。此分支永遠不會執行。 | `ca4d857` |
 
 ### 驗證
 
