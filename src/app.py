@@ -105,13 +105,25 @@ def _trim_for_history(answer: str) -> str:
     return answer[: config.HISTORY_ANSWER_MAX_CHARS]
 
 
-def _chat_settings(label_lang: str, initial_value: str) -> cl.ChatSettings:
+def _model_choices() -> dict[str, str]:
+    """選單項目：預設模型排在最前面，確保它一定在清單裡（設定漏列時也不會選不到）。"""
+    names = [config.LLM_MODEL] + [m for m in config.LLM_MODEL_CHOICES if m != config.LLM_MODEL]
+    return {m: m for m in names}
+
+
+def _chat_settings(label_lang: str, initial_value: str, model: str) -> cl.ChatSettings:
     return cl.ChatSettings([
         Select(
             id="language",
             label=t(label_lang, "settings_label"),
             items={"Auto": "auto", "繁體中文": "zh", "English": "en"},
             initial_value=initial_value,
+        ),
+        Select(
+            id="model",
+            label=t(label_lang, "model_label"),
+            items=_model_choices(),
+            initial_value=model,
         ),
     ])
 
@@ -123,7 +135,8 @@ async def start():
     browser = detect_lang(cl.user_session.get("languages"))
     cl.user_session.set("browser_lang", browser)
     cl.user_session.set("lang_setting", "auto")
-    await _chat_settings(browser, "auto").send()
+    cl.user_session.set("model", config.LLM_MODEL)
+    await _chat_settings(browser, "auto", config.LLM_MODEL).send()
 
     # build_graph 需要跟 MCP server 拿 tool 清單，順便當連線健康檢查：
     # 連不上就明講原因，不讓使用者對著沒反應的輸入框猜
@@ -142,9 +155,11 @@ async def start():
 async def on_settings_update(settings):
     setting = settings["language"]
     cl.user_session.set("lang_setting", setting)
+    model = settings.get("model") or config.LLM_MODEL
+    cl.user_session.set("model", model)
     browser = cl.user_session.get("browser_lang", "zh")
     new_lang = setting if setting != "auto" else browser
-    await _chat_settings(new_lang, setting).send()
+    await _chat_settings(new_lang, setting, model).send()
 
 
 class _StepTracker:
@@ -279,6 +294,7 @@ async def on_message(message: cl.Message):
         "question": message.content, "history": history,
         "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
         "fetch_results": [], "messages": [], "lang": content_lang,
+        "model": cl.user_session.get("model") or config.LLM_MODEL,
     }
 
     msg = cl.Message(content="")

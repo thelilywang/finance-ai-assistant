@@ -9,6 +9,15 @@ DATABASE_URL = os.getenv("PGVECTOR_URL", "postgresql://finrag:finrag@localhost:5
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5:9b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
+# UI 模型選單的可選項目（逗號分隔）。同系列較小與 MLX 版本都實測過，不是 tool calling
+# 失效就是更慢（見 MAINTENANCE_LOG 2026-09-08「推理顯示與模型替換評估」），因此只列
+# 預設模型。要試新模型時先 ollama pull，再用環境變數加進來，但務必確認該模型支援
+# tool calling，否則 agent 節點不會發 tool_calls。
+LLM_MODEL_CHOICES = [
+    m.strip()
+    for m in os.getenv("LLM_MODEL_CHOICES", "qwen3.5:9b").split(",")
+    if m.strip()
+]
 
 # SEC EDGAR 規定 User-Agent 需含聯絡方式，否則會被 403
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "finance-ai-assistant contact@example.com")

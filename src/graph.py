@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+from functools import lru_cache
 from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -46,6 +47,7 @@ class GraphState(TypedDict):
     fetched: bool  # 本輪是否呼叫過補抓 tool，no_result 用來決定提示語
     fetch_results: list[str]  # 各補抓 tool 的結果訊息，no_result 用來提示抓取是否失敗
     lang: str
+    model: str  # 本輪使用的 Ollama 模型，由 UI 選單決定；空值則用 config.LLM_MODEL
     messages: Annotated[list[BaseMessage], add_messages]  # agent <-> tools 的往返記錄
 
 
@@ -55,17 +57,30 @@ class GraphState(TypedDict):
 # 到 238s，連體感延遲都更差。壓制推理長度的兩條路也都試過：reasoning='low' 對
 # qwen3.5 無效（推理字數與 True 完全相同，層級控制僅 gpt-oss 支援），num_predict
 # 則是推理先吃光額度、答案被截成空字串（done_reason=length）。換模型再重新評估。
-_base_llm = ChatOllama(
-    model=config.LLM_MODEL, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False
-)
-# tool-calling 專用：reasoning=False 會讓模型把「我要呼叫某工具」寫成文字而非產生
-# 結構化 tool_calls（實測 A/B：關推理時同一情境完全不發 tool call，開啟則正常），
-# 因此 agent 節點不能沿用 _base_llm。
-_tool_llm = ChatOllama(
-    model=config.LLM_MODEL, base_url=config.OLLAMA_BASE_URL, temperature=0
-)
-# with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
-llm = _base_llm.with_retry(stop_after_attempt=3)
+def _model_of(state: GraphState) -> str:
+    """本輪要用的模型。UI 沒選（或舊呼叫端沒帶）就退回預設。"""
+    return state.get("model") or config.LLM_MODEL
+
+
+@lru_cache(maxsize=8)
+def _llms(model: str) -> dict:
+    """建立某個模型的三個實例。lru_cache 讓同一模型的多個 session 共用，換模型才新建。"""
+    base = ChatOllama(
+        model=model, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False
+    )
+    return {
+        # with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
+        "llm": base.with_retry(stop_after_attempt=3),
+        "filters": base.with_structured_output(ExtractedFilters).with_retry(
+            stop_after_attempt=3
+        ),
+        # tool-calling 專用：reasoning=False 會讓模型把「我要呼叫某工具」寫成文字而非
+        # 產生結構化 tool_calls（實測 A/B：關推理時同一情境完全不發 tool call，開啟則
+        # 正常），因此 agent 節點不能沿用關掉推理的實例。
+        "tool": ChatOllama(model=model, base_url=config.OLLAMA_BASE_URL, temperature=0),
+    }
+
+
 embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
 
 
@@ -92,7 +107,7 @@ def rewrite_question(state: GraphState) -> GraphState:
 
 新問題：{state['question']}
 """
-    rewritten = llm.invoke(prompt).content.strip()
+    rewritten = _llms(_model_of(state))["llm"].invoke(prompt).content.strip()
     return {**state, "question": rewritten or state["question"]}
 
 
@@ -108,10 +123,6 @@ class ExtractedFilters(BaseModel):
         return normalize_ticker(v) if v else None
 
 
-# structured output 要包在 base llm 上：RunnableRetry（llm）沒有 with_structured_output 方法
-_filter_extractor = _base_llm.with_structured_output(ExtractedFilters).with_retry(stop_after_attempt=3)
-
-
 def extract_filters(state: GraphState) -> GraphState:
     """從問題中抽取公司代號 / 文件類型，抽不出來就設為 None（不過濾）。"""
     prompt = f"""你是財經助理的前處理模組。請從使用者問題中判斷：
@@ -125,7 +136,7 @@ def extract_filters(state: GraphState) -> GraphState:
 使用者問題：{state['question']}
 """
     try:
-        parsed = _filter_extractor.invoke(prompt)
+        parsed = _llms(_model_of(state))["filters"].invoke(prompt)
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
         print(f"[extract_filters] 結構化輸出失敗：{e}")
         return {**state, "company": None, "doc_type": None}
@@ -250,7 +261,7 @@ async def agent(state: GraphState) -> GraphState:
     """把 MCP tool 綁給 LLM，由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。"""
     tools = await _mcp_client.get_tools()
     messages = state.get("messages") or [HumanMessage(content=_seed_prompt(state))]
-    resp = await _tool_llm.bind_tools(tools).ainvoke(messages)
+    resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(messages)
     return {**state, "messages": [resp]}
 
 
@@ -361,7 +372,7 @@ def generate(state: GraphState) -> GraphState:
 {market_block}{history_block}
 使用者問題：{state['question']}
 """
-    resp = llm.invoke(prompt)
+    resp = _llms(_model_of(state))["llm"].invoke(prompt)
     return {**state, "answer": resp.content}
 
 
