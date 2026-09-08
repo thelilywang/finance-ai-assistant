@@ -49,14 +49,18 @@ class GraphState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]  # agent <-> tools 的往返記錄
 
 
-# reasoning=False 關閉 qwen3.5 的 <think> 推理段，避免污染 JSON 解析與串流輸出
+# reasoning=False 關閉推理段。曾評估對 generate 開啟以顯示推理過程（可解釋性），
+# 實測在 qwen3.5:9b 上代價無法接受：單題 186s→1245s，光 generate 就從 87s 變 1053s
+# （模型為一句營收問題寫了 30891 字推理，是答案的 21 倍），且首個 token 從 108s 延後
+# 到 238s，連體感延遲都更差。壓制推理長度的兩條路也都試過：reasoning='low' 對
+# qwen3.5 無效（推理字數與 True 完全相同，層級控制僅 gpt-oss 支援），num_predict
+# 則是推理先吃光額度、答案被截成空字串（done_reason=length）。換模型再重新評估。
 _base_llm = ChatOllama(
     model=config.LLM_MODEL, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False
 )
 # tool-calling 專用：reasoning=False 會讓模型把「我要呼叫某工具」寫成文字而非產生
 # 結構化 tool_calls（實測 A/B：關推理時同一情境完全不發 tool call，開啟則正常），
-# 因此 agent 節點改用未關推理的實例。它的輸出不進使用者可見的串流（只有 generate 會），
-# 所以 <think> 不會外洩。
+# 因此 agent 節點不能沿用 _base_llm。
 _tool_llm = ChatOllama(
     model=config.LLM_MODEL, base_url=config.OLLAMA_BASE_URL, temperature=0
 )

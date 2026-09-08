@@ -175,7 +175,6 @@ async def _stream_answer(state: dict, msg: cl.Message, tracker: _StepTracker) ->
     """跑 graph，邊串流 generate 的 token 邊推進 step 顯示，回傳 final state。"""
     graph = cl.user_session.get("graph")
     final_state = None
-    in_think = False  # 保險：reasoning=False 失效時過濾 <think>...</think>
 
     # 同時訂閱 messages（逐 token）、updates（節點完成通知）與 values（完整 state）
     async for mode, payload in graph.astream(state, stream_mode=["messages", "updates", "values"]):
@@ -183,19 +182,9 @@ async def _stream_answer(state: dict, msg: cl.Message, tracker: _StepTracker) ->
             chunk, metadata = payload
             if metadata.get("langgraph_node") != "generate" or not chunk.content:
                 continue
-            token = chunk.content
-            if "<think>" in token:
-                in_think = True
-            if in_think:
-                if "</think>" in token:
-                    in_think = False
-                    token = token.split("</think>", 1)[1]
-                else:
-                    continue
-            if token:
-                if tracker.step is not None:  # 第一個 generate token 到，關掉還開著的 step
-                    await tracker.close()
-                await msg.stream_token(token)
+            if tracker.step is not None:  # 第一個 generate token 到，關掉還開著的 step
+                await tracker.close()
+            await msg.stream_token(chunk.content)
         elif mode == "updates":
             node = next(iter(payload))
             # ponytail: tool 呼叫順序由 LLM 動態決定，無法預判下一步是檢索還是補抓，
