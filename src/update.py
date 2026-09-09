@@ -14,6 +14,7 @@ import datetime as dt
 import email.utils
 import html as html_lib
 import re
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
@@ -25,6 +26,10 @@ from .ingest import ingest_file, ingest_text
 from .tickers import is_tw_ticker
 
 TIMEOUT = 30
+# 財報全文動輒數萬字；低於此值代表拿到的是節流頁、維護頁或空殼，不是財報
+_MIN_FILING_CHARS = 500
+# 多個來源（Yahoo RSS、櫃買、MOPS、新聞列表頁）會擋預設的 python-requests UA
+BROWSER_UA = {"User-Agent": "Mozilla/5.0"}
 
 
 @dataclass
@@ -54,6 +59,26 @@ MARKET_SOURCES = {
                  r"/news/id/(\d+)",
                  lambda m: f"https://news.cnyes.com/news/id/{m.group(1)}"),
 }
+
+# 官方財報 OpenAPI：證交所（上市）與櫃買（上櫃），皆免驗證。
+# 每個 dataset 只含「最新一季」全體公司，所以是抓整包再挑出該公司那一列。
+# ponytail: 只收一般業（_ci）。金融/金控/保險/證券期貨業（_basi/_fh/_ins/_bd）欄位
+# 結構完全不同，各自解析要多寫四套 formatter；上限是查金融股時這軌沒資料、只剩
+# PDF 那軌。真要支援再依 co_id 查所屬業別後擴充下面的清單。
+TWSE_DATASETS = ("t187ap06_L_ci", "t187ap07_L_ci")                   # 上市：綜合損益表、資產負債表
+TPEX_DATASETS = ("mopsfin_t187ap06_O_ci", "mopsfin_t187ap07_O_ci")   # 上櫃：同上
+API_SOURCES = (
+    ("證交所", "https://openapi.twse.com.tw/v1/opendata/{}", TWSE_DATASETS),
+    ("櫃買中心", "https://www.tpex.org.tw/openapi/v1/{}", TPEX_DATASETS),
+)
+
+# 證交所用中文欄位名、櫃買用英文欄位名，同樣的資料兩種命名，兩邊都要吃
+_CODE_KEYS = ("公司代號", "SecuritiesCompanyCode")
+_NAME_KEYS = ("公司名稱", "CompanyName")
+_YEAR_KEYS = ("年度", "Year")
+_SEASON_KEYS = ("季別", "Season")
+# 這些是識別欄位，不是財務數字，格式化時要排除
+_META_KEYS = frozenset(_CODE_KEYS + _NAME_KEYS + _YEAR_KEYS + _SEASON_KEYS + ("出表日期", "Date"))
 
 MOPS_MANUAL_GUIDE = """[update] MOPS 抓取失敗（介面脆弱，隨時可能變動）。手動下載步驟：
   1. 開 https://doc.twse.com.tw/server-java/t57sb01 或公開資訊觀測站搜尋公司代號
@@ -129,6 +154,18 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
     """
     headers = {"User-Agent": config.SEC_USER_AGENT}
 
+    try:
+        return _fetch_edgar(ticker, form, headers)
+    except requests.RequestException as e:
+        # 與其餘抓取器一致：抓取失敗回 FetchResult 而非拋錯，CLI 才印得出可讀訊息。
+        # ingest_text 不在此範圍內（見 fetch_mops 的同一原則），DB 失敗仍往上拋
+        msg = f"SEC EDGAR 取得失敗：{e}"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
+
+
+def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
+    """fetch_edgar 的實作本體；網路錯誤由呼叫端統一收斂。"""
     resp = requests.get(
         "https://www.sec.gov/files/company_tickers.json", headers=headers, timeout=TIMEOUT
     )
@@ -181,6 +218,14 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
     if not text:
         # ponytail: trafilatura 抽不到就整包去 tag 粗抽 + 解 HTML entities（€ 等符號），財報 HTML 幾乎都抽得到
         text = html_lib.unescape(re.sub(r"<[^>]+>", " ", resp.text))
+
+    # SEC 節流頁與維護頁都是 HTTP 200，raise_for_status 攔不住；不檢查會把那一句
+    # 警告文字當成財報寫進向量庫並回報成功，靜默污染檢索結果。財報全文遠長於此
+    if len(text.strip()) < _MIN_FILING_CHARS or "Undeclared Automated Tool" in text:
+        msg = f"{ticker.upper()} 的 {form} 內容異常（僅 {len(text.strip())} 字，可能是節流或維護頁）。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
+
     ingest_text(
         text,
         source=f"EDGAR:{ticker.upper()}:{accession}",
@@ -207,10 +252,145 @@ def _select_report_file(files: list[str]) -> str | None:
     return zh_main[0] if zh_main else month_files[-1]
 
 
+def _pick(row: dict, keys: tuple[str, ...]) -> str | None:
+    """從 row 取出第一個存在的鍵值，用來吃證交所中文鍵／櫃買英文鍵兩種命名。"""
+    for k in keys:
+        if row.get(k):
+            return str(row[k]).strip()
+    return None
+
+
+def _find_company_row(rows: list[dict], co_id: str) -> dict | None:
+    """從整包資料中找出該公司那一列；查無回 None。"""
+    for row in rows:
+        if _pick(row, _CODE_KEYS) == co_id:
+            return row
+    return None
+
+
+def _quarter_end_date(year: str, season: str) -> str | None:
+    """民國年度 + 季別推出「季末次月一日」作為發布日期。115 年第 2 季 → 2026-08-01。
+
+    財報實際公告日在季末後一至兩個月，取次月一日只是要一個穩定、單調遞增且不早於
+    期末的日期，供檢索時的時間排序用，不是精確公告日。
+    """
+    try:
+        ad_year = int(year) + 1911
+        month = int(season) * 3 + 1  # Q1→4月, Q2→7月... 再加一個月的緩衝
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= int(season) <= 4:
+        return None
+    month += 1
+    if month > 12:  # Q4 → 隔年 2 月
+        ad_year, month = ad_year + 1, month - 12
+    return f"{ad_year}-{month:02d}-01"
+
+
+def _fmt_amount(value: object) -> str:
+    """數字加千分位便於閱讀；非數字原樣輸出。"""
+    text = str(value).strip()
+    try:
+        num = float(text)
+    except ValueError:
+        return text
+    return f"{num:,.2f}".rstrip("0").rstrip(".") if "." in text else f"{int(num):,}"
+
+
+def _format_rows(rows: list[dict], co_id: str) -> tuple[str, str, str] | None:
+    """把各報表的數字列轉成可 embedding 的中文文字。
+
+    回傳 (文字, published_at, 年度季別標籤)；沒有任何有效資料時回 None。
+    金額單位為仟元，必須明寫——原始值如 2404483690 不標單位會被 LLM 讀成元。
+    """
+    blocks: list[str] = []
+    published_at = label = None
+    for title, row in rows:
+        name = _pick(row, _NAME_KEYS) or co_id
+        year = _pick(row, _YEAR_KEYS)
+        season = _pick(row, _SEASON_KEYS)
+        if not (year and season):
+            continue
+        published_at = published_at or _quarter_end_date(year, season)
+        label = label or f"{year}Q{season}"
+
+        # 空字串欄位（如生物資產類科目）大多數公司不適用，略過以免灌入無意義的雜訊
+        lines = [
+            f"{k}：{_fmt_amount(v)}"
+            for k, v in row.items()
+            if k not in _META_KEYS and str(v).strip()
+        ]
+        if not lines:
+            continue
+        blocks.append(
+            f"{name}（{co_id}）{year} 年第 {season} 季 {title}"
+            f"（單位：仟元，每股盈餘為元；資料來源：公開資訊觀測站 OpenAPI）\n"
+            + "\n".join(lines)
+        )
+    if not blocks or not published_at:
+        return None
+    return "\n\n".join(blocks), published_at, label
+
+
+def fetch_tw_financials(co_id: str) -> FetchResult:
+    """從官方 OpenAPI 抓結構化財報數字並匯入（上市走證交所、上櫃走櫃買）。
+
+    與 fetch_mops 是互補的兩軌：本函式拿精準數字，fetch_mops 拿 PDF 的文字敘述
+    （管理層討論、風險、展望）。任一軌失敗不影響另一軌。
+    """
+    # try 只包外部抓取，不包 ingest_text：DB/embedding 失敗不是抓取失敗，
+    # 讓它往上拋（與 fetch_mops 同一原則）。resp.json() 的解析失敗會拋
+    # requests.JSONDecodeError，它本身是 RequestException 的子類，已被涵蓋。
+    reachable = False
+    for source_name, url_tpl, datasets in API_SOURCES:
+        try:
+            found = []
+            for dataset in datasets:
+                resp = requests.get(url_tpl.format(dataset), headers=BROWSER_UA, timeout=TIMEOUT)
+                resp.raise_for_status()
+                row = _find_company_row(resp.json(), co_id)
+                if row:
+                    # 損益表在前、資產負債表在後，依 datasets 順序自然成立
+                    title = "綜合損益表" if "ap06" in dataset else "資產負債表"
+                    found.append((title, row))
+        except requests.RequestException as e:
+            # 單一市場的端點掛掉不影響另一個市場，繼續試下一個
+            print(f"[update] {source_name} OpenAPI 取得失敗（{e}），略過。")
+            continue
+        reachable = True
+        if not found:
+            continue  # 這個市場查無此公司，換下一個市場
+
+        formatted = _format_rows(found, co_id)
+        if formatted is None:
+            msg = f"{source_name} OpenAPI 查到 {co_id} 但欄位無法解析（格式可能已變動）。"
+            print(f"[update] {msg}")
+            return FetchResult(False, msg)
+        text, published_at, label = formatted
+        ingest_text(
+            text,
+            source=f"TWSE-API:{co_id}:{label}",  # 帶年度季別，換季不覆蓋舊季
+            company=co_id,
+            doc_type="financial_report",
+            published_at=published_at,
+        )
+        return FetchResult(True, f"已匯入 {co_id} {label} 財報數字（{source_name} OpenAPI）")
+
+    # 區分「連得上但沒這家公司」與「兩邊端點都掛了」，後者訊息若寫成查無公司會誤導排查方向
+    msg = (
+        f"官方 OpenAPI 查無 {co_id}（可能為興櫃、金融業或已下市）。" if reachable
+        else "官方 OpenAPI 兩個來源皆無法取得（端點或網路異常）。"
+    )
+    print(f"[update] {msg}")
+    return FetchResult(False, msg)
+
+
 def fetch_mops(co_id: str) -> FetchResult:
     """從 MOPS（公開資訊觀測站）抓最新財報 PDF 並匯入。
 
-    # ponytail: MOPS 無官方 API，此爬取流程隨時可能失效；掛掉時印手動下載指引，不 raise。
+    與 fetch_tw_financials 互補：本函式拿 PDF 的文字敘述（管理層討論、風險、業務
+    展望），數字則由官方 OpenAPI 那軌負責。MOPS 無官方 API，此爬取流程依賴網站
+    當前頁面結構、隨時可能失效；掛掉時印手動下載指引並回傳失敗，不 raise。
     """
     try:
         endpoint = "https://doc.twse.com.tw/server-java/t57sb01"
@@ -222,6 +402,7 @@ def fetch_mops(co_id: str) -> FetchResult:
                     "id": "", "key": "", "step": "1", "co_id": co_id, "year": str(year),
                     "seamon": "", "mtype": "A", "encodeURIComponent": "1", "firstin": "true",
                 },
+                headers=BROWSER_UA,
                 timeout=TIMEOUT,
             )
             resp.raise_for_status()
@@ -241,6 +422,7 @@ def fetch_mops(co_id: str) -> FetchResult:
         resp = requests.post(
             endpoint,
             data={"step": "9", "kind": "A", "co_id": co_id, "filename": filename},
+            headers=BROWSER_UA,
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
@@ -251,8 +433,17 @@ def fetch_mops(co_id: str) -> FetchResult:
             print(MOPS_MANUAL_GUIDE)
             return FetchResult(False, msg)
 
-        resp = requests.get(f"https://doc.twse.com.tw{m.group(1)}", timeout=TIMEOUT)
+        resp = requests.get(
+            f"https://doc.twse.com.tw{m.group(1)}", headers=BROWSER_UA, timeout=TIMEOUT
+        )
         resp.raise_for_status()
+        # 端點改版時第三步可能回錯誤頁 HTML；不檢查會寫成 .pdf 再由 pypdf 拋錯，
+        # 錯誤訊息指向 pypdf 而非真正的失敗點 MOPS
+        if not resp.content.startswith(b"%PDF"):
+            msg = f"MOPS 回傳的不是 PDF（{filename}，可能是錯誤頁）。"
+            print(f"[update] {msg}")
+            print(MOPS_MANUAL_GUIDE)
+            return FetchResult(False, msg)
         path = f"data/{filename}"
         with open(path, "wb") as f:
             f.write(resp.content)
@@ -262,7 +453,10 @@ def fetch_mops(co_id: str) -> FetchResult:
         published_at = f"{filename[:4]}-{filename[4:6]}-01"
         ingest_file(path, company=co_id, doc_type="financial_report", published_at=published_at)
         return FetchResult(True, f"已匯入 {co_id} 財報（{filename}）")
-    except Exception as e:  # noqa: BLE001
+    except (requests.RequestException, OSError) as e:
+        # 只收「抓取／寫檔」這段的失敗。ingest_file 內的 DB 或 embedding 失敗不是
+        # MOPS 的錯，讓它往上拋給 graph.py 的 handler，不要誤報成 MOPS 抓取異常、
+        # 也不要印一份無關的手動下載指引
         print(f"[update] MOPS 抓取異常：{e}")
         print(MOPS_MANUAL_GUIDE)
         return FetchResult(False, f"MOPS 抓取異常：{e}")
@@ -276,7 +470,7 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
         f"?s={symbol}&region=US&lang=en-US"
     )
     # Yahoo 會擋預設的 python-requests User-Agent，帶瀏覽器 UA
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=TIMEOUT)
+    resp = requests.get(url, headers=BROWSER_UA, timeout=TIMEOUT)
     if resp.status_code != 200:
         msg = f"Yahoo RSS 取得失敗（HTTP {resp.status_code}），稍後再試。"
         print(f"[update] {msg}")
@@ -306,7 +500,9 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
                 text, source=link, company=company, doc_type="news", published_at=published_at,
                 title=title,
             )
-        except Exception as e:  # noqa: BLE001
+        except (requests.RequestException, OSError, ValueError) as e:
+            # 單篇文章的下載或解析失敗就跳過。DB/embedding 失敗不會落在這裡，
+            # 會往上拋——那是系統性問題，逐篇印錯再回報「寫入 0 筆」等於靜默失敗
             print(f"[update] 新聞處理失敗（{link}）：{e}")
     msg = f"新聞更新完成，共寫入 {total} 筆 chunk。"
     print(f"[update] {msg}")
@@ -327,7 +523,7 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
     skipped = 0
     for name, (listing_url, pattern, normalize) in MARKET_SOURCES.items():
         resp = requests.get(
-            listing_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=TIMEOUT
+            listing_url, headers=BROWSER_UA, timeout=TIMEOUT
         )
         if resp.status_code != 200:
             print(f"[update] {name} 列表頁取得失敗（HTTP {resp.status_code}），跳過。")
@@ -366,7 +562,8 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
                     text, source=url, company=company, doc_type="news",
                     published_at=published_at, title=title,
                 )
-            except Exception as e:  # noqa: BLE001
+            except (requests.RequestException, OSError, ValueError) as e:
+                # 同 fetch_news：單篇失敗跳過，DB/embedding 失敗往上拋
                 print(f"[update] {name} 文章處理失敗（{url}）：{e}")
 
     msg = f"市場新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
@@ -378,7 +575,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="抓取財報/新聞並匯入 pgvector")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_report = sub.add_parser("report", help="抓財報（us: SEC EDGAR / tw: MOPS）")
+    p_report = sub.add_parser(
+        "report", help="抓財報（us: SEC EDGAR / tw: 官方 OpenAPI + MOPS 兩軌）"
+    )
     p_report.add_argument("--market", required=True, choices=["tw", "us"])
     p_report.add_argument("--company", required=True, help="美股 ticker 或台股代號")
     p_report.add_argument("--form", default="10-Q", help="美股表單類型，預設 10-Q")
@@ -396,17 +595,25 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "report":
         if args.market == "us":
-            fetch_edgar(args.company, args.form)
+            ok = fetch_edgar(args.company, args.form).ok
         else:
-            fetch_mops(args.company)
+            # 兩軌互補：API 拿數字、MOPS 拿文字敘述。兩軌都跑，任一軌成功就算成功
+            api = fetch_tw_financials(args.company)
+            pdf = fetch_mops(args.company)
+            ok = api.ok or pdf.ok
     elif args.command == "news":
-        fetch_news(args.company, args.limit)
+        ok = fetch_news(args.company, args.limit).ok
     elif args.command == "market-news":
-        fetch_market_news(args.limit)
+        ok = fetch_market_news(args.limit).ok
     else:
         from .vectorstore import delete_news_older_than
 
         print(f"[update] 已刪除 {delete_news_older_than(args.days)} 筆過期新聞 chunk。")
+        ok = True
+
+    # 失敗回非零結束碼，讓排程/CI 偵測得到；抓取函式本身的行為不變（graph 那邊靠字串）
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

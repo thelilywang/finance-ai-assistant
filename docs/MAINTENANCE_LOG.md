@@ -10,9 +10,15 @@
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
-3. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+3. **美股財報數字改走 SEC XBRL API**（`src/update.py` 的 `fetch_edgar`）
+   台股本次已改為「官方 API 取數字 + 爬蟲取文字」雙軌，美股只做了一半：`fetch_edgar` 仍只從申報 HTML 抽純文字，數字精準度受制於 HTML 表格抽取。SEC 有對應的結構化端點（`data.sec.gov/api/xbrl/companyconcept`、`companyfacts`），實測可取得 AAPL 的營收與 EPS。**但難度與台股不同級**：單一公司的 `companyfacts` 達 3.8 MB、503 個 us-gaap 概念，且同一指標有多個標籤（營收同時存在 `Revenues` 與 `RevenueFromContractWithCustomerExcludingAssessedTax`），各公司採用不一，需要一套概念優先序對應表才能穩定取值；台股 API 則是固定欄位的單一列，直接格式化即可。屬獨立提案，不宜當作順手優化。
+4. **`src/update.py` 依資料類型拆分模組**（`src/update.py`）
+   目前 598 行、16 個函式。四個抓取器（EDGAR／台股財報兩軌／新聞／市場新聞）彼此不互相呼叫，共用的只有 `FetchResult`、`TIMEOUT` 與 `BROWSER_UA` 三樣，因此沒有「改 A 功能要先讀懂 B」的實際負擔，拆檔屬預防性整理而非解決現有痛點。真要拆時**依資料類型**切為 `report`（EDGAR + 台股雙軌）／`news`／`market_news`／`_common`（放上述三個共用項），因為這條線與實際修改動機吻合：某來源改版就只動該檔。**不建議依台股／美股切**——`fetch_news` 單一函式同時處理兩市場（只差 `.TW` 後綴）、`fetch_market_news` 兩者都掃，按市場切會迫使這兩個函式拆散或重複，市場並非此模組的變動軸線。拆檔需同步調整 `graph.py` 的延遲 import、`mcp_server.py` 的 import，以及 `tests/test_fetch.py` 的 monkeypatch——後者是打在 `src.update` 的模組屬性上，import 路徑一變會靜默失效變成真的連外而非報錯，是拆檔時最容易漏掉的一點。宜獨立成一次純搬遷 commit，不與功能改動混做。
+5. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
+   官方 OpenAPI 取得的結構化財報數字目前與 PDF 文字一樣進 `doc_chunks`，走同一條向量檢索路徑。「台積電最新一季 EPS 多少」這類純數字問題其實不需要 embedding 相似度比對——資料庫裡就有確定的那一格，繞過檢索可同時降低延遲與消除檢索誤差。要做需新增一個直查結構化數字的 MCP tool，並調整 `assemble`/`generate` 的 context 組裝與引用編號邏輯：現行設計的前提是「所有證據都可被 `[來源N]` 引用」，直答通道的數字若不進 `retrieved` 就沒有對應來源編號，等於在決策卡的反幻覺規則上開一個沒有引用的破口，需先想清楚這類數字如何標註出處。影響面大，刻意獨立處理。
+6. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
    若未來抓取從同步 API/套件轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前以 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 要到需服務多個併發 client 時才有實質效益。現況為同步 `requests`、單次數秒內完成，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現的問題，先記錄方向待實際需要時再評估。
-4. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+7. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
 ## 保持現狀（已評估，判斷暫不處理）
@@ -20,7 +26,7 @@
 - **回應延遲過長，架構層面已無可省**（`src/graph.py` 的 `generate` 節點）— 單題總耗時 186 至 470 秒。三個可行方向已於 09-09 收斂：`_trim_for_llm` 裁掉 agent 迴圈重複傳遞的 context（降低 context 膨脹，不改善延遲）、`route_after_tools` 在資料明顯足夠時跳過第二輪 agent 決策（結構性省下一次 LLM 呼叫，該節點原佔 82 至 106 秒）、決策卡字數約束經 A/B 實測反使輸出變長 35% 並遺漏免責聲明，已排除。另兩項候選亦已排除：合併 `rewrite_question`/`extract_filters` 僅佔 3%；換用較小或 MLX 版本的模型會先失去 tool calling 與結構化輸出能力。**剩餘瓶頸是本地模型的生成速度本身（穩定在每秒約 10 字，`generate` 一題需 90 至 160 秒），屬硬體限制而非架構問題**，換用推理速度更高的硬體才會改變，在此之前重新評估軟體層方向不具效益。詳見 2026-09-08、09-09 章節。
 - **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前覆蓋純函式與資料轉換層（`assemble`、`agent_route`、MCP tool 的回傳格式、`fetch_missing_data`、格式化函式等），`generate` 因直接耦合本地 LLM 未做 mock、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測生成節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
 - **LLM 選用 tool 的正確性無自動化測試**（`src/mcp_server.py` 的 tool 說明、`src/graph.py` 的 `_tool_llm`）— 「資料過期時會不會主動補抓」取決於模型行為，需真實 Ollama 呼叫且結果不保證重現，不適合寫成自動化斷言。目前靠端到端手動驗證，且需連續執行多次確認一致性（09-08 有過單次成功、重複執行皆失敗的實例）。模型換版、調整 tool 說明或改動 `_tool_llm` 的參數時都需重跑。
-- **MOPS 爬蟲改用 Playwright——評估後不採用**（`src/update.py`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會失效，屬結構性限制。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04 章節。
+- **MOPS 爬蟲改用 Playwright——評估後不採用**（`src/update.py`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會失效，屬結構性限制。此判斷本身仍成立，但影響範圍已於 09-09 縮小：財報數字改由官方 OpenAPI 提供，爬蟲只剩文字敘述一項職責，掛掉不再等於該公司完全沒有台股財報資料。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04、09-09 章節。
 
 ---
 
@@ -176,11 +182,11 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 ---
 
-## 2026-09-09　延遲優化收斂、新聞時效判斷與 EDGAR 財報抓取
+## 2026-09-09　延遲優化收斂、新聞時效判斷、EDGAR 與台股財報抓取
 
 ### 背景
 
-承前一章節，換模型與開推理已排除，本次處理剩下三個延遲方向（一至三），另併入兩項獨立的技術債清理（四、五）。
+承前一章節，換模型與開推理已排除，本次處理剩下三個延遲方向（一至三），另併入四項獨立的技術債清理（四至七）。其中第七項推翻了「MOPS 無官方 API」這個沿用已久的前提。
 
 ### 一、Context 權責分離
 
@@ -226,6 +232,14 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 `"createdAt"` 是 TEXT，cutoff 在 Python 端算成同格式字串比大小，不對整欄 cast 以免索引失效。`db/chainlit_schema.sql` 原本沒掛進 `docker-compose.yml`，一併補上；既有 volume 仍需手動跑一次 psql。
 
+### 七、台股財報改為「官方 API + MOPS 爬蟲」雙軌
+
+**前提被推翻**：文件記載的「MOPS 無官方 API」實測不成立——證交所與櫃買都有免驗證的 JSON 端點（實測 2330 得 115Q2、EPS 49.33）。
+
+**採雙軌而非取代**：API 只有逐欄數字，管理層討論與展望只在 PDF；反之 PDF 抽文字後表格易錯位。故 API 拿數字、MOPS 拿文字，各自獨立成敗，爬蟲降級為「其中一軌」。**已知範圍**：API 只收一般業，金融業與興櫃只剩爬蟲。兩來源欄位命名不同（證交所中文、櫃買英文），測試各留一條斷言——此處最可能在對方改版時無聲壞掉。
+
+**順帶收斂容錯邊界**：原 `except Exception` 連 DB 失敗都吞掉誤報成抓取異常；新聞那兩支更嚴重，DB 掛掉時逐篇印錯再繼續，回報「寫入 0 筆」看似正常，實為靜默失敗。確立原則：**`try` 只包外部抓取、不包 `ingest`**。依此檢視其他來源，`fetch_edgar` 有兩處同型問題一併修正：全無 try 導致網路錯誤直接拋出（CLI 顯示 traceback）；以及 SEC 節流頁是 HTTP 200，`raise_for_status` 攔不住，去標籤的後備路徑會把那句警告文字當成財報入庫並回報成功——比 MOPS 更隱蔽，MOPS 至少會讓下游報錯，這裡是靜默污染檢索結果，故加入內容長度下限。新聞兩支實測無此問題（入庫的是真實標題）。
+
 ### 改動內容
 
 | 項目 | 涉及檔案與函式 | commit |
@@ -237,6 +251,8 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 新聞時效判斷 | `graph.py` 移除 `_RECENT_RE`，`ExtractedFilters` 新增 `news_since_days` 與夾取 validator；`mcp_server.py` 開放同名參數 | — |
 | EDGAR 6-K | `update.py` 新增 `_is_period_end()`／`_select_filing()`／`_select_exhibit()`，並修正查無申報的訊息；新增 `tests/test_edgar_select.py` | `fb24dbc` |
 | 對話歷史持久化 | `app.py` 新增 `oauth_callback`／`_init_session()`／`on_chat_resume`／`_rebuild_history()`；`vectorstore.py` 新增 `delete_threads_older_than()`；`config.py` 新增 `THREAD_RETENTION_DAYS`；`chainlit_schema.sql` 加兩個 threads 索引並掛進 `docker-compose.yml`；新增 `tests/test_history_rebuild.py` | — |
+| 抓取層契約一致化 | `update.py` 的 `fetch_edgar` 拆出 `_fetch_edgar()`，網路錯誤收斂為 `FetchResult` 與其餘四支一致；`tests/test_update.py` 補契約斷言 | — |
+| 台股財報改雙軌 | `update.py` 新增 `fetch_tw_financials()` 與五個解析純函式、加固 `fetch_mops()`、CLI 失敗回非零結束碼；`graph.py` 台股分支併入第三軌；`tests/test_update.py` 補至 28 條斷言、`tests/test_fetch.py` 補兩軌案例 | — |
 
 ---
 

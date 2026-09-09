@@ -788,7 +788,7 @@ flowchart TD
     NR --> B["Honest 'no data' reply + market snapshot"]
 
     subgraph Data pipeline
-        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
+        SRC[EDGAR / TWSE+TPEx API / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
         UP --> ING[src/ingest.py: chunk + embed]
         ING --> PG[(pgvector: doc_chunks)]
     end
@@ -851,7 +851,7 @@ The project follows a modular codebase that separates configuration, ingestion, 
 | `config.py` | Central settings from `.env` (DB URL, Ollama URL/models, chunking, top-k, SEC user agent) |
 | `vectorstore.py` | psycopg + pgvector access layer: `insert_chunks`, `delete_by_source`, `similarity_search` |
 | `ingest.py` | `ingest_text` (chunk → embed → insert, deduped by source) and `ingest_file` (PDF/txt loader); CLI `python -m src.ingest` |
-| `update.py` | Manual fetchers: SEC EDGAR (US 10-K/10-Q), MOPS (TW report PDFs), Yahoo Finance RSS news, market-news sweep (udn/cmoney listing pages via trafilatura); CLI `python -m src.update` |
+| `update.py` | Manual fetchers: SEC EDGAR (US 10-K/10-Q), TW filings on two tracks (TWSE/TPEx OpenAPI + MOPS PDFs), Yahoo Finance RSS news, market-news sweep (udn/cmoney listing pages via trafilatura); CLI `python -m src.update` |
 | `market.py` | `get_market_snapshot(company)`: live yfinance quote (price, 52w range, PE, target price, analyst view), formatted for the prompt only — any failure returns `None` and never raises |
 | `i18n.py` | Centralized bilingual (zh/en) UI and prompt strings, no i18n library |
 | `graph.py` | LangGraph pipeline described above; `build_graph()` returns the compiled app |
@@ -893,7 +893,7 @@ HNSW cosine index on `embedding`, plus B-tree indexes on `company` and `doc_type
 Trusted financial information is collected from:
 
 - SEC EDGAR
-- TWSE MOPS
+- TWSE/TPEx official OpenAPI (figures) + TWSE MOPS (narrative PDFs)
 - Yahoo Finance RSS
 
 Using authoritative sources improves answer reliability while reducing misinformation.
@@ -903,7 +903,8 @@ Using authoritative sources improves answer reliability while reducing misinform
 | Data | Source | Command |
 |---|---|---|
 | US reports | SEC EDGAR (ticker → CIK → latest 10-K/10-Q HTML, text via trafilatura) | `python -m src.update report --market us --company AAPL [--form 10-K]` |
-| TW reports | TWSE MOPS (`doc.twse.com.tw/server-java/t57sb01`, two-step PDF download) | `python -m src.update report --market tw --company 2330` |
+| TW report figures | Official OpenAPI: TWSE `openapi.twse.com.tw` (listed), TPEx `tpex.org.tw` (OTC); latest quarter as JSON, no auth | `python -m src.update report --market tw --company 2330` (both tracks) |
+| TW report narrative | TWSE MOPS (`doc.twse.com.tw/server-java/t57sb01`, two-step PDF download) | same command as above |
 | News | Yahoo Finance RSS (`.TW` suffix auto-added for 4-digit TW codes) | `python -m src.update news --company 2330 --limit 10` |
 | Market news | udn (tw/us) + cmoney (notes/tag) listing pages, article body via trafilatura; titles carrying a 4-digit TW code get auto-tagged with that company; `source_exists()` skips already-ingested articles so re-sweeping is cheap | `python -m src.update market-news [--limit 10]` |
 | Live market snapshot | yfinance quote (price, 52w range, PE, target price, analyst view) — prompt-only, never stored in `doc_chunks` | n/a (fetched inline by `generate`) |
@@ -1071,7 +1072,7 @@ Unlike traditional machine learning projects that end after deployment, this pro
 | Embedding Model | bge-m3 |
 | Vector Database | PostgreSQL + pgvector |
 | Frontend | Chainlit |
-| Financial Data | SEC EDGAR, TWSE MOPS, Yahoo Finance RSS |
+| Financial Data | SEC EDGAR, TWSE/TPEx OpenAPI, TWSE MOPS, Yahoo Finance RSS |
 
 ---
 
@@ -1867,7 +1868,7 @@ flowchart TD
     NR --> B[誠實告知查無資料 + 市場快照]
 
     subgraph 資料管線
-        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
+        SRC[EDGAR / 證交所+櫃買 API / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
         UP --> ING[src/ingest.py: 切 chunk + embedding]
         ING --> PG[(pgvector: doc_chunks)]
     end
@@ -1930,7 +1931,7 @@ Pipeline 執行以下步驟:
 | `config.py` | 從 `.env` 讀取集中設定(DB URL、Ollama URL/模型、切分參數、top-k、SEC user agent) |
 | `vectorstore.py` | psycopg + pgvector 存取層:`insert_chunks`、`delete_by_source`、`similarity_search` |
 | `ingest.py` | `ingest_text`(切分 → embed → 寫入,依來源去重)與 `ingest_file`(PDF/txt 載入器);CLI 為 `python -m src.ingest` |
-| `update.py` | 手動抓取器:SEC EDGAR(美股 10-K/10-Q)、MOPS(台股財報 PDF)、Yahoo Finance RSS 新聞、市場新聞掃描(用 trafilatura 抓 udn/cmoney 列表頁);CLI 為 `python -m src.update` |
+| `update.py` | 手動抓取器:SEC EDGAR(美股 10-K/10-Q)、台股財報兩軌(證交所/櫃買 OpenAPI + MOPS PDF)、Yahoo Finance RSS 新聞、市場新聞掃描(用 trafilatura 抓 udn/cmoney 列表頁);CLI 為 `python -m src.update` |
 | `market.py` | `get_market_snapshot(company)`:即時 yfinance 報價(股價、52 週區間、本益比、目標價、分析師評等),格式化後僅供 prompt 使用——任何失敗都回傳 `None`,不會拋出例外 |
 | `i18n.py` | 集中管理雙語(中/英)介面與 prompt 字串,不引入 i18n 套件 |
 | `graph.py` | 上述的 LangGraph pipeline;`build_graph()` 回傳編譯完成的 app |
@@ -1972,7 +1973,7 @@ created_at TIMESTAMPTZ
 可信的財務資訊來自:
 
 - SEC EDGAR
-- 台灣公開資訊觀測站(MOPS)
+- 證交所/櫃買官方 OpenAPI(數字)+ 公開資訊觀測站 MOPS(文字敘述 PDF)
 - Yahoo Finance RSS
 
 使用權威來源可以提升回答可靠性,同時降低錯誤資訊的風險。
@@ -1982,7 +1983,8 @@ created_at TIMESTAMPTZ
 | 資料 | 來源 | 指令 |
 |---|---|---|
 | 美股財報 | SEC EDGAR(ticker → CIK → 最新 10-K/10-Q HTML,透過 trafilatura 取文字) | `python -m src.update report --market us --company AAPL [--form 10-K]` |
-| 台股財報 | TWSE MOPS(`doc.twse.com.tw/server-java/t57sb01`,兩階段 PDF 下載) | `python -m src.update report --market tw --company 2330` |
+| 台股財報數字 | 官方 OpenAPI:證交所 `openapi.twse.com.tw`(上市)、櫃買 `tpex.org.tw`(上櫃);最新一季 JSON,免驗證 | `python -m src.update report --market tw --company 2330`(兩軌一起跑) |
+| 台股財報敘述 | TWSE MOPS(`doc.twse.com.tw/server-java/t57sb01`,兩階段 PDF 下載) | 同上一列指令 |
 | 新聞 | Yahoo Finance RSS(4 碼台股代號會自動加上 `.TW` 後綴) | `python -m src.update news --company 2330 --limit 10` |
 | 市場新聞 | udn(tw/us)+ cmoney(notes/tag)列表頁,文章內容透過 trafilatura 抓取;標題含 4 碼台股代號的會自動標記該公司;`source_exists()` 會跳過已匯入的文章,讓重複掃描成本很低 | `python -m src.update market-news [--limit 10]` |
 | 即時市場快照 | yfinance 報價(股價、52 週區間、本益比、目標價、分析師評等)——僅供 prompt 使用,不會存進 `doc_chunks` | 無需指令(由 `generate` 即時抓取) |
@@ -2150,7 +2152,7 @@ flowchart LR
 | Embedding 模型 | bge-m3 |
 | 向量資料庫 | PostgreSQL + pgvector |
 | 前端 | Chainlit |
-| 財務資料 | SEC EDGAR、TWSE MOPS、Yahoo Finance RSS |
+| 財務資料 | SEC EDGAR、證交所/櫃買 OpenAPI、TWSE MOPS、Yahoo Finance RSS |
 
 ---
 

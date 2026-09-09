@@ -200,7 +200,10 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
     回傳每個來源的結果訊息（成功或失敗皆含），供呼叫端判斷是否要提示使用者。
     """
     try:
-        from .update import fetch_edgar, fetch_mops, fetch_news, fetch_market_news  # 延遲 import，避免循環依賴
+        # 延遲 import，避免循環依賴
+        from .update import (
+            fetch_edgar, fetch_market_news, fetch_mops, fetch_news, fetch_tw_financials,
+        )
     except ImportError as e:  # 環境缺套件時降級成不抓，不炸整個對話
         msg = f"匯入失敗（環境缺套件？）：{e}"
         print(f"[auto_fetch] {msg}")
@@ -209,10 +212,17 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
     calls = []
     if company:
         if is_tw_ticker(company):
-            calls = [lambda: fetch_mops(company), lambda: fetch_news(company)]
+            # 台股財報走兩軌：官方 OpenAPI 拿精準數字，MOPS 拿 PDF 的文字敘述
+            # （管理層討論、風險、展望）。兩軌各自獨立成敗，一軌掛掉仍有另一軌。
+            calls = [
+                lambda: fetch_tw_financials(company),
+                lambda: fetch_mops(company),
+                lambda: fetch_news(company),
+            ]
         else:
             calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]
         # 已有該公司財報才只補新聞；只有新聞時財報照抓（原本檢查整個 retrieved，害外國發行人的財報永遠沒抓）
+        # 依賴「新聞排在最後」這個順序，上面兩個分支都要維持
         if has_report:
             calls = calls[-1:]
     # ponytail: 市場總覽新聞一律補掃，source_exists 會跳過已入庫的，重複觸發便宜

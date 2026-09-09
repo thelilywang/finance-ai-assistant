@@ -26,7 +26,7 @@ flowchart TD
     NR --> B["Honest 'no data' reply + market snapshot"]
 
     subgraph Data pipeline
-        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
+        SRC[EDGAR / TWSE+TPEx API / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
         UP --> ING[src/ingest.py: chunk + embed]
         ING --> PG[(pgvector: doc_chunks)]
     end
@@ -55,7 +55,7 @@ flowchart TD
 | `config.py` | Central settings from `.env` (DB URL, Ollama URL/models, chunking, top-k, SEC user agent) |
 | `vectorstore.py` | psycopg + pgvector access layer: `insert_chunks`, `delete_by_source`, `similarity_search` |
 | `ingest.py` | `ingest_text` (chunk → embed → insert, deduped by source) and `ingest_file` (PDF/txt loader); CLI `python -m src.ingest` |
-| `update.py` | Manual fetchers: SEC EDGAR (US 10-Q/10-K, falling back to 6-K/20-F for foreign issuers and 424B4/S-1 for new listings), MOPS (TW report PDFs), Yahoo Finance RSS news, market-news sweep (udn/cmoney/cnyes listing pages via trafilatura); CLI `python -m src.update` |
+| `update.py` | Manual fetchers: SEC EDGAR (US 10-Q/10-K, falling back to 6-K/20-F for foreign issuers and 424B4/S-1 for new listings), TW filings on two tracks (official TWSE/TPEx OpenAPI for figures, MOPS PDFs for narrative), Yahoo Finance RSS news, market-news sweep (udn/cmoney/cnyes listing pages via trafilatura); CLI `python -m src.update` |
 | `market.py` | `get_market_snapshot(company)`: live yfinance quote (price, 52w range, PE, target price, analyst view) plus an analyst-consensus block (next earnings date, current-quarter EPS/revenue consensus range, analyst count, past-4-quarter beat/miss), formatted for the prompt only — each block fails independently, any failure returns `None`/skips and never raises |
 | `charts.py` | Real-data plotly charts (`price_chart`: 6-month close line with next-earnings marker; `eps_chart`: 8-quarter EPS estimate vs actual, beat green / miss red) and `report_pdf` (markdown + charts → PDF via headless Chrome `--print-to-pdf`, charts embedded as kaleido PNGs); every function returns `None` on failure |
 | `i18n.py` | Centralized bilingual (zh/en) UI and prompt strings, no i18n library |
@@ -81,7 +81,8 @@ HNSW cosine index on `embedding`, plus B-tree indexes on `company` and `doc_type
 | Data | Source | Command |
 |---|---|---|
 | US reports | SEC EDGAR (ticker → CIK → latest filing HTML, text via trafilatura; falls back through 10-K → 6-K → 20-F → 424B4 → S-1, so foreign issuers like ASML work) | `python -m src.update report --market us --company AAPL [--form 10-K]` |
-| TW reports | TWSE MOPS (`doc.twse.com.tw/server-java/t57sb01`, two-step PDF download) | `python -m src.update report --market tw --company 2330` |
+| TW report figures | Official OpenAPI: TWSE `openapi.twse.com.tw` (listed) with TPEx `tpex.org.tw` (OTC) fallback; latest quarter's income statement + balance sheet as JSON, no auth | `python -m src.update report --market tw --company 2330` (runs both tracks) |
+| TW report narrative | TWSE MOPS (`doc.twse.com.tw/server-java/t57sb01`, two-step PDF download) | same command as above |
 | News | Yahoo Finance RSS (`.TW` suffix auto-added for 4-digit TW codes) | `python -m src.update news --company 2330 --limit 10` |
 | Market news | udn (tw/us) + cmoney (notes/tag) + cnyes (us_stock/tw_stock_news) listing pages, article body via trafilatura; titles carrying a 4-digit TW code get auto-tagged with that company; `source_exists()` skips already-ingested articles so re-sweeping is cheap | `python -m src.update market-news [--limit 10]` |
 | Live market snapshot | yfinance quote (price, 52w range, PE, target price, analyst view) + analyst consensus (next earnings date, current-quarter EPS/revenue consensus range, analyst count, past-4-quarter beat/miss) — prompt-only, never stored in `doc_chunks` | n/a (fetched inline by `generate`) |
@@ -103,10 +104,9 @@ Re-running any command on the same source replaces old chunks (idempotent).
 
 ### Known limitations
 
-- **MOPS scraping is fragile**: no official API; when it breaks, the CLI prints manual download instructions instead of raising.
-- **Login required**: chat is behind Google OAuth (`@cl.oauth_callback` in `app.py`); the working memory sent to the model still caps at the last 5 rounds (`app.py`'s `history[-5:]`, further trimmed to 3 rounds by `graph.py`'s `_format_history`), but full conversations persist per user in Postgres via Chainlit's data layer, with a resumable sidebar and a 90-day retention cleanup (`THREAD_RETENTION_DAYS`).
+- **TW narrative text still depends on scraping**: MOPS has no official API and breaks on redesigns; the CLI then prints manual download instructions instead of raising. Figures are unaffected (official OpenAPI), but management discussion, risks and outlook live only in the PDF and go missing.
+- **No API figures for financial-sector companies**: the official OpenAPI covers general industry only; financial, holding, insurance and securities firms use different schemas and fall back to the MOPS track alone.
 - Answer quality depends on the local model; figures should be verified against the cited sources.
-- **6-K exhibit selection is heuristic**: the 6-K fallback now keeps only filings whose `reportDate` falls on a quarter end, and downloads the largest HTML exhibit rather than the cover page. Picking the largest exhibit could in principle favour a slide deck over the statements; the filing index exposes exhibit type labels (`EX-99.1`) if that ever needs tightening.
 - **No multi-company comparison**: a question naming two companies degrades to a market-news sweep instead of a side-by-side analysis.
 
 ---
@@ -133,7 +133,7 @@ flowchart TD
     NR --> B[誠實告知查無資料 + 市場快照]
 
     subgraph 資料管線
-        SRC[EDGAR / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
+        SRC[EDGAR / 證交所+櫃買 API / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
         UP --> ING[src/ingest.py: 切 chunk + embedding]
         ING --> PG[(pgvector: doc_chunks)]
     end
@@ -162,7 +162,7 @@ flowchart TD
 | `config.py` | 集中設定,從 `.env` 讀取(DB 連線、Ollama URL/模型、chunk 參數、top-k、SEC user agent) |
 | `vectorstore.py` | psycopg + pgvector 存取層:`insert_chunks`、`delete_by_source`、`similarity_search` |
 | `ingest.py` | `ingest_text`(切 chunk → embedding → 寫入,依 source 去重)與 `ingest_file`(PDF/txt 載入);CLI `python -m src.ingest` |
-| `update.py` | 手動抓取:SEC EDGAR(美股 10-Q/10-K,外國發行人退回 6-K/20-F、新上市退回 424B4/S-1)、MOPS(台股財報 PDF)、Yahoo Finance RSS 新聞、udn/cmoney/鉅亨網 cnyes 市場新聞列表頁掃描(trafilatura 抽文);CLI `python -m src.update` |
+| `update.py` | 手動抓取:SEC EDGAR(美股 10-Q/10-K,外國發行人退回 6-K/20-F、新上市退回 424B4/S-1)、台股財報兩軌(證交所/櫃買官方 OpenAPI 取數字、MOPS PDF 取文字敘述)、Yahoo Finance RSS 新聞、udn/cmoney/鉅亨網 cnyes 市場新聞列表頁掃描(trafilatura 抽文);CLI `python -m src.update` |
 | `market.py` | `get_market_snapshot(company)`:即時 yfinance 報價(股價、52 週區間、本益比、目標價、分析師評等)加分析師共識區塊(下次財報日、當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss),僅供 prompt 使用——各段獨立容錯,失敗一律回傳 `None` 或略過,不拋錯 |
 | `charts.py` | 真資料 plotly 圖表(`price_chart`:6 個月收盤線圖含下次財報日標記;`eps_chart`:近 8 季 EPS 預估 vs 實際,beat 綠/miss 紅)與 `report_pdf`(markdown + 圖表 → headless Chrome `--print-to-pdf` 產出 PDF,圖表以 kaleido PNG 內嵌);所有函式失敗回 `None` |
 | `i18n.py` | 集中管理雙語(中/英)介面與 prompt 字串,不引入 i18n 套件 |
@@ -188,7 +188,8 @@ created_at TIMESTAMPTZ
 | 資料 | 來源 | 指令 |
 |---|---|---|
 | 美股財報 | SEC EDGAR(ticker → CIK → 最新申報 HTML,trafilatura 抽文字;依序退回 10-K → 6-K → 20-F → 424B4 → S-1,ASML 這類外國發行人也抓得到) | `python -m src.update report --market us --company AAPL [--form 10-K]` |
-| 台股財報 | 公開資訊觀測站 MOPS(`doc.twse.com.tw/server-java/t57sb01` 兩步下載 PDF) | `python -m src.update report --market tw --company 2330` |
+| 台股財報數字 | 官方 OpenAPI:證交所 `openapi.twse.com.tw`(上市)、櫃買 `tpex.org.tw`(上櫃)後備;最新一季綜合損益表 + 資產負債表 JSON,免驗證 | `python -m src.update report --market tw --company 2330`(兩軌一起跑) |
+| 台股財報敘述 | 公開資訊觀測站 MOPS(`doc.twse.com.tw/server-java/t57sb01` 兩步下載 PDF) | 同上一列指令 |
 | 新聞 | Yahoo Finance RSS(4 碼台股代號自動加 `.TW`) | `python -m src.update news --company 2330 --limit 10` |
 | 市場新聞 | udn(tw/us)+ cmoney(notes/tag)+ 鉅亨網 cnyes(us_stock/tw_stock_news)新聞列表頁,內文用 trafilatura 抽取;標題含 4 碼台股代號會自動標記該公司;`source_exists()` 跳過已入庫文章,重複掃描成本很低 | `python -m src.update market-news [--limit 10]` |
 | 即時市場快照 | yfinance 報價(股價、52 週區間、本益比、目標價、分析師評等)加分析師共識(下次財報日、當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss)——僅供 prompt 使用,不寫入 `doc_chunks` | 無(由 `generate` 即時抓取) |
@@ -210,8 +211,7 @@ created_at TIMESTAMPTZ
 
 ### 已知限制
 
-- **MOPS 爬取脆弱**:無官方 API,掛掉時 CLI 會印手動下載指引而非拋錯。
-- **需登入才能使用**:聊天介面掛在 Google OAuth 之後(`app.py` 的 `@cl.oauth_callback`);送進模型的工作記憶仍維持最近 5 輪(`app.py` 的 `history[-5:]`,`graph.py` 的 `_format_history` 再收斂到 3 輪),但完整對話已透過 Chainlit 內建 data layer 依使用者持久化進 Postgres,側邊欄可續談,並有 90 天保存期限自動清除(`THREAD_RETENTION_DAYS`)。
+- **台股財報文字敘述仍依賴爬蟲**:MOPS 無官方 API,改版就會失效,掛掉時 CLI 印手動下載指引而非拋錯。數字部分已改走官方 OpenAPI 不受影響,但管理層討論、風險、業務展望這些只在 PDF 裡的內容會缺。
+- **金融業查不到 API 數字**:官方 OpenAPI 只涵蓋一般業,金融、金控、保險、證券期貨業的欄位結構不同,這些公司只剩 MOPS 那軌。
 - 回答品質受本地模型限制,數字請對照引用來源確認。
-- **6-K exhibit 挑選是啟發式**:6-K fallback 已改為只收 `reportDate` 落在季末的申報,並下載最大的 HTML exhibit 而非封面頁。「取最大的 exhibit」理論上可能挑到投影片而非財報本文;真的誤挑再改解析申報索引的 exhibit 類型標籤(`EX-99.1`)。
 - **不支援多公司比較**:同時指名兩間公司的問題會降級為市場新聞掃描,不會做並列分析。
