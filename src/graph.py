@@ -6,7 +6,7 @@ Graph 結構：
 - rewrite_question: 多輪對話時把追問改寫成獨立問題，讓 embedding 檢索有效
 - extract_filters: 用 LLM 從問題中抽出公司代號/文件類型，供 agent 呼叫 tool 時當已知條件
 - agent: 把 MCP tool 綁給 LLM，由 LLM 自行決定檢索/補抓、要不要再呼叫下一個 tool
-- tools: 執行 LLM 選定的 MCP tool（ToolNode）
+- tools: 執行 LLM 選定的 MCP tool（ToolNode）；檢索結果明顯夠用時直接收工，不再回 agent
 - assemble: 把 tool 回傳結果整理回 retrieved/fetch_results，供下游節點沿用既有格式
 - generate: 根據檢索到的 chunk 生成回答，並附上出處來源
 - no_result: 找不到相關資料時，誠實告知使用者，避免幻覺
@@ -333,6 +333,52 @@ def assemble(state: GraphState) -> GraphState:
     return {**state, "retrieved": retrieved, "fetched": fetched, "fetch_results": fetch_results}
 
 
+def _news_age_days(doc: dict) -> int | None:
+    """新聞距今幾天；非新聞、無發布日期或日期格式異常都回 None。"""
+    if doc.get("doc_type") != "news":
+        return None
+    published = doc.get("published_at")
+    if isinstance(published, str):
+        try:
+            published = dt.date.fromisoformat(published[:10])
+        except ValueError:
+            return None
+    if not isinstance(published, dt.date):
+        return None
+    return (dt.date.today() - published).days
+
+
+def route_after_tools(state: GraphState) -> str:
+    """檢索結果明顯夠用就直接收工，否則交還給 agent 決定下一步。
+
+    只把「資料明顯夠用 → 停止呼叫工具」這一種判斷收回程式，判準與
+    src/mcp_server.py 的 search_knowledge_base docstring 完全一致；資料不足、
+    不夠新、沒有新聞、或剛跑完補抓 tool 時一律回 agent，「要不要補抓、補抓完
+    要不要再查」仍然全部由 LLM 決定，09-07 改造的核心設計不變。
+
+    省下的是純粹重複的第二輪決策：模型讀完檢索結果後只為了說一句「夠了，停」，
+    實測就要花約 106 秒，佔單題總耗時四成。
+    """
+    last = next(
+        (m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)), None
+    )
+    # 剛跑完補抓 tool：要不要再查一次是 LLM 的決定，不能在這裡替它收工
+    if last is None or last.name != "search_knowledge_base":
+        return "agent"
+
+    ages = [age for doc in assemble(state)["retrieved"]
+            if (age := _news_age_days(doc)) is not None]
+    # 查無資料或結果中完全沒有新聞：交給 LLM 判斷要不要補抓
+    if not ages:
+        return "agent"
+    # 問題問「最近/最新」就要求當天的新聞，否則 3 天內都算夠新
+    limit = 0 if _RECENT_RE.search(state["question"]) else 3
+    if min(ages) <= limit:
+        print(f"[tools] 最新新聞距今 {min(ages)} 天（門檻 {limit}），資料已足夠，跳過 agent 決策。")
+        return "assemble"
+    return "agent"
+
+
 def route_after_assemble(state: GraphState) -> str:
     return "generate" if state["retrieved"] else "no_result"
 
@@ -432,7 +478,10 @@ async def build_graph():
     graph.add_conditional_edges(
         "agent", agent_route, {"tools": "tools", "assemble": "assemble"},
     )
-    graph.add_edge("tools", "agent")  # 執行完回 agent 決定要不要再呼叫；輪數上限保證會收斂
+    # 資料明顯夠用就直接收工，否則回 agent 決定要不要補抓；輪數上限保證會收斂
+    graph.add_conditional_edges(
+        "tools", route_after_tools, {"agent": "agent", "assemble": "assemble"},
+    )
     graph.add_conditional_edges(
         "assemble", route_after_assemble,
         {"generate": "generate", "no_result": "no_result"},
