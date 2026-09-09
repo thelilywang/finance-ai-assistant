@@ -41,7 +41,8 @@ mcp = FastMCP(
 
 @mcp.tool()
 async def search_knowledge_base(
-    question: str, company: str | None = None, doc_type: str | None = None
+    question: str, company: str | None = None, doc_type: str | None = None,
+    news_since_days: int | None = None,
 ) -> str:
     """在向量資料庫中檢索與問題相關的財報/新聞片段。只做檢索，不會自動補抓資料。
 
@@ -49,6 +50,8 @@ async def search_knowledge_base(
     company: 台股代號（如 "2330"）或美股 ticker（如 "AAPL"），留空表示不限公司。
     doc_type: 只能填 "financial_report" 或 "news" 其中一個，或留空表示兩種都查。
         不可填多個值（例如 "financial_report,news" 是錯的），想兩種都查就留空。
+    news_since_days: 只查最近 N 天內的新聞（財報不受影響），留空表示不限日期。
+        問題有指定時效才填（「今天」填 1、「本週」填 7、「最近」填 90），沒指定就留空。
 
     回傳 JSON 字串：{"summary_for_llm": 整理過的可讀文字, "chunks": 結構化資料陣列}。
     你只需要讀 summary_for_llm，chunks 是給程式組引用用的，不需處理。summary 開頭會
@@ -59,8 +62,8 @@ async def search_knowledge_base(
     fetch_market_overview，本工具不會幫你補）：
     - 完全查無資料，而問題有指名公司 → 補抓該公司資料。
     - 檢索結果中沒有任何新聞 → 補抓。
-    - 問題含「最近／最新／今天／即時／近期」等字眼，且 N 大於 0 → 補抓。
-    - 問題沒有上述字眼，且 N 大於 3 → 補抓。
+    - 有帶 news_since_days 且值不大於 7（問題要求近期資料），而 N 大於 0 → 補抓。
+    - 其餘情況，N 大於 3 → 補抓。
     - 以上皆不符合（例如問題不要求最新、且 N 是 0 到 3）→ 不要補抓，直接停止呼叫工具。
     - 補抓完成後，請再呼叫一次本工具重新檢索，確認新資料已入庫，不要直接回報查無資料。
     """
@@ -68,8 +71,13 @@ async def search_knowledge_base(
     # 只認單一合法值，其餘（含多值、空字串）一律視為不過濾
     if doc_type not in ("financial_report", "news"):
         doc_type = None
+    # 同理，天數也可能收到字串或 0/負數，非正整數一律視為不過濾
+    if not isinstance(news_since_days, int) or isinstance(news_since_days, bool) or news_since_days < 1:
+        news_since_days = None
 
-    docs = await asyncio.to_thread(retrieve_context, question, company, doc_type)
+    docs = await asyncio.to_thread(
+        retrieve_context, question, company, doc_type, news_since_days
+    )
     today = dt.date.today()
     _LABEL = {"news": "新聞", "financial_report": "財報"}
     blocks = []

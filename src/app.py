@@ -292,7 +292,8 @@ async def on_message(message: cl.Message):
     content_lang = setting if setting != "auto" else (detect_question_lang(message.content) or browser)
     state = {
         "question": message.content, "history": history,
-        "company": None, "doc_type": None, "retrieved": [], "answer": "", "fetched": False,
+        "company": None, "doc_type": None, "news_since_days": None,
+        "retrieved": [], "answer": "", "fetched": False,
         "fetch_results": [], "messages": [], "lang": content_lang,
         "model": cl.user_session.get("model") or config.LLM_MODEL,
     }

@@ -30,8 +30,9 @@ def _search(docs, cid="1"):
         name="search_knowledge_base", tool_call_id=cid)
 
 
-def _state(messages, question="AAPL 營收多少？"):
-    return {"question": question, "messages": messages}
+def _state(messages, news_since_days=None):
+    return {"question": "AAPL 營收多少？", "messages": messages,
+            "news_since_days": news_since_days}
 
 
 report = _doc("financial_report", 40, 9)
@@ -43,10 +44,12 @@ assert route_after_tools(_state([_search([report, _doc("news", 3)])])) == "assem
 # 4 天前的新聞 → 超過門檻，交還 LLM 決定要不要補抓
 assert route_after_tools(_state([_search([report, _doc("news", 4)])])) == "agent"
 
-# 問題問「最近」時門檻收緊到當天
-recent = "AAPL 最近有什麼新聞？"
-assert route_after_tools(_state([_search([_doc("news", 0)])], recent)) == "assemble"
-assert route_after_tools(_state([_search([_doc("news", 2)])], recent)) == "agent"
+# 問題要求近期（時效窗 <= 7 天）時門檻收緊到當天
+assert route_after_tools(_state([_search([_doc("news", 0)])], 7)) == "assemble"
+assert route_after_tools(_state([_search([_doc("news", 2)])], 7)) == "agent"
+# 時效窗 90 天（「最近三個月」）不算要求當天，仍走 3 天門檻
+assert route_after_tools(_state([_search([_doc("news", 2)])], 90)) == "assemble"
+assert route_after_tools(_state([_search([_doc("news", 4)])], 90)) == "agent"
 
 # 只有財報、沒有新聞 → 不自作主張，交給 LLM
 assert route_after_tools(_state([_search([report])])) == "agent"

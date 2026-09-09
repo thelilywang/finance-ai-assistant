@@ -22,7 +22,8 @@ def main() -> None:
 
         result = app.invoke(
             {"question": question, "history": [], "company": None, "doc_type": None,
-             "retrieved": [], "answer": "", "fetched": False, "fetch_results": []}
+             "news_since_days": None, "retrieved": [], "answer": "",
+             "fetched": False, "fetch_results": []}
         )
 
         console.print(Markdown(result["answer"]))

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import re
 from functools import lru_cache
 from typing import Annotated, Literal, TypedDict
 
@@ -42,6 +41,7 @@ class GraphState(TypedDict):
     history: list[tuple[str, str]]  # [(user, assistant), ...] 由呼叫端傳入
     company: str | None
     doc_type: str | None
+    news_since_days: int | None  # 使用者要求的新聞時效窗（天），None 表示不限日期
     retrieved: list[dict]
     answer: str
     fetched: bool  # 本輪是否呼叫過補抓 tool，no_result 用來決定提示語
@@ -116,22 +116,33 @@ class ExtractedFilters(BaseModel):
     error_message: str | None = None
     company: str | None = None
     doc_type: Literal["financial_report", "news"] | None = None
+    news_since_days: int | None = None
 
     @field_validator("company")
     @classmethod
     def _normalize_company(cls, v: str | None) -> str | None:
         return normalize_ticker(v) if v else None
 
+    @field_validator("news_since_days")
+    @classmethod
+    def _clamp_days(cls, v: int | None) -> int | None:
+        """夾在 1..365。這個值直接進 SQL 日期比較，模型回 0 或負數會查成「未來的新聞」而全空。"""
+        return None if v is None else max(1, min(v, 365))
+
 
 def extract_filters(state: GraphState) -> GraphState:
-    """從問題中抽取公司代號 / 文件類型，抽不出來就設為 None（不過濾）。"""
+    """從問題中抽取公司代號 / 文件類型 / 新聞時效窗，抽不出來就設為 None（不過濾）。"""
     prompt = f"""你是財經助理的前處理模組。請從使用者問題中判斷：
 1. company: 台股代號（4-6 碼數字，如 "2330"）或美股 ticker（1-5 個大寫英文字母，如 "AAPL"），
    沒有明確提到就設為 null；公司名稱要轉成代號/ticker（如 台積電→"2330"、蘋果→"AAPL"）
 2. doc_type: "financial_report"（財報相關）或 "news"（新聞相關），不確定就設為 null
-3. 若問題同時指名多個不同公司，company 設為 null，status 設為 "error"，
+3. news_since_days: 問題要求的新聞時效窗，換算成天數的整數。對照：
+   「今天／即時／現在」→ 1；「這幾天／本週／這星期」→ 7；「這個月／近一個月」→ 30；
+   「最近／近期／最新」→ 90；「上一季／近三個月」→ 90；「今年／近一年」→ 365。
+   問題沒有任何時效意味（例如「2330 的營收多少？」）就設為 null，表示不限日期
+4. 若問題同時指名多個不同公司，company 設為 null，status 設為 "error"，
    error_message 說明偵測到哪些標的、目前僅支援單一標的查詢
-4. 正常情況（含完全抽不到 company 的情況）status 設為 "ok"，error_message 設為 null
+5. 正常情況（含完全抽不到 company 的情況）status 設為 "ok"，error_message 設為 null
 
 使用者問題：{state['question']}
 """
@@ -139,47 +150,45 @@ def extract_filters(state: GraphState) -> GraphState:
         parsed = _llms(_model_of(state))["filters"].invoke(prompt)
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
         print(f"[extract_filters] 結構化輸出失敗：{e}")
-        return {**state, "company": None, "doc_type": None}
+        return {**state, "company": None, "doc_type": None, "news_since_days": None}
 
     if parsed.status == "error":
         print(f"[extract_filters] {parsed.error_message}")
 
-    return {**state, "company": parsed.company, "doc_type": parsed.doc_type}
+    return {**state, "company": parsed.company, "doc_type": parsed.doc_type,
+            "news_since_days": parsed.news_since_days}
 
 
-# ponytail: 關鍵字啟發式判斷時效性，要更準再交給 extract_filters 的 LLM 判斷
-_RECENT_RE = re.compile(r"最近|近期|這幾天|本週|近日|最新|即時|今天|重抓|更新|recent|lately|latest|today", re.I)
-
-
-def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None) -> list[dict]:
+def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None,
+                     news_since_days: int | None = None) -> list[dict]:
     """向量檢索 + 既有的補資料規則（doc_type 濾空放寬重查、財報補新聞、補全域市場新聞）。
 
-    不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
+    news_since_days 由 extract_filters 的 LLM 從問題判斷（None 表示不限日期），
+    四次檢索共用同一個值。不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
     """
-    recent = _RECENT_RE.search(question)
     query_vec = embeddings.embed_query(question)
     docs = similarity_search(
         query_vec, company=company, doc_type=doc_type,
-        news_since_days=90 if recent else None,
+        news_since_days=news_since_days,
     )
     if not docs and doc_type:
         # ponytail: doc_type 濾到空就放寬重查，避免問「財報」時把僅有的新聞全濾光
         docs = similarity_search(
             query_vec, company=company,
-            news_since_days=90 if recent else None,
+            news_since_days=news_since_days,
         )
     if company and docs and not any(d["doc_type"] == "news" for d in docs):
         # ponytail: 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 LLM 決定要不要補抓
         news = similarity_search(
             query_vec, top_k=3, company=company, doc_type="news",
-            news_since_days=90 if recent else None,
+            news_since_days=news_since_days,
         )
         docs = docs + news
     if company and docs:
         # ponytail: 補 2 條全域市場新聞給決策卡當市場脈絡（market-news 入庫多為 company=NULL）
         seen_ids = {d["id"] for d in docs}
         market = similarity_search(query_vec, top_k=2, doc_type="news",
-                                   news_since_days=90 if recent else None)
+                                   news_since_days=news_since_days)
         docs = docs + [d for d in market if d["id"] not in seen_ids]
     return docs
 
@@ -247,6 +256,9 @@ def _seed_prompt(state: GraphState) -> str:
         known.append(f"已知公司代號：{state['company']}")
     if state.get("doc_type"):
         known.append(f"已知文件類型：{state['doc_type']}")
+    if state.get("news_since_days"):
+        known.append(f"使用者要求的新聞時效：只看最近 {state['news_since_days']} 天內的新聞，"
+                     f"請把這個天數帶進檢索工具的 news_since_days 參數")
     known_block = "\n".join(known)
     return f"""使用者問題：{state['question']}
 {known_block}
@@ -371,8 +383,11 @@ def route_after_tools(state: GraphState) -> str:
     # 查無資料或結果中完全沒有新聞：交給 LLM 判斷要不要補抓
     if not ages:
         return "agent"
-    # 問題問「最近/最新」就要求當天的新聞，否則 3 天內都算夠新
-    limit = 0 if _RECENT_RE.search(state["question"]) else 3
+    # 問題明確要求近期（時效窗 <= 7 天）就要求當天的新聞，否則 3 天內都算夠新。
+    # 時效窗由 extract_filters 抽出，與檢索過濾共用同一個判斷，不再各自比對問題字串；
+    # 窗是 90 天（「最近三個月」）時要求當天新聞太嚴，故以 7 天為界而非「有值就收緊」。
+    days = state.get("news_since_days")
+    limit = 0 if days is not None and days <= 7 else 3
     if min(ages) <= limit:
         print(f"[tools] 最新新聞距今 {min(ages)} 天（門檻 {limit}），資料已足夠，跳過 agent 決策。")
         return "assemble"
