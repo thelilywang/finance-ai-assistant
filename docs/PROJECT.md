@@ -106,7 +106,7 @@ Re-running any command on the same source replaces old chunks (idempotent).
 - **MOPS scraping is fragile**: no official API; when it breaks, the CLI prints manual download instructions instead of raising.
 - **Chat history is per-session only**: kept in memory (last 5 rounds), cleared on page refresh; persist to DB if needed.
 - Answer quality depends on the local model; figures should be verified against the cited sources.
-- **6-K may not be a financial report**: EDGAR's 6-K form covers any material announcement by a foreign issuer, so the "latest 6-K" fallback can occasionally ingest a non-earnings filing.
+- **6-K exhibit selection is heuristic**: the 6-K fallback now keeps only filings whose `reportDate` falls on a quarter end, and downloads the largest HTML exhibit rather than the cover page. Picking the largest exhibit could in principle favour a slide deck over the statements; the filing index exposes exhibit type labels (`EX-99.1`) if that ever needs tightening.
 - **No multi-company comparison**: a question naming two companies degrades to a market-news sweep instead of a side-by-side analysis.
 
 ---
@@ -213,5 +213,5 @@ created_at TIMESTAMPTZ
 - **MOPS 爬取脆弱**:無官方 API,掛掉時 CLI 會印手動下載指引而非拋錯。
 - **對話歷史僅存單次 session**:記憶體保留最近 5 輪,重整即清空。持久化的可行路徑是 Chainlit 內建的 SQLAlchemy data layer 接既有的 PostgreSQL,但該機制以 user identifier 分租,而本專案尚無認證機制,故實際範圍是「認證 + data layer」而非單純加一張表。詳見 `docs/MAINTENANCE_LOG.md` 待辦 3。
 - 回答品質受本地模型限制,數字請對照引用來源確認。
-- **6-K 不一定是財報**:EDGAR 的 6-K 涵蓋外國發行人的任何重大公告,「取最新一份 6-K」的 fallback 偶爾會抓到非財報申報。
+- **6-K exhibit 挑選是啟發式**:6-K fallback 已改為只收 `reportDate` 落在季末的申報,並下載最大的 HTML exhibit 而非封面頁。「取最大的 exhibit」理論上可能挑到投影片而非財報本文;真的誤挑再改解析申報索引的 exhibit 類型標籤(`EX-99.1`)。
 - **不支援多公司比較**:同時指名兩間公司的問題會降級為市場新聞掃描,不會做並列分析。

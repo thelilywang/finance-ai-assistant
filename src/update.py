@@ -62,8 +62,71 @@ MOPS_MANUAL_GUIDE = """[update] MOPS 抓取失敗（介面脆弱，隨時可能�
        --doc-type financial_report --date <YYYY-MM-DD>"""
 
 
+def _is_period_end(report_date: str, filing_date: str) -> bool:
+    """判斷 reportDate 是否為「會計期末」，用來區分財報 6-K 與一般公告 6-K。
+
+    財報 6-K 的 reportDate 是所報導期間的結束日（與申報日不同）；股利、董事會、
+    AGM 這類公告則把當天當 reportDate。兩道條件：
+
+    1. 距月底 7 天內 —— ASML 採 52/53 週制，期末落在 06-28、03-29 這種接近月底
+       但非月底的日子。
+    2. 落在季末月份（3/6/9/12）—— TSM 每月申報月營收，reportDate 是月底，過不了
+       第 1 關；只有季末月份才是財報。
+    """
+    if not report_date or report_date == filing_date:
+        return False
+    try:
+        d = dt.date.fromisoformat(report_date)
+    except ValueError:
+        return False
+    next_month = (d.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    return (next_month - d).days <= 7 and d.month % 3 == 0
+
+
+def _select_filing(recent: dict, forms: tuple[str, ...]) -> tuple[str, int] | None:
+    """依 forms 的優先順序選出一筆申報，回傳 (表單類型, 索引)；查無則 None。
+
+    recent 是 EDGAR 的欄位導向結構（各欄位為等長平行陣列，反時序排列），
+    所以任一欄位的索引可直接套用到其他欄位。6-K 涵蓋外國發行人的任何重大公告，
+    只收 reportDate 為期末者；其餘表單維持取最新一份。
+    """
+    for form in forms:
+        for idx, f in enumerate(recent["form"]):
+            if f != form:
+                continue
+            if form == "6-K" and not _is_period_end(
+                recent["reportDate"][idx], recent["filingDate"][idx]
+            ):
+                continue
+            return form, idx
+    return None
+
+
+def _select_exhibit(items: list[dict], primary_doc: str) -> str:
+    """從申報目錄挑出真正含財報的文件。
+
+    6-K 的 primaryDocument 只是封面頁（抽出來約 1~2 千字元的地址與表頭），
+    財報本文放在同一份申報的 exhibit。挑最大的 .htm 在 ASML/TSM/NIO 都命中本文。
+    ponytail: 「取最大的 htm」是啟發式，上限是可能誤挑到投影片；真的誤挑再改解析
+    index.html 表格的 exhibit 類型欄位（該表格含 EX-99.1 這類標籤）。
+    """
+    candidates = [
+        it for it in items
+        if it["name"].endswith(".htm")
+        and it["name"] != primary_doc
+        and "-index" not in it["name"]
+    ]
+    if not candidates:
+        return primary_doc
+    return max(candidates, key=lambda it: int(it.get("size") or 0))["name"]
+
+
 def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
-    """從 SEC EDGAR 抓最新一份指定表單（10-K/10-Q），抽純文字後匯入。"""
+    """從 SEC EDGAR 抓一份財報，抽純文字後匯入。
+
+    依 10-Q/10-K/6-K/20-F/424B4/S-1 的順序 fallback。6-K 另做兩道處理：只收
+    reportDate 為期末的財報 6-K，並改抓 exhibit 而非只是封面頁的主文。
+    """
     headers = {"User-Agent": config.SEC_USER_AGENT}
 
     resp = requests.get(
@@ -85,24 +148,31 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
     resp.raise_for_status()
     recent = resp.json()["filings"]["recent"]
     # ponytail: 外國發行人（如 ASML/TSM）不申報 10-Q/10-K，季報走 6-K、年報走 20-F；
-    # 新上市公司退回 424B4/S-1 招股書。6-K 也可能是非財報公告，先取最新一份，誤抓再精修。
-    for f in (form, "10-K", "6-K", "20-F", "424B4", "S-1"):
-        if f in recent["form"]:
-            form, idx = f, recent["form"].index(f)
-            break
-    else:
-        msg = f"{ticker} 近期沒有 {form}/10-K/424B4/S-1 申報。"
+    # 新上市公司退回 424B4/S-1 招股書。
+    forms = (form, "10-K", "6-K", "20-F", "424B4", "S-1")
+    selected = _select_filing(recent, forms)
+    if selected is None:
+        msg = f"{ticker} 近期沒有 {'/'.join(dict.fromkeys(forms))} 申報。"
         print(f"[update] {msg}")
         return FetchResult(False, msg)
+    form, idx = selected
 
     accession = recent["accessionNumber"][idx]
     filing_date = recent["filingDate"][idx]
     primary_doc = recent["primaryDocument"][idx]
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}"
 
-    url = (
-        f"https://www.sec.gov/Archives/edgar/data/{cik}/"
-        f"{accession.replace('-', '')}/{primary_doc}"
-    )
+    doc = primary_doc
+    if form == "6-K":
+        # 6-K 的主文只是封面頁，財報在 exhibit；抓不到目錄就退回主文，不讓這步變成新的失敗點
+        try:
+            listing = requests.get(f"{base}/index.json", headers=headers, timeout=TIMEOUT)
+            listing.raise_for_status()
+            doc = _select_exhibit(listing.json()["directory"]["item"], primary_doc)
+        except (requests.RequestException, KeyError, ValueError) as e:
+            print(f"[update] 讀取 {accession} 目錄失敗（{e}），改用主文。")
+
+    url = f"{base}/{doc}"
     print(f"[update] 下載 {form}：{url}")
     resp = requests.get(url, headers=headers, timeout=TIMEOUT)
     resp.raise_for_status()
