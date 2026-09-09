@@ -20,6 +20,7 @@ from chainlit.input_widget import Select
 from src import config
 from src.graph import build_graph, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
+from src.tickers import is_tw_ticker
 from src.vectorstore import delete_news_older_than, delete_threads_older_than
 
 try:  # 啟動時清過期新聞，DB 未起不擋 app
@@ -333,6 +334,26 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
         ))
 
 
+async def _pick_market(final_state: dict, ui_lang: str) -> str | None:
+    """雙掛牌反問時給出可點選的選項，回傳使用者選的市場（tw/us/both）。
+
+    按鈕只是捷徑，使用者仍可直接打字回答——逾時或關掉視窗回 None，此時就把反問
+    訊息留在畫面上，讓下一輪的文字回覆照原本的追問流程走。
+    """
+    company, peer = final_state["company"], final_state["peer_company"]
+    tw, us = (company, peer) if is_tw_ticker(company) else (peer, company)
+    actions = [
+        cl.Action(name="market", payload={"market": m},
+                  label=t(ui_lang, f"market_btn_{m}", tw=tw, us=us),
+                  tooltip=t(ui_lang, f"market_btn_{m}_tip"))
+        for m in ("tw", "us", "both")
+    ]
+    res = await cl.AskActionMessage(
+        content=final_state["answer"], actions=actions, timeout=300
+    ).send()
+    return res.get("payload", {}).get("market") if res else None
+
+
 @cl.on_message
 async def on_message(message: cl.Message):
     history = cl.user_session.get("history")
@@ -358,6 +379,19 @@ async def on_message(message: cl.Message):
     await tracker.start()
 
     final_state = await _stream_answer(state, msg, tracker)
+
+    # 雙掛牌反問：給按鈕讓使用者直接點，選了就帶著市場重跑一次，省掉再過一輪 LLM 改寫
+    if final_state and final_state.get("ask_market"):
+        picked = await _pick_market(final_state, ui_lang)
+        if picked:
+            tracker = _StepTracker(ui_lang)
+            await tracker.start()
+            msg = cl.Message(content="")
+            final_state = await _stream_answer(
+                {**state, "market": picked, "company": final_state["company"],
+                 "ask_market": False, "messages": []},
+                msg, tracker,
+            )
 
     answer = final_state["answer"] if final_state else ""
     if not msg.content:

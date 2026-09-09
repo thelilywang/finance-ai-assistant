@@ -188,8 +188,12 @@ def extract_filters(state: GraphState) -> GraphState:
     if parsed.status == "error":
         print(f"[extract_filters] {parsed.error_message}")
 
-    return {**state, "company": parsed.company, "doc_type": parsed.doc_type,
-            "news_since_days": parsed.news_since_days, "market": parsed.market}
+    # 呼叫端已指定市場（UI 按鈕點選）時不得被重抽的結果蓋掉——問句本身沒有市場字樣，
+    # 重抽必然回 None，等於把使用者剛按下的選擇丟掉又問一次
+    market = state.get("market") or parsed.market
+    company = parsed.company or (state.get("company") if state.get("market") else None)
+    return {**state, "company": company, "doc_type": parsed.doc_type,
+            "news_since_days": parsed.news_since_days, "market": market}
 
 
 def _last_dual_listed(history: list[tuple[str, str]]) -> str | None:

@@ -94,4 +94,29 @@ assert s["ask_market"] is False
 s = resolve_market({"company": None, "market": "us", "history": []})
 assert s["company"] is None and s["ask_market"] is False
 
+# --- UI 按鈕：呼叫端指定的 market 不得被 extract_filters 重抽的結果蓋掉 ---
+# 點按鈕後帶著 market 重跑，但問句本身沒有市場字樣，重抽必然回 None；
+# 若讓它覆寫就等於把剛按下的選擇丟掉，畫面上會再問一次
+import src.graph as _g
+
+
+class _FakeParsed:
+    status, error_message = "ok", None
+    company = doc_type = news_since_days = market = None
+
+
+_orig_llms = _g._llms
+try:
+    _g._llms = lambda m: {"filters": type("F", (), {"invoke": lambda self, p: _FakeParsed()})()}
+    out = _g.extract_filters({"question": "台積電EPS?", "company": "2330", "market": "us",
+                              "lang": "zh", "model": ""})
+    assert out["market"] == "us"      # 按鈕選的市場保留
+    assert out["company"] == "2330"   # 公司也不能被抽成 None，否則變全庫檢索
+
+    # 沒有呼叫端指定時，照常採用重抽結果（不影響一般問句）
+    out = _g.extract_filters({"question": "隨便問問", "lang": "zh", "model": ""})
+    assert out["market"] is None and out["company"] is None
+finally:
+    _g._llms = _orig_llms
+
 print("dual market self-check OK")

@@ -21,11 +21,15 @@ STRINGS = {
             "「{name}」在台股與美股都有掛牌，兩邊的數字不能直接比較："
             "台股（{tw}）以新台幣計價、按季公布；美股（{us}）是 ADR，以美元計價，"
             "且每股基準不同（1 股 ADR 對應數股台股普通股）。\n\n"
-            "請問你要看哪一邊？\n"
-            "- 回覆「台股」查 {tw}\n"
-            "- 回覆「美股」查 {us}\n"
-            "- 回覆「都要」則兩邊並列呈現"
+            "請問你要看哪一邊？（可點選下方按鈕，或直接輸入）"
         ),
+        "market_btn_tw": "台股 {tw}",
+        "market_btn_us": "美股 {us}",
+        "market_btn_both": "兩邊都要",
+        "market_btn_tw_tip": "以新台幣計價、按季公布",
+        "market_btn_us_tip": "ADR，以美元計價",
+        "market_btn_both_tip": "並列呈現，不換算成同一數字",
+        "market_picked": "已選擇：{choice}",
         "otc_adr_note": (
             "（補充：{name} 在美股有 ADR（{us}），但屬場外交易（OTC）、未向 SEC 申報財報，"
             "本系統取不到其財務數字，以下僅為台股（{tw}）資料。）"
@@ -99,11 +103,15 @@ STRINGS = {
             "\"{name}\" is listed in both Taiwan and the US, and the figures are not directly comparable: "
             "the Taiwan listing ({tw}) reports in TWD on a quarterly basis, while the US listing ({us}) is an ADR "
             "reporting in USD, with a different per-share basis (one ADR represents several ordinary shares).\n\n"
-            "Which one would you like?\n"
-            "- Reply \"Taiwan\" for {tw}\n"
-            "- Reply \"US\" for {us}\n"
-            "- Reply \"both\" to see them side by side"
+            "Which one would you like? (Pick a button below, or just type your answer.)"
         ),
+        "market_btn_tw": "Taiwan {tw}",
+        "market_btn_us": "US {us}",
+        "market_btn_both": "Both",
+        "market_btn_tw_tip": "Reports in TWD, quarterly",
+        "market_btn_us_tip": "ADR, reports in USD",
+        "market_btn_both_tip": "Shown side by side, never merged into one figure",
+        "market_picked": "Selected: {choice}",
         "otc_adr_note": (
             "(Note: {name} also has a US ADR ({us}), but it trades over-the-counter and files no "
             "reports with the SEC, so no financial figures are available for it here. "
