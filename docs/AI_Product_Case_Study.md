@@ -1897,7 +1897,7 @@ flowchart TD
 | `rewrite_question` | 根據對話歷史,把追問(例如「那毛利率呢?」)改寫成獨立完整的問題,讓 embedding 檢索能運作;歷史為空時直接通過 |
 | `extract_filters` | LLM 從問題中擷取公司代號(台股 4 碼或美股 ticker)/ 文件類型,作為檢索過濾條件(null 表示不過濾) |
 | `agent` | 把 MCP tool 綁給 LLM,由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。時效判準寫在 tool 的 docstring(`src/mcp_server.py`)而非程式碼裡。`_trim_for_llm` 會把送進模型的複本中的結構化 `chunks` 裁掉、只留 `summary_for_llm`,完整內容留在 state 供 `assemble` 使用。tool 呼叫上限 4 輪 |
-| `tools` | 執行 LLM 選定的 MCP tool(`ToolNode`)。之後由 `route_after_tools` 判斷:檢索到的新聞明顯夠新時(3 天內,問題含時效關鍵字時收緊為「必須是今天」)直接跳到 `assemble`,省下一輪重複的 agent 決策;其餘情況(全空、沒有新聞、已過期、日期不明,或剛跑完補抓 tool)一律回 `agent`,補抓與否仍由 LLM 決定 |
+| `tools` | 執行 LLM 選定的 MCP tool(`ToolNode`)。之後由 `route_after_tools` 判斷:檢索到的新聞明顯夠新時(3 天內,`extract_filters` 抽出的時效窗在 7 天內時收緊為「必須是今天」)直接跳到 `assemble`,省下一輪重複的 agent 決策;其餘情況(全空、沒有新聞、已過期、日期不明,或剛跑完補抓 tool)一律回 `agent`,補抓與否仍由 LLM 決定 |
 | `assemble` | 把 tool 回傳結果還原成下游節點原本就在用的欄位:`retrieved` 取最後一次 `search_knowledge_base` 的結果,另填 `fetched`/`fetch_results` 供 `no_result` 使用 |
 | `generate` | 嚴格根據檢索到的內容回答,附上 `[SourceN]` 引用;同時併入即時 yfinance 市場快照(股價、52 週區間、本益比、目標價、分析師評等——僅供 prompt 使用,不算引用來源,失敗時默默降級),接著附上固定格式的決策卡(附引用的事實、推論、估值、立場、觸發條件、關鍵事件、觀察指標)與免責聲明;只有在財報+新聞+市場資料都支持時,才會明確表態立場,但觸發條件/關鍵事件/觀察指標一律必須提供,確保回答不會整段棄權 |
 | `no_result` | 即使 LLM 已嘗試補抓仍檢索不到任何內容,也誠實告知,並附上市場快照與觀察項目,而不是產生幻覺回答 |

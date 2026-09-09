@@ -10,9 +10,12 @@
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
-3. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+3. **對話歷史持久化**（`src/app.py:317`、`db/init.sql`）
+   目前對話歷史存在 `cl.user_session` 的記憶體中、只留最近 5 輪，重整瀏覽器即清空。專案已有 PostgreSQL（pgvector），理應可持久化。可行路徑是 Chainlit 2.x 內建的 SQLAlchemy data layer（`chainlit.data.sql_alchemy.SQLAlchemyDataLayer`，官方支援 PostgreSQL），而非自寫 conversations 表——自寫等於重造 Chainlit 已提供的 thread/step/element 結構，且拿不到內建的歷史對話側邊欄與續談 UI。`sqlalchemy` 與 `asyncpg` 已隨 Chainlit 進入環境，不需新增依賴。真正的成本不在儲存層：**data layer 以 user identifier 為分租鍵，而本專案目前完全沒有認證機制**（無 `@cl.password_auth_callback` 或 OAuth），沒有身分就無法區分誰的歷史，等於把所有人的對話混在一起。因此本項的實際範圍是「認證 + data layer + schema 遷移」，且一旦存入 DB，財報問答的對話內容就成為需要考慮保存期限與刪除機制的個資。難度：中（2-3 天，多數花在認證與權限而非儲存）。
+
+4. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
    若未來抓取從同步 API/套件轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前以 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 要到需服務多個併發 client 時才有實質效益。現況為同步 `requests`、單次數秒內完成，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現的問題，先記錄方向待實際需要時再評估。
-4. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+5. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
 ## 保持現狀（已評估，判斷暫不處理）
@@ -159,24 +162,13 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | `doc_type` 參數被填入多值 | 模型會傳 `"financial_report,news"`，但該參數只接受單一值，照字面過濾會查出空結果。tool 說明明確限定可填值並說明「想兩種都查就留空」，同時在 tool 內部容錯：非單一合法值一律降級為不過濾。 | `41ac2ec` |
 | 容器時區為 UTC，日期偏移一天 | 容器未設時區，比台北時間慢 8 小時，台灣半夜 0-8 點期間整個系統認定的「今天」會少一天，使新增的「距今 N 天」全面偏移，也會影響 MOPS 民國年計算跨年時的年度判斷。`docker-compose.yml` 為三個服務設定 `TZ`（可用環境變數覆寫）。 | `41ac2ec` |
 
-### 驗證
-
-自動化測試補上距今天數計算、摘要標示與 `doc_type` 容錯的斷言，11 個測試檔全數通過。模型是否依說明決策無法自動化斷言，另以端到端測試（真實 Ollama + MCP + pgvector）驗證，兩情境各連續執行三次確認穩定：
-
-| 情境 | 摘要開頭 | 決策 | 結果 |
-|---|---|---|---|
-| 資料過期（MSFT，提問含「最新」） | 最新「新聞」距今 58 天 | 呼叫 `fetch_company_data` | ✅ 3/3 一致 |
-| 資料足夠（AAPL） | 最新「新聞」距今 3 天 | 停止呼叫工具，直接作答 | ✅ 3/3 一致 |
-
-之所以連續執行而非單次驗收：本次修復過程中曾有一版單次測試通過、重跑三次卻全數失敗，涉及模型行為的修復需以重複執行確認一致性。
-
 ---
 
 ## 2026-09-08　推理顯示與模型替換評估
 
 ### 背景
 
-單題延遲 186 至 470 秒，`agent` 決策與 `generate` 合計佔 97%，瓶頸在本地模型推理。針對此瓶頸評估兩個方向：讓模型顯示推導過程（提升財報問答可信度，串流也能在長等待中提供進度感），以及當時列為首選的換用更快模型。兩者實測後都不採用，記錄依據以免日後重複評估。
+瓶頸在本地模型推理（延遲數據見「保持現狀」）。評估兩個方向：讓模型顯示推導過程（提升可信度，串流也能在長等待中提供進度感），以及當時列為首選的換用更快模型。兩者實測後都不採用，記錄依據以免日後重複評估。
 
 ### 一、顯示推理過程
 
@@ -222,21 +214,13 @@ MLX 沒有優勢這點值得單獨說明，因為「Apple 原生框架應該更�
 | UI 模型選單 | 設定面板新增模型下拉選單。`graph.py` 的模型實例從模組層級改為 `_llms(model)` 工廠（`lru_cache` 快取），`GraphState` 新增 `model` 欄位，各節點以 `_model_of(state)` 取值、未帶值時退回預設。不改動全域狀態，多個 session 選用不同模型不會互相干擾。 | `b1da9ea` |
 | 候選模型清單 | `LLM_MODEL_CHOICES` 只列預設模型，可用環境變數擴充；實測不合格的模型已從 Ollama 移除。 | `b1da9ea` |
 
-### 驗證
-
-6 個測試檔與雙語字串鍵值對照全數通過，新增 `tests/test_model_select.py` 涵蓋空值退回預設、預設模型必在選單首位、重複項去重。容器重建後確認 Chainlit 正常提供服務、選單只列出預設模型。
-
-### 對延遲問題的影響
-
-「換更快的模型或量化版本」原列為降低延遲的首選方向，經本次實測後排除。剩餘可行方向為縮短 `generate` 的 prompt 與輸出長度，或改用推理速度更高的硬體。
-
 ---
 
-## 2026-09-09　Context 權責分離與跳過重複的 agent 決策
+## 2026-09-09　Context 權責分離、跳過重複的 agent 決策與新聞時效判斷
 
 ### 背景
 
-回應延遲的耗時幾乎全落在 `agent` 決策與 `generate`，換模型與開推理已於 09-08 排除。本次處理剩下三個方向，兩個採用、一個實測後排除。
+承前一章節，換模型與開推理已排除。本次處理剩下三個方向，兩個採用、一個實測後排除；另併入一項與延遲無關的技術債清理（見四）。
 
 ### 一、Context 權責分離（`_trim_for_llm`）
 
@@ -264,6 +248,14 @@ MLX 沒有優勢這點值得單獨說明，因為「Apple 原生框架應該更�
 
 原因是**基準輸出本來就每欄 1-2 句、已符合該約束**，沒有廢話可壓；加上約束反而因提到「含每個子條列」而誘導模型展開更多子條列，加約束那版還漏掉結尾免責聲明，屬合規性退化。結論：長度由 14 個欄位的規格本身決定，不犧牲欄位就沒有 prompt 層面的壓縮空間。
 
+### 四、新聞時效判斷改由 LLM 抽取（`extract_filters`）
+
+原本用關鍵字 regex（`_RECENT_RE`）判斷「是不是問近期新聞」，命中就限縮 90 天。三個問題：只有 90 天與不過濾兩檔，「本週」與「最近一年」歸在同一檔；同一條 regex 在 `retrieve_context` 與 `route_after_tools` 各跑一次，推出兩組無關的天數；`src/mcp_server.py` 的 tool 說明又用散文重寫同一組字眼，三份拷貝無機制保證同步。
+
+改為由 `extract_filters` 一次抽出天數（`news_since_days`）存進 `GraphState`，檢索過濾與新鮮度門檻共用這個單一來源，regex 刪除。夾取 1..365 是必要的：這個值直接進 SQL 日期比較，模型回 0 或負數會查成「未來的新聞」而全空。
+
+**取捨**：新鮮度門檻以 7 天為界，而非「有值就收緊」。沿用原判準會讓「最近三個月」（90 天）也被要求當天新聞，過嚴。這是本次唯一有意的行為變更，已用測試固定住。
+
 ### 改動內容
 
 | 項目 | 改動說明 | commit |
@@ -272,14 +264,9 @@ MLX 沒有優勢這點值得單獨說明，因為「Apple 原生框架應該更�
 | 跳過重複的 agent 決策 | `src/graph.py` 新增 `route_after_tools()` 與 `_news_age_days()`，`tools -> agent` 改為條件路由。 | `29967c5` |
 | 架構圖同步 | 六個 mermaid 區塊、四處節點流程字串與節點說明表格仍停留在 09-07 前的 `retrieve`/`auto_fetch`，依 `draw_mermaid()` 實際輸出重畫。 | `1be4f91` |
 | 決策卡字數約束 | 實測後回退，`src/i18n.py` 維持原狀。 | — |
+| 新聞時效判斷 | `src/graph.py` 移除 `_RECENT_RE`，`ExtractedFilters` 新增 `news_since_days` 與夾取 validator，`retrieve_context`／`route_after_tools`／`_seed_prompt` 改讀同一來源；`src/mcp_server.py` 的 tool 開放同名參數。 | — |
 
-### 驗證
-
-新增 `tests/test_trim_for_llm.py`（保留 `tool_call_id`、補抓訊息不被誤裁、state 不被就地改動、非 JSON 降級）與 `tests/test_route_after_tools.py`（門檻 0／3／4 天邊界、含時效字眼時收緊、只有財報、查無資料、日期異常、剛補抓完）。14 個測試檔全數通過，容器重建後以真實 MCP + pgvector 驗證條件路由正確觸發。
-
-### 對延遲問題的影響
-
-三個方向兩個已實作、一個排除。剩餘瓶頸為本地模型生成速度本身，不換硬體則架構層面已無明顯可省之處，故已從「目前待辦」移入「保持現狀」。
+三個方向兩個已實作、一個排除，該項目已從「目前待辦」移入「保持現狀」。
 
 ---
 

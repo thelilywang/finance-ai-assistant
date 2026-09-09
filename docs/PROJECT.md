@@ -106,7 +106,6 @@ Re-running any command on the same source replaces old chunks (idempotent).
 - **MOPS scraping is fragile**: no official API; when it breaks, the CLI prints manual download instructions instead of raising.
 - **Chat history is per-session only**: kept in memory (last 5 rounds), cleared on page refresh; persist to DB if needed.
 - Answer quality depends on the local model; figures should be verified against the cited sources.
-- News recency filtering is a keyword heuristic ("最近", "recent", ...) that caps news at 90 days; for finer control, move the judgment into `extract_filters`.
 - **6-K may not be a financial report**: EDGAR's 6-K form covers any material announcement by a foreign issuer, so the "latest 6-K" fallback can occasionally ingest a non-earnings filing.
 - **No multi-company comparison**: a question naming two companies degrades to a market-news sweep instead of a side-by-side analysis.
 
@@ -151,7 +150,7 @@ flowchart TD
 | `rewrite_question` | 有對話歷史時,把追問(「那毛利率呢?」)改寫成獨立問題,讓 embedding 檢索有效;無歷史直接通過 |
 | `extract_filters` | 用 LLM 從問題抽出公司代號(台股 4 碼或美股 ticker)/文件類型作為檢索 filter(null 表示不過濾) |
 | `agent` | 把 MCP tool 綁給 LLM,由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。時效判準寫在 tool 的 docstring(`src/mcp_server.py`)而非程式碼裡。`_trim_for_llm` 會把送進模型的複本中的結構化 `chunks` 裁掉、只留 `summary_for_llm`,完整內容留在 state 供 `assemble` 使用。tool 呼叫上限 4 輪 |
-| `tools` | 執行 LLM 選定的 MCP tool(`ToolNode`)。之後由 `route_after_tools` 判斷:檢索到的新聞明顯夠新時(3 天內,問題含時效關鍵字時收緊為「必須是今天」)直接跳到 `assemble`,省下一輪重複的 agent 決策;其餘情況(全空、沒有新聞、已過期、日期不明,或剛跑完補抓 tool)一律回 `agent`,補抓與否仍由 LLM 決定 |
+| `tools` | 執行 LLM 選定的 MCP tool(`ToolNode`)。之後由 `route_after_tools` 判斷:檢索到的新聞明顯夠新時(3 天內,`extract_filters` 抽出的時效窗在 7 天內時收緊為「必須是今天」)直接跳到 `assemble`,省下一輪重複的 agent 決策;其餘情況(全空、沒有新聞、已過期、日期不明,或剛跑完補抓 tool)一律回 `agent`,補抓與否仍由 LLM 決定 |
 | `assemble` | 把 tool 回傳結果還原成下游節點原本就在用的欄位:`retrieved` 取最後一次 `search_knowledge_base` 的結果,另填 `fetched`/`fetch_results` 供 `no_result` 使用 |
 | `generate` | 僅根據檢索到的 chunk 回答並標示 `[來源N]`,並併入即時 yfinance 市場快照(股價、52 週區間、本益比、目標價、分析師評等,加上分析師共識:當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss、下次財報日——僅供 prompt 參考,不算引用來源,失敗時靜默降級),結尾固定追加決策卡一節(附引用的事實、推論、估值、市場共識與門檻、情境解讀、法說會關注清單、立場、觸發條件、關鍵事件、觀察指標)與免責聲明;立場只在財報+新聞+市場數據都支持時才給,但觸發條件/關鍵事件/觀察指標一律要有,回答不會整段棄權 |
 | `no_result` | 補抓後仍查無資料時誠實告知,並附上市場快照與觀察項目,避免幻覺 |
@@ -212,8 +211,7 @@ created_at TIMESTAMPTZ
 ### 已知限制
 
 - **MOPS 爬取脆弱**:無官方 API,掛掉時 CLI 會印手動下載指引而非拋錯。
-- **對話歷史僅存單次 session**:記憶體保留最近 5 輪,重整即清空;需要持久化再存 DB。
+- **對話歷史僅存單次 session**:記憶體保留最近 5 輪,重整即清空。持久化的可行路徑是 Chainlit 內建的 SQLAlchemy data layer 接既有的 PostgreSQL,但該機制以 user identifier 分租,而本專案尚無認證機制,故實際範圍是「認證 + data layer」而非單純加一張表。詳見 `docs/MAINTENANCE_LOG.md` 待辦 3。
 - 回答品質受本地模型限制,數字請對照引用來源確認。
-- 新聞時效過濾為關鍵字啟發式(「最近」「recent」等 → 只取 90 天內新聞);要更準可改由 `extract_filters` 的 LLM 判斷。
 - **6-K 不一定是財報**:EDGAR 的 6-K 涵蓋外國發行人的任何重大公告,「取最新一份 6-K」的 fallback 偶爾會抓到非財報申報。
 - **不支援多公司比較**:同時指名兩間公司的問題會降級為市場新聞掃描,不會做並列分析。
