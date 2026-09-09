@@ -257,11 +257,32 @@ def _seed_prompt(state: GraphState) -> str:
 資料生成最終回覆。"""
 
 
+def _trim_for_llm(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """送進 agent 的複本裡，把檢索結果的 chunks 拿掉，只留 summary_for_llm。
+
+    chunks 是給 assemble 組引用用的結構化資料，tool 說明本來就叫模型別讀它，
+    卻佔了 tool 回傳內容的 57%（實測單次檢索 7177 字中的 4064 字），而且每多跑一輪
+    agent 就整份重送一次。state 裡保留完整內容給 assemble，只裁掉送進模型的複本。
+    """
+    trimmed = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage) and msg.name == "search_knowledge_base":
+            try:
+                summary = json.loads(_tool_text(msg.content))["summary_for_llm"]
+                msg = msg.model_copy(update={"content": summary})
+            except (json.JSONDecodeError, TypeError, KeyError) as e:
+                print(f"[agent] 檢索結果無法裁切，原樣送進模型：{e}")
+        trimmed.append(msg)
+    return trimmed
+
+
 async def agent(state: GraphState) -> GraphState:
     """把 MCP tool 綁給 LLM，由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。"""
     tools = await _mcp_client.get_tools()
     messages = state.get("messages") or [HumanMessage(content=_seed_prompt(state))]
-    resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(messages)
+    resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(
+        _trim_for_llm(messages)
+    )
     return {**state, "messages": [resp]}
 
 
