@@ -10,12 +10,9 @@
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
-3. **對話歷史持久化**（`src/app.py:317`、`db/init.sql`）
-   目前對話歷史存在 `cl.user_session` 的記憶體中、只留最近 5 輪，重整瀏覽器即清空。專案已有 PostgreSQL（pgvector），理應可持久化。可行路徑是 Chainlit 2.x 內建的 SQLAlchemy data layer（`chainlit.data.sql_alchemy.SQLAlchemyDataLayer`，官方支援 PostgreSQL），而非自寫 conversations 表——自寫等於重造 Chainlit 已提供的 thread/step/element 結構，且拿不到內建的歷史對話側邊欄與續談 UI。`sqlalchemy` 與 `asyncpg` 已隨 Chainlit 進入環境，不需新增依賴。真正的成本不在儲存層：**data layer 以 user identifier 為分租鍵，而本專案目前完全沒有認證機制**（無 `@cl.password_auth_callback` 或 OAuth），沒有身分就無法區分誰的歷史，等於把所有人的對話混在一起。因此本項的實際範圍是「認證 + data layer + schema 遷移」，且一旦存入 DB，財報問答的對話內容就成為需要考慮保存期限與刪除機制的個資。難度：中（2-3 天，多數花在認證與權限而非儲存）。
-
-4. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+3. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
    若未來抓取從同步 API/套件轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前以 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 要到需服務多個併發 client 時才有實質效益。現況為同步 `requests`、單次數秒內完成，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現的問題，先記錄方向待實際需要時再評估。
-5. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+4. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
 ## 保持現狀（已評估，判斷暫不處理）
@@ -29,9 +26,7 @@
 
 ## 2026-09-02　依賴版本 / 架構優化評估
 
-對 8 項候選優化點做唯讀評估（不改動邏輯），逐一就影響情境、六維指標（效能延遲／成本／維運複雜度／生態成熟度／可擴展性／vendor lock-in）與修復難度評分排序。以下為結論與後續追蹤，未列入的項目多屬「已知但當前 CP 值不足」，見上方「目前待辦」與「保持現狀」。
-
-### 已修復
+評估 8 項架構優化候選，一項於本日修復，其餘落入「目前待辦」與「保持現狀」。
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
@@ -54,45 +49,26 @@
 
 ---
 
-## 2026-09-04　MOPS 財報選檔邏輯修正
+## 2026-09-04　MOPS 選檔與 Rewrite 改寫的準確度修正
 
-### 背景
+兩項各自獨立、皆屬「靜默選錯」而非報錯的準確度缺陷。
 
-「MOPS 爬蟲脆弱性」在 09-02 的評估中被列為保持現狀——已有 try/except 全包、失敗降級印手動下載指引，判斷為結構性限制而非程式碼品質問題。本次重新檢視時評估了改用 Playwright 的提案，結論為不採用（理由見上方「保持現狀」）。
+### 一、MOPS 固定選到英文版財報
 
-但評估過程中直接向 MOPS 端點送出真實請求（2330，115 年）取得原始回應，發現同一季度會同時列出 `_AI1.pdf`（IFRSs 合併財報，中文主文）與 `_AIA.pdf`（英文版）兩份檔案。原本的選檔邏輯 `sorted(files)[-1]` 依字典序排序，而 `'AIA' > 'AI1'`，導致每次都固定選到英文版——這是系統性錯誤而非偶發，且與中文財經助理的產品定位不符。
+「MOPS 爬蟲脆弱性」在 09-02 被列為保持現狀，本次重新檢視時評估改用 Playwright 的提案，結論為不採用（理由見上方「保持現狀」）。但評估過程中向端點送出真實請求（2330，115 年），發現同一季度會同時列出 `_AI1.pdf`（中文主文）與 `_AIA.pdf`（英文版），而原本的 `sorted(files)[-1]` 依字典序排序、`'AIA' > 'AI1'`，導致每次固定選到英文版——系統性錯誤而非偶發，且與中文財經助理的定位不符。
 
-### 修復
+**未變動範圍**：爬蟲本體仍依賴網站當前頁面結構，改版仍會失效。這次只修正選檔語言，不是解決該結構性限制。
 
-| 項目 | 修復內容 | commit |
-|---|---|---|
-| MOPS 財報誤選英文版 | `src/update.py` 新增 `_select_report_file()`，取代原本的 `sorted(files)[-1]`：先篩出最新月份的檔案，該月份內優先選 `_AI1.pdf`（中文主文），沒有才退回其他檔案；選到非中文主文時印出告警訊息，不再靜默接受降級結果。新增 `tests/test_update.py`，用實測取得的真實檔名組合覆蓋：同月中英文並存、僅有英文版、單一檔案、查無資料、重複檔名。 | `36c6cdf` |
+### 二、Rewrite regex bypass 誤判追問
 
-### 未變動範圍
-
-MOPS 爬蟲本體（表單 POST + regex 解析）仍依賴網站當前的頁面結構，網站改版仍會導致失效——這次只修正了「選檔邏輯選錯語言版本」這個已發現的準確度問題，屬於已知結構性限制的其中一項修正，不是解決根本限制本身。
-
----
-
-## 2026-09-04　Rewrite 追問改寫誤判修正
-
-### 背景
-
-`rewrite_question`（`src/graph.py`）在有對話歷史時，把使用者追問改寫成不依賴上下文的獨立問題（例如「那毛利率呢？」→「台積電的毛利率是多少？」），讓後續 embedding 檢索有效。改寫前有一段 regex bypass：問題中出現 4 位數字或 2-5 碼大寫字母就視為「已指名代號」，跳過改寫直接放行。
-
-此判斷會誤判兩類問題：
-- 追問中帶年份，如「2024 年的營收呢？」——`\d{4}` 誤判成台股代號。
-- 追問中帶財務縮寫，如「ROE 表現如何？」——`[A-Z]{2,5}` 誤判成美股 ticker。
-
-兩者都仍然依賴上下文（缺少「哪家公司」），被跳過改寫後語意不完整，會直接影響後續 `extract_filters`/`retrieve` 的檢索結果。
-
-用真實 Ollama 對照驗證：`re.search(...)` 對這兩句都回傳 match（會觸發 bypass），改寫前後行為差異明確存在，非純理論風險。
+`rewrite_question` 在有歷史時會把追問改寫成獨立問題（「那毛利率呢？」→「台積電的毛利率是多少？」），改寫前有一段 regex bypass：出現 4 位數字或 2-5 碼大寫字母就視為已指名代號、跳過改寫。它會誤判兩類仍依賴上下文的追問——「2024 年的營收呢？」被 `\d{4}` 當成台股代號，「ROE 表現如何？」被 `[A-Z]{2,5}` 當成美股 ticker。用真實 Ollama 驗證兩句都會觸發 bypass，非純理論風險。
 
 ### 修復
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
-| Rewrite regex bypass 誤判追問 | 拿掉 `graph.py` 裡的 regex bypass，`rewrite_question` 在有歷史時一律呼叫 LLM 改寫。rewrite prompt 本身已寫明「若新問題本身已經獨立完整，原樣輸出即可」，所以完整問題不會被改壞，只是多一次 LLM 呼叫確認。代價：每輪有歷史的對話都固定多跑一次 LLM（現有 `llm.with_retry()` 已處理偶發逾時，非本次新增風險）。 | `f2ff695` |
+| MOPS 財報誤選英文版 | `update.py` 新增 `_select_report_file()` 取代 `sorted(files)[-1]`：先篩最新月份，該月份內優先選 `_AI1.pdf`，選到非中文主文時印告警不靜默降級。新增 `tests/test_update.py`，用實測取得的真實檔名組合覆蓋五種情境。 | `36c6cdf` |
+| Rewrite regex bypass 誤判追問 | 拿掉 `graph.py` 的 regex bypass，有歷史時一律呼叫 LLM 改寫；prompt 已寫明「若問題本身已獨立完整，原樣輸出即可」，完整問題不會被改壞。代價是每輪有歷史的對話固定多跑一次 LLM。 | `f2ff695` |
 
 ---
 
@@ -134,37 +110,31 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 ---
 
-## 2026-09-08　補資料決策失效修復
+## 2026-09-08　補資料決策失效修復、推理顯示與模型替換評估
 
-### 背景
+同一條調查線：先修好 `reasoning=False` 壓掉 tool calling 的退化，再回頭評估「開啟推理」與「換更快模型」兩個方向，後兩者實測後皆不採用。三節共用同一組驗證情境。
 
-09-07 改造後留下一個功能退化：對資料停在兩個月前的標的提問「MSFT 最新財報和近況如何？」，tool 說明已載明此情境應補抓，模型卻直接以過期資料作答。同情境下改造前的確定性規則必定會補抓。
+### 一、補資料決策失效（根因修復）
 
-初步假設為模型指令遵從能力不足，但完整回覆顯示模型已正確算出天數、套用規則並得出「需要補抓」的結論，只是把工具呼叫寫成文字敘述而非結構化 tool call。落差指向輸出格式而非理解能力，據此轉查模型參數，A／B 對照確認根因為 `reasoning=False`——原意是省去推理直接產出結果，卻連帶壓掉 tool-calling 能力。排查過程中另發現四項相關缺陷，一併處理。
+09-07 改造後留下一個功能退化：資料停在兩個月前仍直接作答，改造前的確定性規則必定會補抓。
 
-### 修復
+初步假設為指令遵從能力不足，但模型其實已算出天數、得出「需要補抓」的結論，只是寫成文字敘述而非結構化 tool call。落差在輸出格式而非理解能力，據此轉查參數，A／B 對照確認根因為 `reasoning=False` 連帶壓掉了 tool-calling 能力。排查過程中另發現四項相關缺陷，一併處理。
+
+**修復內容**：
 
 | 項目 | 修復內容 | commit |
 |---|---|---|
 | 關閉推理模式導致 tool-calling 失效（根因） | 依用途拆成兩個模型實例：`agent` 節點改用不帶 `reasoning=False` 的 `_tool_llm`，其餘節點沿用 `_base_llm`。`agent` 的輸出不進使用者可見的串流（前端只放行 `generate` 的 token）。 | `41ac2ec` |
-| 模型無從判斷資料新舊 | prompt 從未提供當日日期，模型讀得出「2026-07-12」卻無法判斷距今多久。`_seed_prompt` 與 `search_knowledge_base` 的回傳都補上今天日期，並為每筆資料預先算好「距今 N 天」，讓模型不需自行做日期運算。 | `41ac2ec` |
-| 財報天數被誤當新聞時效 | 工具呼叫恢復後才顯現：摘要把財報（57 天）與新聞（3 天）混列，模型分不出該依哪個數字，資料夠新時也觸發補抓。摘要改為每筆標示「財報｜」或「新聞｜」，開頭給出「目前最新的『新聞』距今 N 天」；tool 說明同步改為只依此數字判斷，並註明財報按季發布、距今數十天屬正常。 | `41ac2ec` |
-| `doc_type` 參數被填入多值 | 模型會傳 `"financial_report,news"`，但該參數只接受單一值，照字面過濾會查出空結果。tool 說明明確限定可填值並說明「想兩種都查就留空」，同時在 tool 內部容錯：非單一合法值一律降級為不過濾。 | `41ac2ec` |
-| 容器時區為 UTC，日期偏移一天 | 容器未設時區，比台北時間慢 8 小時，台灣半夜 0-8 點期間系統認定的「今天」會少一天，使「距今 N 天」全面偏移，亦影響 MOPS 民國年跨年的年度判斷。`docker-compose.yml` 為三個服務設定 `TZ`（可用環境變數覆寫）。 | `41ac2ec` |
+| 模型無從判斷資料新舊 | prompt 從未提供當日日期，模型讀得出「2026-07-12」卻不知距今多久。`_seed_prompt` 與 `search_knowledge_base` 補上今天日期並預先算好「距今 N 天」，不讓模型自行做日期運算。 | `41ac2ec` |
+| 財報天數被誤當新聞時效 | 工具呼叫恢復後才顯現：摘要把財報（57 天）與新聞（3 天）混列，資料夠新時也觸發補抓。改為每筆標示「財報｜」或「新聞｜」並在開頭給出最新新聞距今天數，tool 說明同步註明財報按季發布、距今數十天屬正常。 | `41ac2ec` |
+| `doc_type` 參數被填入多值 | 模型會傳 `"financial_report,news"`，該參數只接受單一值，照字面過濾會查出空結果。tool 說明限定可填值，並在內部容錯：非單一合法值一律降級為不過濾。 | `41ac2ec` |
+| 容器時區為 UTC，日期偏移一天 | 容器比台北時間慢 8 小時，台灣半夜 0-8 點認定的「今天」會少一天，使「距今 N 天」全面偏移，亦影響 MOPS 民國年判斷。`docker-compose.yml` 為三個服務設定 `TZ`。 | `41ac2ec` |
 
----
-
-## 2026-09-08　推理顯示與模型替換評估
-
-### 背景
-
-瓶頸在本地模型推理（延遲數據見「保持現狀」）。評估兩個方向：顯示推導過程（提升可信度，長等待中亦提供進度感），以及當時列為首選的換用更快模型。兩者實測後皆不採用。
-
-### 一、顯示推理過程
+### 二、顯示推理過程
 
 **結論：功能可行但不納入，開啟推理讓單題延遲增為 6.7 倍。**
 
-實作過程中的一個教訓：初始假設「推理段以 `<think>` 標籤內嵌在回覆中，需自行剝除」是錯的，且讓第一版實作失效——據此寫的標籤解析器單元測試全過，卻永遠收不到資料。實際上推理段走 `additional_kwargs["reasoning_content"]` 獨立欄位：未指定 `reasoning` 時模型照樣推理但內容被丟棄，設為 `True` 才會回傳。確認欄位後改為直接讀取，折疊區塊改用 Chainlit `cl.Step` 原生的 `default_open` / `auto_collapse`，不自行拼裝 HTML。
+一個教訓：假設推理段以 `<think>` 標籤內嵌是錯的，據此寫的解析器單元測試全過卻永遠收不到資料。實際走 `additional_kwargs["reasoning_content"]` 獨立欄位，未指定 `reasoning` 時模型照樣推理但內容被丟棄。
 
 延遲量測（本機 `qwen3.5:9b`，真實 MCP + pgvector）：
 
@@ -174,15 +144,15 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 全節點開啟 | 422.2s | 104.0s | 660.8s | **0 字** | 3152 字 | 569.3s |
 | 僅 `generate` 開啟 | 22.1s | 1052.5s | **1245.3s** | 1425 字 | 30891 字 | 237.6s |
 
-`extract_filters` 只做代號與文件類型抽取，開推理後從 5.3 秒變成 422 秒——讓模型為一件不需判斷的事去推理，代價不成比例。該組答案 0 字是另一個問題：Ollama 預設 `num_ctx` 4096，RAG prompt 加推理即塞滿；加大到 16384 可解，但模型不再受限後為一句營收提問寫了 30891 字推理，`generate` 慢了 12 倍。體感亦未改善，首個推理字元要等 237.6 秒。
+`extract_filters` 只做代號抽取，不需判斷的事去推理代價不成比例。答案 0 字另有原因：Ollama 預設 `num_ctx` 4096，RAG prompt 加推理即塞滿；加大到 16384 可解，但模型不再受限後為一句提問寫了 30891 字推理。
 
 壓制推理長度的兩條路徑均無效：`reasoning='low'` 的推理字數與 `True` 相同（層級控制僅 `gpt-oss` 支援）；`num_predict` 限制總輸出，而推理永遠先於答案產生，設 600 時答案再次被截為 0 字。
 
-### 二、替換模型
+### 三、替換模型
 
 **結論：`qwen3.5:9b` 是這台 M1／16GB 上唯一可用的模型，換模型救不了延遲。** 較小的模型省下的時間有限，卻先失去 tool calling 與結構化輸出這兩項核心能力；MLX 版本在此機器上更慢。限制來自硬體容量與記憶體頻寬，與架構無關。
 
-每情境三次，沿用本日「補資料決策失效修復」的驗證情境（序列執行避免互搶資源）：
+每情境三次，沿用第一節的驗證情境（序列執行避免互搶資源）：
 
 | 模型 | 大小 | 單題耗時 | 資料過期→應補抓 | 結構化輸出 |
 |---|---|---|---|---|
@@ -191,9 +161,9 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | `qwen3.5:4b-mlx` | 4.0GB | 278s | 1/3 | **3/3 失敗** |
 | `qwen3.5:9b-mlx` | 9.1GB | 逾一小時未完成 | — | — |
 
-`4b` 只快 25%，卻完全不發 tool call，資料停在兩個月前仍直接作答——正是本日前一節修好的那個退化（它在「資料夠新」情境全數通過是假訊號，該情境本就不該呼叫工具）。`4b-mlx` 連 `extract_filters` 都三次解析失敗，模型把 JSON 寫成 markdown 條列，降級機制雖正常運作但過濾條件已失效。
+`4b` 只快 25% 卻完全不發 tool call，資料停在兩個月前仍直接作答，正是第一節修好的那個退化。`4b-mlx` 把 JSON 寫成 markdown 條列，`extract_filters` 三次全數解析失敗。
 
-「Apple 原生框架應該更快」是合理但錯誤的直覺，值得記錄：`9b-mlx` 失敗源於容量而非框架——nvfp4 量化需 9.1GB，加上 embedding 模型超出 16GB 實體記憶體，swap 一度達 23GB，量到的其實是磁碟分頁速度。排除容量因素的公平比較（同為 4GB 級距、不觸發 swap）中，`4b-mlx` 仍比 `4b` 慢一倍。同一份權重在 Ollama 下已落後，換框架不具效益，代價則包含改用 `langchain-openai`、host 額外常駐服務，以及 `reasoning` 在 OpenAI 介面無對應而需重驗 tool calling。
+「Apple 原生框架應該更快」是合理但錯誤的直覺：`9b-mlx` 失敗源於容量而非框架，加上 embedding 超出 16GB 實體記憶體，swap 一度達 23GB，量到的其實是磁碟分頁速度。排除容量因素的公平比較中（同 4GB 級距、不觸發 swap），`4b-mlx` 仍比 `4b` 慢一倍——同一份權重在 Ollama 下已落後，換框架不具效益。
 
 ### 改動內容
 
@@ -234,7 +204,7 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 加字數約束 | 1252 字（**+35%**） | **遺漏** |
 | 改為限制子條列數量 | 1062 字（+15%） | 保留 |
 
-基準輸出本來就每欄 1-2 句、已符合該約束，沒有廢話可壓；約束中「含每個子條列」的措辭反而誘導模型展開更多子條列，該版還漏掉免責聲明，屬合規性退化。長度由欄位規格本身決定。
+基準每欄本就 1-2 句、沒有廢話可壓，而「含每個子條列」的措辭反而誘導模型展開更多子條列並漏掉免責聲明，屬合規性退化——長度由欄位規格決定，不由約束決定。
 
 ### 四、新聞時效判斷改由 LLM 抽取
 
@@ -250,6 +220,12 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 **已知限制**：「取最大的 exhibit」是啟發式，三家皆命中本文，但理論上可能挑到投影片；申報索引帶有 `EX-99.1` 類型標籤，誤挑再改解析該欄位。已同步至 `docs/PROJECT.md`。
 
+### 六、對話歷史持久化
+
+成本不在儲存層而在認證：data layer 以 user identifier 分租，沒有身分就無法區分誰的歷史。續談時從 `ThreadDict` 重建 history 仍走 `_trim_for_history()`，維持與正常對話一致的 prompt token 控制。
+
+`"createdAt"` 是 TEXT，cutoff 在 Python 端算成同格式字串比大小，不對整欄 cast 以免索引失效。`db/chainlit_schema.sql` 原本沒掛進 `docker-compose.yml`，一併補上；既有 volume 仍需手動跑一次 psql。
+
 ### 改動內容
 
 | 項目 | 涉及檔案與函式 | commit |
@@ -260,8 +236,7 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 決策卡字數約束 | 實測後回退，`i18n.py` 維持原狀 | — |
 | 新聞時效判斷 | `graph.py` 移除 `_RECENT_RE`，`ExtractedFilters` 新增 `news_since_days` 與夾取 validator；`mcp_server.py` 開放同名參數 | — |
 | EDGAR 6-K | `update.py` 新增 `_is_period_end()`／`_select_filing()`／`_select_exhibit()`，並修正查無申報的訊息；新增 `tests/test_edgar_select.py` | `fb24dbc` |
-
-延遲三方向兩個已實作、一個排除，該項目已從「目前待辦」移入「保持現狀」。
+| 對話歷史持久化 | `app.py` 新增 `oauth_callback`／`_init_session()`／`on_chat_resume`／`_rebuild_history()`；`vectorstore.py` 新增 `delete_threads_older_than()`；`config.py` 新增 `THREAD_RETENTION_DAYS`；`chainlit_schema.sql` 加兩個 threads 索引並掛進 `docker-compose.yml`；新增 `tests/test_history_rebuild.py` | — |
 
 ---
 

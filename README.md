@@ -29,19 +29,27 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env       # uses PGVECTOR_URL for the DB connection
-psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # enables thumbs up/down feedback
+psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # enables thumbs up/down feedback + threads/history tables
+                            # (docker-compose already applies this on a fresh volume;
+                            #  only needed manually for a volume created before this file existed)
 
-# 4. Fetch some data
+# 4. Google OAuth login (required — chat is behind login)
+# Cloud Console > APIs & Services > Credentials, callback URL:
+# http://localhost:8000/auth/oauth/google/callback
+# fill OAUTH_GOOGLE_CLIENT_ID / OAUTH_GOOGLE_CLIENT_SECRET in .env
+chainlit create-secret      # paste the output into CHAINLIT_AUTH_SECRET in .env
+
+# 5. Fetch some data
 python -m src.update report --market us --company AAPL
 python -m src.update news --company 2330 --limit 10
 
-# 5. Chat (inside the venv from step 3 — yfinance/plotly live there)
-chainlit run src/app.py -w    # http://localhost:8000
+# 6. Chat (inside the venv from step 3 — yfinance/plotly live there)
+chainlit run src/app.py -w    # http://localhost:8000, sign in with Google to start chatting
 ```
 
 ### Installation
 
-See steps 1-3 of Quick Start above (Ollama models, database, Python env).
+See steps 1-4 of Quick Start above (Ollama models, database, Python env, Google OAuth).
 
 ### Features
 
@@ -128,19 +136,27 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env       # DB 連線用 PGVECTOR_URL(避免與 chainlit 的 DATABASE_URL 撞名)
-psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # 套用後才能在回答上按讚/倒讚
+psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # 套用後才能按讚/倒讚、對話歷史才有 threads 等表
+                            # (全新 volume 已由 docker-compose 自動套用;
+                            #  只有本檔案上線前就建立的既有 volume 才需要手動跑一次)
 
-# 4. 抓資料
+# 4. 設定 Google 登入(必要——聊天介面需登入才能使用)
+# Cloud Console > APIs & Services > Credentials,callback URL 填:
+# http://localhost:8000/auth/oauth/google/callback
+# 把 OAUTH_GOOGLE_CLIENT_ID / OAUTH_GOOGLE_CLIENT_SECRET 填進 .env
+chainlit create-secret      # 輸出貼進 .env 的 CHAINLIT_AUTH_SECRET
+
+# 5. 抓資料
 python -m src.update report --market us --company AAPL
 python -m src.update news --company 2330 --limit 10
 
-# 5. 開始聊天(在步驟 3 的 venv 內執行——yfinance/plotly 裝在裡面)
-chainlit run src/app.py -w    # 開 http://localhost:8000
+# 6. 開始聊天(在步驟 3 的 venv 內執行——yfinance/plotly 裝在裡面)
+chainlit run src/app.py -w    # 開 http://localhost:8000,用 Google 帳號登入後即可開始聊天
 ```
 
 ### 安裝
 
-見上方快速開始的 1-3 步(安裝 Ollama 模型、啟動資料庫、建立 Python 環境)。
+見上方快速開始的 1-4 步(安裝 Ollama 模型、啟動資料庫、建立 Python 環境、設定 Google 登入)。
 
 ### 功能
 
