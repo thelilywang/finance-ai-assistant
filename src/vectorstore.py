@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import datetime as dt
+
 import psycopg
 from pgvector.psycopg import register_vector
 from psycopg_pool import ConnectionPool
@@ -60,6 +62,20 @@ def delete_news_older_than(days: int) -> int:
             " AND published_at < CURRENT_DATE - %s",
             (days,),
         )
+        return cur.rowcount
+
+
+def delete_threads_older_than(days: int) -> int:
+    """刪除超過 days 天的對話 thread，回傳刪除筆數。
+
+    steps/elements/feedbacks 都對 threads 設了 ON DELETE CASCADE，刪 thread 即連帶清掉。
+    "createdAt" 是 TEXT（ISO 字串，Chainlit 寫入時用 `datetime.now().isoformat() + "Z"`，
+    即本地時間、非 UTC），故在 Python 端用同樣格式算好 cutoff 字串再比大小——
+    ISO-8601 字典序與時間序一致，能吃到索引，不能對整欄 cast 成 timestamp（索引會失效）。
+    """
+    cutoff = (dt.datetime.now() - dt.timedelta(days=days)).isoformat() + "Z"
+    with get_connection() as conn:
+        cur = conn.execute('DELETE FROM threads WHERE "createdAt" < %s', (cutoff,))
         return cur.rowcount
 
 

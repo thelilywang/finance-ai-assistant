@@ -78,3 +78,6 @@ CREATE TABLE IF NOT EXISTS feedbacks (
 CREATE INDEX IF NOT EXISTS steps_thread_id_idx ON steps ("threadId");
 CREATE INDEX IF NOT EXISTS elements_thread_id_idx ON elements ("threadId");
 CREATE INDEX IF NOT EXISTS feedbacks_for_id_idx ON feedbacks ("forId");
+-- 側邊欄依使用者撈對話清單會過濾 userId；createdAt 供保存期限清除掃描用
+CREATE INDEX IF NOT EXISTS threads_user_id_idx ON threads ("userId");
+CREATE INDEX IF NOT EXISTS threads_created_at_idx ON threads ("createdAt");

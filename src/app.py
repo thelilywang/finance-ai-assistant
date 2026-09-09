@@ -3,6 +3,7 @@
 用法：
     chainlit run src/app.py -w    # 開 http://localhost:8000
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from chainlit.input_widget import Select
 from src import config
 from src.graph import build_graph, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
-from src.vectorstore import delete_news_older_than
+from src.vectorstore import delete_news_older_than, delete_threads_older_than
 
 try:  # 啟動時清過期新聞，DB 未起不擋 app
     pruned = delete_news_older_than(config.NEWS_RETENTION_DAYS)
@@ -28,11 +29,30 @@ try:  # 啟動時清過期新聞，DB 未起不擋 app
 except Exception as e:
     print(f"[app] 新聞清理略過：{e}")
 
+try:  # 啟動時清過期對話 thread，DB 未起不擋 app
+    pruned_threads = delete_threads_older_than(config.THREAD_RETENTION_DAYS)
+    if pruned_threads:
+        print(f"[app] 已清除 {pruned_threads} 筆過期對話 thread")
+except Exception as e:
+    print(f"[app] 對話清理略過：{e}")
+
 
 @cl.data_layer
 def get_data_layer():
     # 沿用同一個 Postgres（PGVECTOR_URL），供讚/倒讚回饋持久化用
     return SQLAlchemyDataLayer(conninfo=config.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://"))
+
+
+async def oauth_callback(provider_id, token, raw_user_data, default_user, id_token=None):
+    # ponytail: 個人專案，不做白名單；identifier 由 provider 給，直接當分租鍵
+    return default_user
+
+
+# cl.oauth_callback 在沒設定任何 provider 環境變數時會直接 raise（chainlit/callbacks.py:127），
+# 而這是 import 時執行的。不加這層判斷，未設 OAuth 的環境（如 CI、剛 clone 的專案）連
+# import src.app 都會炸，連帶讓幾支不碰認證的測試跑不起來。
+if os.getenv("OAUTH_GOOGLE_CLIENT_ID"):
+    cl.oauth_callback(oauth_callback)
 
 
 @cl.set_starters
@@ -105,6 +125,28 @@ def _trim_for_history(answer: str) -> str:
     return answer[: config.HISTORY_ANSWER_MAX_CHARS]
 
 
+def _rebuild_history(steps: list[dict]) -> list[tuple[str, str]]:
+    """從 ThreadDict["steps"] 重建 on_message 用的 (問, 答) history，供 on_chat_resume 呼叫。
+
+    純函式、不碰 DB／cl，方便獨立測試。只取 user_message/assistant_message，
+    tool step 一律跳過（_StepTracker 產生的 tool step 理論上已被 remove()，
+    但仍需顯式過濾，不能假設 DB 內容）；答案要過 _trim_for_history 維持與
+    正常對話一致的 prompt token 控制；落單（配不成對）的 user step 直接丟棄。
+    """
+    pairs: list[tuple[str, str]] = []
+    pending_question: str | None = None
+    for step in steps:
+        step_type = step.get("type")
+        if step_type == "user_message":
+            pending_question = step.get("output", "")
+        elif step_type == "assistant_message":
+            if pending_question is not None:
+                pairs.append((pending_question, _trim_for_history(step.get("output", ""))))
+                pending_question = None
+        # 其餘 type（tool 等）跳過
+    return pairs[-5:]
+
+
 def _model_choices() -> dict[str, str]:
     """選單項目：預設模型排在最前面，確保它一定在清單裡（設定漏列時也不會選不到）。"""
     names = [config.LLM_MODEL] + [m for m in config.LLM_MODEL_CHOICES if m != config.LLM_MODEL]
@@ -128,10 +170,11 @@ def _chat_settings(label_lang: str, initial_value: str, model: str) -> cl.ChatSe
     ])
 
 
-@cl.on_chat_start
-async def start():
-    # ponytail: 對話歷史只存在單次 session 記憶體，重整即清空；要持久化再存 DB
-    cl.user_session.set("history", [])
+async def _init_session():
+    """on_chat_start／on_chat_resume 共用的初始化：語言、模型、ChatSettings、graph。
+
+    history 不在這裡設，兩個 hook 各自決定（新對話清空、續談從 DB 重建）。
+    """
     browser = detect_lang(cl.user_session.get("languages"))
     cl.user_session.set("browser_lang", browser)
     cl.user_session.set("lang_setting", "auto")
@@ -149,6 +192,18 @@ async def start():
         print(f"[app] MCP server 連線失敗：{e}")
         loading.content = t(browser, "connect_failed", error=e)
         await loading.update()
+
+
+@cl.on_chat_start
+async def start():
+    cl.user_session.set("history", [])
+    await _init_session()
+
+
+@cl.on_chat_resume
+async def resume(thread: cl.types.ThreadDict):
+    cl.user_session.set("history", _rebuild_history(thread.get("steps", [])))
+    await _init_session()
 
 
 @cl.on_settings_update

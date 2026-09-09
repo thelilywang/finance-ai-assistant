@@ -38,4 +38,6 @@ TOP_K = 5
 
 # 資料/token 控制
 NEWS_RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "180"))
+# 對話含提問內容，屬個資，留短一點
+THREAD_RETENTION_DAYS = int(os.getenv("THREAD_RETENTION_DAYS", "90"))
 HISTORY_ANSWER_MAX_CHARS = int(os.getenv("HISTORY_ANSWER_MAX_CHARS", "400"))
