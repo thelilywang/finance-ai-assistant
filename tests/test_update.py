@@ -111,6 +111,8 @@ try:
     assert _r.ok is False and "SEC EDGAR" in _r.detail
 finally:
     _u.requests.get = _orig_get
+    # _company_tickers 用 lru_cache，上面的假回應（拋錯）若殘留在快取會污染後續測試
+    _u._company_tickers.cache_clear()
 
 # SEC 節流頁是 HTTP 200，raise_for_status 攔不住；不檢查會把警告文字當財報入庫
 # 並回報成功（靜默污染檢索結果）。此處釘住「內容過短即視為失敗、不入庫」。
@@ -148,5 +150,157 @@ try:
     assert _r.ok is True and len(_ingested) == 1  # 正常財報照常入庫
 finally:
     _u.requests.get, _u.ingest_text = _orig_get, _orig_ingest
+    _u._company_tickers.cache_clear()
 
 print("fetch contract self-check OK")
+
+# --- CIK 快取：同一次執行只打一次 company_tickers.json ---
+
+_call_count = {"n": 0}
+
+
+def _counting_get(url, **kw):
+    if "company_tickers" in url:
+        _call_count["n"] += 1
+        class _R:
+            def raise_for_status(self): pass
+            def json(self): return {"0": {"ticker": "AAPL", "cik_str": 320193}}
+        return _R()
+    raise AssertionError(f"unexpected url {url}")
+
+
+try:
+    _u.requests.get = _counting_get
+    _u._company_tickers()
+    _u._company_tickers()
+    assert _call_count["n"] == 1  # 第二次呼叫吃快取，不再打網路
+finally:
+    _u.requests.get = _orig_get
+    _u._company_tickers.cache_clear()
+
+print("company tickers cache self-check OK")
+
+# --- SEC XBRL 純函式：_pick_fact / _format_xbrl ---
+
+from src.update import _format_xbrl, _pick_fact
+
+# 同一 accession 回三列（年初至今 vs 當季，AAPL 實測樣本）：取 start 最晚那列＝當季數字
+aapl_units = {"USD": [
+    {"accn": "0000320193-26-000070", "start": "2025-10-01", "end": "2025-12-31", "val": 100, "filed": "2026-01-30"},
+    {"accn": "0000320193-26-000070", "start": "2025-01-01", "end": "2025-12-31", "val": 400, "filed": "2026-01-30"},
+    {"accn": "0000320193-25-000050", "start": "2024-10-01", "end": "2024-12-31", "val": 90, "filed": "2025-01-30"},
+]}
+assert _pick_fact(aapl_units, "0000320193-26-000070") == (100, "USD", True, "2025-10-01~2025-12-31")
+
+# 資產負債表這類時點數字沒有 start，直接取該 accession 那列
+bs_units = {"USD": [{"accn": "acc1", "end": "2025-12-31", "val": 500, "filed": "2026-01-30"}]}
+assert _pick_fact(bs_units, "acc1") == (500, "USD", True, "2025-12-31")
+
+# 雙幣別（TSM 情境）：優先取 USD 而非字典裡先出現的 TWD
+dual_currency = {
+    "TWD": [{"accn": "tw-acc", "start": "2025-01-01", "end": "2025-12-31", "val": 999, "filed": "2026-03-01"}],
+    "USD": [{"accn": "tw-acc", "start": "2025-01-01", "end": "2025-12-31", "val": 31, "filed": "2026-03-01"}],
+}
+assert _pick_fact(dual_currency, "tw-acc") == (31, "USD", True, "2025-01-01~2025-12-31")
+
+# companyfacts 落後：對不到該 accession，退回同幣別中 filed 最新的一批（TSM 20-F 落後情境）
+stale_units = {"USD": [
+    {"accn": "old-acc-1", "start": "2023-01-01", "end": "2023-12-31", "val": 10, "filed": "2024-01-01"},
+    {"accn": "old-acc-2", "start": "2024-01-01", "end": "2024-12-31", "val": 20, "filed": "2025-01-01"},
+]}
+# 第三個值為 False：這是退而求其次的舊數字，呼叫端據此優先改用其他概念
+assert _pick_fact(stale_units, "brand-new-accession-not-in-facts") == (20, "USD", False, "2024-01-01~2024-12-31")
+
+# 查無資料
+assert _pick_fact({}, "acc1") is None
+
+facts = {"us-gaap": {
+    "Revenues": {"units": {"USD": [
+        {"accn": "acc1", "start": "2025-10-01", "end": "2025-12-31", "val": 1000000, "filed": "2026-01-30"},
+    ]}},
+    "EarningsPerShareDiluted": {"units": {"USD/shares": [
+        {"accn": "acc1", "start": "2025-10-01", "end": "2025-12-31", "val": 1.5, "filed": "2026-01-30"},
+    ]}},
+}}
+text = _format_xbrl(facts, "us-gaap", "acc1", "aapl", "10-Q（2026-01-30）")
+assert "營業收入：1,000,000" in text
+assert "1.5（USD/股，期間" in text  # EPS 要帶幣別，不可只寫「元/股」
+assert "USD" in text
+assert "acc1" in text
+
+# 概念清單首位已停用（AAPL 實測：Revenues 最新只到 2018 年，本季營收在後面那個概念）。
+# 不可取第一個有值的就停，否則會拿八年前的數字當本季營收
+stale_first = {"us-gaap": {
+    "Revenues": {"units": {"USD": [
+        {"accn": "old-2018", "start": "2018-07-01", "end": "2018-09-29", "val": 62900000000, "filed": "2018-11-05"},
+    ]}},
+    "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+        {"accn": "acc1", "start": "2025-10-01", "end": "2025-12-31", "val": 109417000000, "filed": "2026-01-30"},
+    ]}},
+}}
+text_stale = _format_xbrl(stale_first, "us-gaap", "acc1", "aapl", "10-Q")
+assert "109,417,000,000" in text_stale and "62,900,000,000" not in text_stale
+
+# 雙幣別 EPS：單位鍵是 USD/shares 而非 USD，前綴比對才選得到美元那組。
+# 只比對 "USD" 會取到 TWD/shares 的 44.67，被 LLM 當成美元讀，量級差 30 倍以上
+dual_eps = {"ifrs-full": {"DilutedEarningsLossPerShare": {"units": {
+    "TWD/shares": [{"accn": "acc1", "start": "2024-01-01", "end": "2024-12-31", "val": 44.67, "filed": "2025-04-17"}],
+    "USD/shares": [{"accn": "acc1", "start": "2024-01-01", "end": "2024-12-31", "val": 1.36, "filed": "2025-04-17"}],
+}}}}
+assert "1.36（USD/股，期間" in _format_xbrl(dual_eps, "ifrs-full", "acc1", "tsm", "20-F")
+
+# 只有非美元幣別時，幣別照實寫出，不可簡化成「元」
+twd_only = {"ifrs-full": {"DilutedEarningsLossPerShare": {"units": {
+    "TWD/shares": [{"accn": "acc1", "start": "2024-01-01", "end": "2024-12-31", "val": 44.67, "filed": "2025-04-17"}],
+}}}}
+assert "44.67（TWD/股，期間" in _format_xbrl(twd_only, "ifrs-full", "acc1", "tsm", "20-F")
+
+# 時點數字（資產負債表）沒有 start，同一份申報會同時列出本期與多期比較數。
+# 只依 start 排序會在這些列之間任意挑一期——AAPL 實測會選到兩年前的權益數
+point_in_time = {"USD": [
+    {"accn": "acc1", "end": "2024-09-28", "val": 56950000000, "filed": "2026-07-31"},
+    {"accn": "acc1", "end": "2026-06-27", "val": 107520000000, "filed": "2026-07-31"},
+    {"accn": "acc1", "end": "2025-09-27", "val": 73733000000, "filed": "2026-07-31"},
+]}
+assert _pick_fact(point_in_time, "acc1") == (107520000000, "USD", True, "2026-06-27")
+
+# 期末日相同時取期間較短者＝當季，而非年初至今
+same_end = {"USD": [
+    {"accn": "acc1", "start": "2025-09-28", "end": "2026-06-27", "val": 364357000000, "filed": "2026-07-31"},
+    {"accn": "acc1", "start": "2026-03-29", "end": "2026-06-27", "val": 109417000000, "filed": "2026-07-31"},
+]}
+assert _pick_fact(same_end, "acc1") == (109417000000, "USD", True, "2026-03-29~2026-06-27")
+
+# 落後 fallback 時整份加註警語，且每條標出實際期間，避免舊年報被當成最新一季
+stale_facts = {"ifrs-full": {"Revenue": {"units": {"USD": [
+    {"accn": "old-acc", "start": "2024-01-01", "end": "2024-12-31", "val": 88268000000, "filed": "2025-04-17"},
+]}}}}
+stale_text = _format_xbrl(stale_facts, "ifrs-full", "new-acc-not-in-facts", "tsm", "6-K（2026-08-14）")
+assert "並非本次申報當期" in stale_text
+assert "期間 2024-01-01~2024-12-31" in stale_text
+
+# 命中當期則不得出現警語，否則每份都加註等於沒有警示作用
+assert "並非本次申報當期" not in _format_xbrl(
+    {"us-gaap": {"Revenues": {"units": {"USD": [
+        {"accn": "acc1", "start": "2025-10-01", "end": "2025-12-31", "val": 1000000, "filed": "2026-01-30"},
+    ]}}}}, "us-gaap", "acc1", "aapl", "10-Q")
+
+# 一條都取不到 → None，呼叫端據此回報失敗而非入庫半份資料
+assert _format_xbrl({"us-gaap": {}}, "us-gaap", "acc1", "aapl", "10-Q") is None
+
+print("sec xbrl self-check OK")
+
+# --- fetch_sec_financials 契約：網路錯誤回 FetchResult，不入庫 ---
+
+try:
+    _u.requests.get = lambda *a, **k: (_ for _ in ()).throw(
+        _u.requests.RequestException("SEC 429")
+    )
+    with contextlib.redirect_stdout(io.StringIO()):
+        _r = _u.fetch_sec_financials("AAPL")
+    assert _r.ok is False and "SEC XBRL" in _r.detail
+finally:
+    _u.requests.get = _orig_get
+    _u._company_tickers.cache_clear()
+
+print("fetch_sec_financials contract self-check OK")

@@ -32,7 +32,10 @@ from pydantic import BaseModel, field_validator
 from . import config
 from .i18n import t
 from .market import get_market_snapshot
-from .tickers import is_tw_ticker, normalize_ticker
+from .tickers import (
+    DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
+    normalize_ticker, otc_adr_of,
+)
 from .vectorstore import similarity_search
 
 
@@ -48,6 +51,9 @@ class GraphState(TypedDict):
     fetch_results: list[str]  # 各補抓 tool 的結果訊息，no_result 用來提示抓取是否失敗
     lang: str
     model: str  # 本輪使用的 Ollama 模型，由 UI 選單決定；空值則用 config.LLM_MODEL
+    market: str | None  # 使用者明講的市場（tw/us/both），沒講則 None
+    ask_market: bool  # 雙掛牌但沒指明市場，需先反問使用者
+    peer_company: str | None  # 另一市場的對應代號，反問與併陳兩用
     messages: Annotated[list[BaseMessage], add_messages]  # agent <-> tools 的往返記錄
 
 
@@ -101,6 +107,9 @@ def rewrite_question(state: GraphState) -> GraphState:
     prompt = f"""以下是使用者與財經助理的對話紀錄，以及使用者的新問題。
 若新問題依賴上下文（例如「那毛利率呢？」），請改寫成一個不依賴上下文、可獨立理解的完整問題；
 若新問題本身已經獨立完整，原樣輸出即可。只輸出改寫後的問題，不要有其他文字。
+若助理上一則是在問「要看台股還是美股」，而新問題是在回答它（「台股」「美股」「都要」），
+改寫時務必保留這個選擇：「台股」→「…台股（代號）的…」、「美股」→「…美股 ADR 的…」、
+「都要」→「請同時提供台股與美股兩邊的…」。不可把它當成其他意思（例如業務部門）。
 
 對話紀錄：
 {_format_history(state["history"])}
@@ -117,6 +126,9 @@ class ExtractedFilters(BaseModel):
     company: str | None = None
     doc_type: Literal["financial_report", "news"] | None = None
     news_since_days: int | None = None
+    # 使用者是否明講了要看哪個市場。雙掛牌公司（台積電＝2330／TSM）兩邊數字的幣別、
+    # 期間與每股基準都不同，沒講清楚就直接挑一邊等於替使用者猜，故據此決定要不要反問。
+    market: Literal["tw", "us", "both"] | None = None
 
     @field_validator("company")
     @classmethod
@@ -130,11 +142,25 @@ class ExtractedFilters(BaseModel):
         return None if v is None else max(1, min(v, 365))
 
 
+def _known_codes_block() -> str:
+    """把已收錄公司的中文名與代號列給 LLM 抄。
+
+    模型對冷門代號的記憶不可靠——實測「南茂科技」被填成 2306（正確 8150）、
+    「IMOS」被填成 3045，代號錯了後面整條流程都在查別家公司。表就在手邊，直接給它抄。
+    """
+    lines = [f"   - {name}：{tw}（美股 {TW_US_DUAL_LISTED[tw]}）"
+             for tw, name in DUAL_LISTED_NAMES.items()]
+    lines += [f"   - {name}：{tw}" for tw, name in OTC_ONLY_NAMES.items()]
+    return "\n".join(lines)
+
+
 def extract_filters(state: GraphState) -> GraphState:
     """從問題中抽取公司代號 / 文件類型 / 新聞時效窗，抽不出來就設為 None（不過濾）。"""
     prompt = f"""你是財經助理的前處理模組。請從使用者問題中判斷：
 1. company: 台股代號（4-6 碼數字，如 "2330"）或美股 ticker（1-5 個大寫英文字母，如 "AAPL"），
-   沒有明確提到就設為 null；公司名稱要轉成代號/ticker（如 台積電→"2330"、蘋果→"AAPL"）
+   沒有明確提到就設為 null；公司名稱要轉成代號/ticker（如 台積電→"2330"、蘋果→"AAPL"）。
+   下列公司請「務必」照這張對照表填，不要憑印象自己想代號：
+{_known_codes_block()}
 2. doc_type: "financial_report"（財報相關）或 "news"（新聞相關），不確定就設為 null
 3. news_since_days: 問題要求的新聞時效窗，換算成天數的整數。對照：
    「今天／即時／現在」→ 1；「這幾天／本週／這星期」→ 7；「這個月／近一個月」→ 30；
@@ -143,6 +169,12 @@ def extract_filters(state: GraphState) -> GraphState:
 4. 若問題同時指名多個不同公司，company 設為 null，status 設為 "error"，
    error_message 說明偵測到哪些標的、目前僅支援單一標的查詢
 5. 正常情況（含完全抽不到 company 的情況）status 設為 "ok"，error_message 設為 null
+6. market: 使用者「明講」要看哪個市場就填 "tw" 或 "us"，明講兩邊都要（如「台股美股都
+   看」「兩邊比較」）填 "both"，沒提到市場就填 null。判斷依據只看問法本身：
+   - 講「台股」「上市」「台灣」，或直接給台股代號（2330）→ "tw"
+   - 講「美股」「ADR」「美國」，或直接給美股 ticker（TSM）→ "us"
+   - 只講中文公司名（「台積電」）而沒提市場 → null，不要自己猜
+   注意 company 一律照第 1 點填代號，market 只反映「使用者有沒有講」，兩者互不影響
 
 使用者問題：{state['question']}
 """
@@ -150,13 +182,58 @@ def extract_filters(state: GraphState) -> GraphState:
         parsed = _llms(_model_of(state))["filters"].invoke(prompt)
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
         print(f"[extract_filters] 結構化輸出失敗：{e}")
-        return {**state, "company": None, "doc_type": None, "news_since_days": None}
+        return {**state, "company": None, "doc_type": None, "news_since_days": None,
+                "market": None}
 
     if parsed.status == "error":
         print(f"[extract_filters] {parsed.error_message}")
 
     return {**state, "company": parsed.company, "doc_type": parsed.doc_type,
-            "news_since_days": parsed.news_since_days}
+            "news_since_days": parsed.news_since_days, "market": parsed.market}
+
+
+def _last_dual_listed(history: list[tuple[str, str]]) -> str | None:
+    """從最近的對話往回找上一輪問到的雙掛牌公司代號；找不到回 None。
+
+    只認代號與已收錄的公司名，不做模糊比對——寧可找不到而走一般流程，
+    也不要猜錯公司後拿別家數字回答。
+    """
+    for user, _assistant in reversed(history):
+        text = user.upper()
+        for tw, name in DUAL_LISTED_NAMES.items():
+            if tw in user or name in user or TW_US_DUAL_LISTED[tw] in text.split():
+                return tw
+    return None
+
+
+def resolve_market(state: GraphState) -> GraphState:
+    """雙掛牌標的且使用者沒指明市場時，把 company 換成使用者確認過的那一邊。
+
+    只在「使用者自己沒講」時才介入：說了 TSM、說了「美股」都直接照辦，不打斷對話。
+    market="both" 則保留原代號並標記，由 generate 併陳兩市場並提醒不可直接相除。
+    """
+    company = state.get("company")
+    market = state.get("market")
+    if company is None and market and state.get("history"):
+        # 使用者是在回答上一輪的「要台股還是美股」，答句本身（「美股」）不含公司名，
+        # 改寫也未必補得回來，故從上一輪問句把雙掛牌代號撿回來，否則會變成不限公司檢索
+        company = _last_dual_listed(state["history"])
+
+    peer = dual_listed_peer(company) if company else None
+    if peer is None:
+        return {**state, "company": company, "ask_market": False}
+
+    if market is None:
+        # 沒講市場：停下來問，不要替使用者猜一邊
+        return {**state, "company": company, "ask_market": True, "peer_company": peer}
+
+    if market == "both":
+        return {**state, "company": company, "ask_market": False, "peer_company": peer}
+
+    # 講了市場：把 company 對齊到該市場的代號（問「台積電美股」會抽到 2330，要換成 TSM）
+    want_tw = market == "tw"
+    company = company if is_tw_ticker(company) == want_tw else peer
+    return {**state, "company": company, "ask_market": False, "peer_company": None}
 
 
 def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None,
@@ -202,7 +279,8 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
     try:
         # 延遲 import，避免循環依賴
         from .update import (
-            fetch_edgar, fetch_market_news, fetch_mops, fetch_news, fetch_tw_financials,
+            fetch_edgar, fetch_market_news, fetch_mops, fetch_news, fetch_sec_financials,
+            fetch_tw_financials,
         )
     except ImportError as e:  # 環境缺套件時降級成不抓，不炸整個對話
         msg = f"匯入失敗（環境缺套件？）：{e}"
@@ -220,7 +298,13 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
                 lambda: fetch_news(company),
             ]
         else:
-            calls = [lambda: fetch_edgar(company.upper()), lambda: fetch_news(company.upper())]
+            # 美股財報也走兩軌：XBRL 拿精準數字，EDGAR 拿申報全文的文字敘述。
+            # 數字在前、新聞維持最後（has_report 靠 calls[-1:] 取新聞，順序是契約）
+            calls = [
+                lambda: fetch_sec_financials(company.upper()),
+                lambda: fetch_edgar(company.upper()),
+                lambda: fetch_news(company.upper()),
+            ]
         # 已有該公司財報才只補新聞；只有新聞時財報照抓（原本檢查整個 retrieved，害外國發行人的財報永遠沒抓）
         # 依賴「新聞排在最後」這個順序，上面兩個分支都要維持
         if has_report:
@@ -264,6 +348,12 @@ def _seed_prompt(state: GraphState) -> str:
     known = [f"今天日期：{dt.date.today()}"]
     if state.get("company"):
         known.append(f"已知公司代號：{state['company']}")
+    if state.get("peer_company") and state.get("market") == "both":
+        # 兩市場各自獨立入庫、company 欄位不同，一次檢索只查得到一邊，必須分開查兩次
+        known.append(
+            f"這家公司同時在台美兩地掛牌，使用者要求兩邊都看："
+            f"請分別以 {state['company']} 與 {state['peer_company']} 各檢索一次，兩邊資料都要拿到。"
+        )
     if state.get("doc_type"):
         known.append(f"已知文件類型：{state['doc_type']}")
     if state.get("news_since_days"):
@@ -408,6 +498,10 @@ def route_after_assemble(state: GraphState) -> str:
     return "generate" if state["retrieved"] else "no_result"
 
 
+def route_after_resolve_market(state: GraphState) -> str:
+    return "ask_market" if state.get("ask_market") else "agent"
+
+
 def unique_sources(retrieved: list[dict]) -> list[str]:
     """依出現順序去重的來源列表，引用編號與來源列表共用這個順序。"""
     ordered = []
@@ -439,6 +533,24 @@ def generate(state: GraphState) -> GraphState:
         if snapshot:
             market_block = f"\n即時市場數據（Yahoo Finance，僅供估值/時機參考，非檢索來源，不參與來源編號）：\n{snapshot}\n"
 
+    # 使用者要求併陳兩市場時，明講兩邊不可直接換算——幣別、期間、每股基準三者都不同，
+    # 沒這句提醒模型很容易把台幣 EPS 與美元 EPS 相除當成「匯率」或「溢價」
+    dual_block = ""
+    if state.get("peer_company") and state.get("market") == "both":
+        company = state["company"]
+        tw = company if is_tw_ticker(company) else state["peer_company"]
+        us = state["peer_company"] if is_tw_ticker(company) else company
+        dual_block = "\n" + t(lang, "dual_market_warning", tw=tw, us=us) + "\n"
+
+    # 這些台股標的有 ADR 但取不到其財報，明講一句免得使用者以為系統漏了美股那邊
+    otc = otc_adr_of(state["company"]) if state.get("company") else None
+    if otc:
+        dual_block += "\n請在回答開頭附上這句說明：" + t(
+            lang, "otc_adr_note",
+            name=OTC_ONLY_NAMES.get(state["company"], state["company"]),
+            us=otc, tw=state["company"],
+        ) + "\n"
+
     prompt = f"""你是專業的財經分析助理。請根據下方參考資料回答使用者問題。
 規則：
 - 只根據參考資料回答，不要編造資料中沒有的數字或事實
@@ -461,7 +573,7 @@ def generate(state: GraphState) -> GraphState:
 
 參考資料：
 {context}
-{market_block}{history_block}
+{market_block}{dual_block}{history_block}
 使用者問題：{state['question']}
 """
     resp = _llms(_model_of(state))["llm"].invoke(prompt)
@@ -484,6 +596,19 @@ def no_result(state: GraphState) -> GraphState:
     return {**state, "answer": answer}
 
 
+def ask_market(state: GraphState) -> GraphState:
+    """雙掛牌但沒指明市場：直接回問使用者要看哪一邊，本輪不檢索也不抓資料。
+
+    刻意不猜一邊先答——台股與美股的幣別、期間、每股基準都不同，猜錯不會報錯，
+    只會給出看似合理的錯誤數字，比多問一句的代價高得多。
+    """
+    tw = state["company"] if is_tw_ticker(state["company"]) else state["peer_company"]
+    us = state["peer_company"] if is_tw_ticker(state["company"]) else state["company"]
+    answer = t(state.get("lang", "zh"), "ask_market",
+               name=DUAL_LISTED_NAMES.get(tw, tw), tw=tw, us=us)
+    return {**state, "answer": answer, "retrieved": []}
+
+
 async def build_graph():
     """建 graph。async 是因為要先跟 MCP server 拿 tool 清單（連不上會 raise，由呼叫端處理）。"""
     tools = await _mcp_client.get_tools()
@@ -491,6 +616,8 @@ async def build_graph():
     graph = StateGraph(GraphState)
     graph.add_node("rewrite_question", rewrite_question)
     graph.add_node("extract_filters", extract_filters)
+    graph.add_node("resolve_market", resolve_market)
+    graph.add_node("ask_market", ask_market)
     graph.add_node("agent", agent)
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("assemble", assemble)
@@ -499,7 +626,12 @@ async def build_graph():
 
     graph.set_entry_point("rewrite_question")
     graph.add_edge("rewrite_question", "extract_filters")
-    graph.add_edge("extract_filters", "agent")
+    graph.add_edge("extract_filters", "resolve_market")
+    # 雙掛牌又沒指明市場就先反問，本輪不檢索——猜錯市場給的是看似合理的錯誤數字
+    graph.add_conditional_edges(
+        "resolve_market", route_after_resolve_market,
+        {"ask_market": "ask_market", "agent": "agent"},
+    )
     graph.add_conditional_edges(
         "agent", agent_route, {"tools": "tools", "assemble": "assemble"},
     )
@@ -513,5 +645,6 @@ async def build_graph():
     )
     graph.add_edge("generate", END)
     graph.add_edge("no_result", END)
+    graph.add_edge("ask_market", END)
 
     return graph.compile()

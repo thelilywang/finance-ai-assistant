@@ -17,6 +17,24 @@ STRINGS = {
             "可能是未上市公司（如 SpaceX）、代號/ticker 有誤，或該來源暫時無法取得。"
             "若你有相關文件，可手動匯入：python -m src.ingest --file <路徑> --company <代號>"
         ),
+        "ask_market": (
+            "「{name}」在台股與美股都有掛牌，兩邊的數字不能直接比較："
+            "台股（{tw}）以新台幣計價、按季公布；美股（{us}）是 ADR，以美元計價，"
+            "且每股基準不同（1 股 ADR 對應數股台股普通股）。\n\n"
+            "請問你要看哪一邊？\n"
+            "- 回覆「台股」查 {tw}\n"
+            "- 回覆「美股」查 {us}\n"
+            "- 回覆「都要」則兩邊並列呈現"
+        ),
+        "otc_adr_note": (
+            "（補充：{name} 在美股有 ADR（{us}），但屬場外交易（OTC）、未向 SEC 申報財報，"
+            "本系統取不到其財務數字，以下僅為台股（{tw}）資料。）"
+        ),
+        "dual_market_warning": (
+            "本題同時涵蓋台股（{tw}，新台幣）與美股（{us}，美元 ADR）。"
+            "兩者幣別、公布期間與每股基準皆不同，請分開陳述、標明各自幣別與期間，"
+            "不得直接相除、相減或換算成同一數字比較。"
+        ),
         "no_result_plain": (
             "資料庫中找不到與這個問題相關的財報或新聞內容。"
             "問題若有指名上市公司（代號或 ticker）會自動抓取資料，"
@@ -76,6 +94,25 @@ STRINGS = {
             "Tried auto-fetching filings and news for \"{company}\" but still found nothing. "
             "It may be a private company (e.g. SpaceX), an incorrect ticker/code, or the source is temporarily unavailable. "
             "If you have relevant documents, import them manually: python -m src.ingest --file <path> --company <ticker>"
+        ),
+        "ask_market": (
+            "\"{name}\" is listed in both Taiwan and the US, and the figures are not directly comparable: "
+            "the Taiwan listing ({tw}) reports in TWD on a quarterly basis, while the US listing ({us}) is an ADR "
+            "reporting in USD, with a different per-share basis (one ADR represents several ordinary shares).\n\n"
+            "Which one would you like?\n"
+            "- Reply \"Taiwan\" for {tw}\n"
+            "- Reply \"US\" for {us}\n"
+            "- Reply \"both\" to see them side by side"
+        ),
+        "otc_adr_note": (
+            "(Note: {name} also has a US ADR ({us}), but it trades over-the-counter and files no "
+            "reports with the SEC, so no financial figures are available for it here. "
+            "The following covers the Taiwan listing ({tw}) only.)"
+        ),
+        "dual_market_warning": (
+            "This question covers both the Taiwan listing ({tw}, TWD) and the US listing ({us}, USD ADR). "
+            "Currency, reporting period and per-share basis all differ, so present them separately with explicit "
+            "currency and period; never divide, subtract or convert them into a single comparable number."
         ),
         "no_result_plain": (
             "No filings or news related to this question were found in the database. "

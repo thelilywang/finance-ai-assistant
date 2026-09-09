@@ -6,6 +6,9 @@
     python -m src.update news --company 2330 --limit 10
     python -m src.update market-news [--limit 10]
     python -m src.update prune --days 180
+
+美股財報與台股一樣走雙軌：SEC XBRL API 拿結構化數字、SEC EDGAR 拿申報全文的
+文字敘述，兩軌各自獨立入庫，靠檢索時相似度搜尋重聚。
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from functools import lru_cache
 
 import requests
 import trafilatura
@@ -86,6 +90,28 @@ MOPS_MANUAL_GUIDE = """[update] MOPS 抓取失敗（介面脆弱，隨時可能�
   3. 執行 python -m src.ingest --file data/<檔名>.pdf --company <代號> \\
        --doc-type financial_report --date <YYYY-MM-DD>"""
 
+# SEC XBRL 概念優先序：同一指標各公司採用的標籤不同（AAPL 營收用
+# RevenueFromContractWithCustomerExcludingAssessedTax、NVDA 用 Revenues），
+# 外國發行人（TSM/ASML）整包走 ifrs-full 且 us-gaap 為空，故兩套並列，依序試到取得為止。
+SEC_CONCEPTS = (
+    ("營業收入", ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+                  "RevenueFromContractWithCustomerIncludingAssessedTax", "Revenue")),
+    ("淨利", ("NetIncomeLoss", "ProfitLoss")),
+    ("每股盈餘（稀釋）", ("EarningsPerShareDiluted", "DilutedEarningsLossPerShare")),
+    ("每股盈餘（基本）", ("EarningsPerShareBasic", "BasicEarningsLossPerShare")),
+    ("營業利益", ("OperatingIncomeLoss", "ProfitLossFromOperatingActivities")),
+    ("毛利", ("GrossProfit",)),
+    ("營業費用", ("OperatingExpenses", "OperatingExpense")),
+    ("研發費用", ("ResearchAndDevelopmentExpense", "ResearchAndDevelopmentExpenseIfrs")),
+    ("所得稅費用", ("IncomeTaxExpenseBenefit", "IncomeTaxExpenseContinuingOperations")),
+    ("資產總額", ("Assets",)),
+    ("負債總額", ("Liabilities",)),
+    ("股東權益總額", ("StockholdersEquity", "Equity")),
+    ("現金及約當現金", ("CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalents")),
+    ("營運現金流", ("NetCashProvidedByUsedInOperatingActivities",
+                    "CashFlowsFromUsedInOperatingActivities")),
+)
+
 
 def _is_period_end(report_date: str, filing_date: str) -> bool:
     """判斷 reportDate 是否為「會計期末」，用來區分財報 6-K 與一般公告 6-K。
@@ -146,6 +172,22 @@ def _select_exhibit(items: list[dict], primary_doc: str) -> str:
     return max(candidates, key=lambda it: int(it.get("size") or 0))["name"]
 
 
+@lru_cache(maxsize=1)
+def _company_tickers() -> dict:
+    """SEC 的 ticker→CIK 對照表約 800KB，且一天內不會變；同一次執行只抓一次。
+
+    新增數字軌（fetch_sec_financials）後同一支美股會被抓兩次，這筆重複流量是
+    本次改動造成的，故一併收掉；只做 lru_cache，不引入 Session/retry，那些牽涉
+    重試策略與 SEC 速率限制，是獨立提案。
+    """
+    resp = requests.get(
+        "https://www.sec.gov/files/company_tickers.json",
+        headers={"User-Agent": config.SEC_USER_AGENT}, timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
     """從 SEC EDGAR 抓一份財報，抽純文字後匯入。
 
@@ -166,12 +208,8 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
 
 def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
     """fetch_edgar 的實作本體；網路錯誤由呼叫端統一收斂。"""
-    resp = requests.get(
-        "https://www.sec.gov/files/company_tickers.json", headers=headers, timeout=TIMEOUT
-    )
-    resp.raise_for_status()
     entry = next(
-        (v for v in resp.json().values() if v["ticker"].upper() == ticker.upper()), None
+        (v for v in _company_tickers().values() if v["ticker"].upper() == ticker.upper()), None
     )
     if entry is None:
         msg = f"找不到 ticker {ticker} 對應的 CIK。"
@@ -234,6 +272,175 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
         published_at=filing_date,
     )
     return FetchResult(True, f"已匯入 {ticker.upper()} {form}（{filing_date}）")
+
+
+def _period_label(row: dict) -> str:
+    """把一筆事實的期間轉成人看得懂的標示：期間數字寫「起~迄」，時點數字只寫日期。"""
+    start, end = row.get("start"), row.get("end", "")
+    return f"{start}~{end}" if start else end
+
+
+def _pick_fact(concept_units: dict, accession: str) -> tuple[float, str, bool, str] | None:
+    """從單一概念的 units dict 選出對應這份申報的那一筆數字。
+
+    回傳 (值, 幣別/單位, 是否命中該 accession, 該數字實際所屬期間)。第三個值讓呼叫端
+    能區分「正好是這份申報的數字」與「退而求其次的舊數字」——AAPL 早已停用 Revenues
+    （最新只到 2018 年），若不區分就會拿 2018 年的 62.9B 當本季營收，比正確值差了八年。
+    第四個值供標示期間：外國發行人的 companyfacts 可能落後好幾期（TSM 2026 年的 6-K
+    在 XBRL 只查得到 2024 年報數字），不標期間會讓 LLM 把舊年報當成最新一季引用。
+
+    TSM 同時以 TWD、USD 申報同一指標，優先取 USD 給 LLM 讀比較不會誤判量級；
+    companyfacts 常落後最新申報（TSM 最新 20-F 一筆事實都沒有），accession 對不到
+    時退回該幣別中 filed 最新的一批，而非直接放棄。同一 accession 常回多列
+    （年初至今 vs 當季，如 AAPL 一次回三列），取 start 最晚的那列＝當季數字；
+    start 缺漏（資產負債表這類時點數字）則直接取。
+    """
+    # 幣別鍵在金額是 "USD"、每股盈餘卻是 "USD/shares"，用前綴比對才不會漏掉 EPS——
+    # 只比對 "USD" 會讓 TSM 的 EPS 取到 TWD/shares 的 44.67 而非 USD/shares 的 1.36
+    unit_name = next(
+        (u for u in concept_units if u == "USD" or u.startswith("USD/")),
+        next(iter(concept_units), None),
+    )
+    if unit_name is None:
+        return None
+    units = concept_units[unit_name]
+    if not units:
+        return None
+
+    rows = [r for r in units if r.get("accn") == accession]
+    exact = bool(rows)
+    if not rows:
+        latest_filed = max((r["filed"] for r in units), default=None)
+        rows = [r for r in units if r["filed"] == latest_filed]
+    if not rows:
+        return None
+
+    # 先比期末日再比起始日：同一份申報會同時含本期與比較期（資產負債表這類時點數字
+    # 沒有 start，AAPL 一次列出 2024-09-28 到 2026-06-27 共六期權益數），只看 start
+    # 會在時點數字間任意挑一期，選到兩年前的舊值。期末日相同時取 start 較晚者＝
+    # 期間較短者，即當季而非年初至今。
+    row = max(rows, key=lambda r: (r.get("end") or "", r.get("start") or ""))
+    return row["val"], unit_name, exact, _period_label(row)
+
+
+def _format_xbrl(facts: dict, taxonomy: str, accession: str, ticker: str, label: str) -> str | None:
+    """把 SEC XBRL 概念數字轉成可 embedding 的中文文字，風格比照 _format_rows。
+
+    金額單位必須明寫——同一坑台股那軌踩過（_format_rows 的註解）：原始值不標單位
+    會被 LLM 讀成別的量級。SEC 的值是「元」而非仟元，EPS 是每股金額，兩者分開標；
+    幣別非 USD 時（TSM 的 TWD）務必寫出幣別，否則 49.33 會被當成美元讀。
+
+    每條數字另標所屬期間，且整份資料若非該申報當期會在開頭加註說明：SEC 的結構化
+    資料對外國發行人常落後數期，不標期間會讓舊年報數字被當成最新一季。
+    """
+    taxonomy_facts = facts.get(taxonomy, {})
+    lines = []
+    stale = False
+    for name, concepts in SEC_CONCEPTS:
+        # 先掃過整串概念找「正好屬於這份申報」的，找不到才退回第一個有值的舊數字。
+        # 不能取第一個有值的就停：AAPL 的 Revenues 停用於 2018 年但仍排在清單首位，
+        # 直接採用會拿 2018 年的數字當本季營收，而正確值在後面的
+        # RevenueFromContractWithCustomerExcludingAssessedTax。
+        fallback = None
+        for concept in concepts:
+            concept_data = taxonomy_facts.get(concept)
+            if not concept_data:
+                continue
+            picked = _pick_fact(concept_data.get("units", {}), accession)
+            if picked is None:
+                continue
+            if picked[2]:
+                fallback = picked
+                break
+            fallback = fallback or picked
+        if fallback is None:
+            continue
+        val, unit, exact, period = fallback
+        # 幣別一律照實寫出，不可簡化成「元」——TSM 以 TWD 與 USD 雙幣別申報，
+        # 44.67 TWD/股寫成「元/股」會被 LLM 當成美元讀，量級差 30 倍以上
+        unit_label = f"{unit.split('/')[0]}/股" if "每股盈餘" in name else unit
+        # 每個數字都標自己的期間：落後 fallback 取到的是舊期數字，與標題的申報日期
+        # 不同期，不逐條標會讓 LLM 把 2024 年報數字當成 2026 年第二季引用
+        lines.append(f"{name}：{_fmt_amount(val)}（{unit_label}，期間 {period}）")
+        stale = stale or not exact
+    if not lines:
+        return None
+    header = f"{ticker.upper()} {label}（資料來源：SEC XBRL API，申報編號 {accession}）"
+    if stale:
+        # 外國發行人（TSM/ASML）的 companyfacts 常落後數期，此時數字並非該申報當期。
+        # 寧可明講也不要讓 LLM 誤以為是最新一季——反幻覺優先於好看
+        header += (
+            "\n注意：SEC 結構化資料尚未涵蓋這份申報，以下為 XBRL 中最近一期可得的數字，"
+            "期間如各條所示，並非本次申報當期。"
+        )
+    return header + "\n" + "\n".join(lines)
+
+
+def fetch_sec_financials(ticker: str) -> FetchResult:
+    """從 SEC XBRL API 抓結構化財報數字並匯入。
+
+    與 fetch_edgar 是互補的兩軌：本函式拿 XBRL 精準數字，fetch_edgar 拿申報全文的
+    文字敘述。任一軌失敗不影響另一軌，比照台股 fetch_tw_financials / fetch_mops。
+    """
+    headers = {"User-Agent": config.SEC_USER_AGENT}
+    try:
+        return _fetch_sec_financials(ticker, headers)
+    except requests.RequestException as e:
+        msg = f"SEC XBRL 取得失敗：{e}"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
+
+
+def _fetch_sec_financials(ticker: str, headers: dict) -> FetchResult:
+    """fetch_sec_financials 的實作本體；網路錯誤由呼叫端統一收斂。"""
+    entry = next(
+        (v for v in _company_tickers().values() if v["ticker"].upper() == ticker.upper()), None
+    )
+    if entry is None:
+        msg = f"找不到 ticker {ticker} 對應的 CIK。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
+    cik = entry["cik_str"]
+
+    resp = requests.get(
+        f"https://data.sec.gov/submissions/CIK{cik:010d}.json", headers=headers, timeout=TIMEOUT
+    )
+    resp.raise_for_status()
+    recent = resp.json()["filings"]["recent"]
+    # 與 fetch_edgar 用同一套表單優先序與期末判定，確保兩軌指向同一份申報
+    forms = ("10-Q", "10-K", "6-K", "20-F", "424B4", "S-1")
+    selected = _select_filing(recent, forms)
+    if selected is None:
+        msg = f"{ticker} 近期沒有 {'/'.join(dict.fromkeys(forms))} 申報。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
+    form, idx = selected
+    accession = recent["accessionNumber"][idx]
+    filing_date = recent["filingDate"][idx]
+
+    resp = requests.get(
+        f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
+        headers=headers, timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    facts = resp.json().get("facts", {})
+    # 外國發行人（TSM/ASML）整包走 ifrs-full，us-gaap 概念數為 0
+    taxonomy = "us-gaap" if facts.get("us-gaap") else "ifrs-full"
+
+    text = _format_xbrl(facts, taxonomy, accession, ticker, f"{form}（{filing_date}）")
+    if text is None:
+        msg = f"{ticker.upper()} 的 XBRL 無可用數字（{taxonomy} 概念皆缺漏或落後）。"
+        print(f"[update] {msg}")
+        return FetchResult(False, msg)
+
+    ingest_text(
+        text,
+        source=f"SEC-XBRL:{ticker.upper()}:{accession}",
+        company=ticker.upper(),
+        doc_type="financial_report",
+        published_at=filing_date,
+    )
+    return FetchResult(True, f"已匯入 {ticker.upper()} {form} XBRL 財報數字（{filing_date}）")
 
 
 def _select_report_file(files: list[str]) -> str | None:
@@ -576,7 +783,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_report = sub.add_parser(
-        "report", help="抓財報（us: SEC EDGAR / tw: 官方 OpenAPI + MOPS 兩軌）"
+        "report", help="抓財報（us: SEC XBRL + EDGAR 兩軌 / tw: 官方 OpenAPI + MOPS 兩軌）"
     )
     p_report.add_argument("--market", required=True, choices=["tw", "us"])
     p_report.add_argument("--company", required=True, help="美股 ticker 或台股代號")
@@ -595,7 +802,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "report":
         if args.market == "us":
-            ok = fetch_edgar(args.company, args.form).ok
+            # 兩軌互補：XBRL 拿精準數字、EDGAR 拿申報全文的文字敘述。兩軌都跑，任一軌成功就算成功
+            api = fetch_sec_financials(args.company)
+            doc = fetch_edgar(args.company, args.form)
+            ok = api.ok or doc.ok
         else:
             # 兩軌互補：API 拿數字、MOPS 拿文字敘述。兩軌都跑，任一軌成功就算成功
             api = fetch_tw_financials(args.company)

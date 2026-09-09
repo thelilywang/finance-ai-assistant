@@ -14,12 +14,14 @@ from src.graph import fetch_missing_data
 from src.update import FetchResult
 
 _orig = (update.fetch_mops, update.fetch_edgar, update.fetch_news,
-         update.fetch_market_news, update.fetch_tw_financials)
+         update.fetch_market_news, update.fetch_tw_financials, update.fetch_sec_financials)
 # 台股財報兩軌：官方 API 與 MOPS 各自獨立成敗，都要 patch 掉否則會真的連外
 update.fetch_tw_financials = lambda co_id: FetchResult(True, "已匯入 2330 115Q2 財報數字")
 update.fetch_mops = lambda co_id: FetchResult(False, "MOPS 查無財報")
 update.fetch_news = lambda company, limit=10: FetchResult(True, "已寫入 3 筆")
 update.fetch_market_news = lambda limit_per_source=10: FetchResult(True, "已寫入 2 筆")
+# 美股分支雖未在本測試中走到，但 fetch_missing_data 會 import 到，不 patch 會真的連外
+update.fetch_sec_financials = lambda ticker: FetchResult(True, "已匯入 AAPL XBRL 財報數字")
 try:
     results = fetch_missing_data("2330", has_report=False)
     # 一軌失敗一軌成功：兩則訊息都要保留，不因其中一軌掛掉就少一則
@@ -38,6 +40,6 @@ try:
     assert results == ["已寫入 3 筆", "已寫入 2 筆"]
 finally:
     (update.fetch_mops, update.fetch_edgar, update.fetch_news,
-     update.fetch_market_news, update.fetch_tw_financials) = _orig
+     update.fetch_market_news, update.fetch_tw_financials, update.fetch_sec_financials) = _orig
 
 print("fetch_missing_data self-check OK")

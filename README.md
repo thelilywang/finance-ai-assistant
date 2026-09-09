@@ -56,7 +56,7 @@ See steps 1-4 of Quick Start above (Ollama models, database, Python env, Google 
 - **Q&A over reports and news** with source citations, plus a structured decision card (facts, inference, valuation, consensus & thresholds, scenario read, earnings-call watch list, stance, triggers, key event, watch metrics) at the end of each answer
 - **Live market snapshot with real analyst consensus**: price, 52-week range, PE, target price, analyst view, plus yfinance consensus data — current-quarter EPS/revenue consensus range, analyst count, past-4-quarter beat/miss, next earnings date — folded into the decision card; any failure degrades gracefully, never breaks the answer
 - **Interactive charts under each answer** (real data, no LLM involved): 6-month price line with a next-earnings-date marker, and 8-quarter EPS estimate vs actual grouped bars colored by beat (green) / miss (red)
-- **One-command data updates**: SEC EDGAR (US filings incl. 6-K/20-F for foreign issuers), TW filings on two tracks (official TWSE/TPEx OpenAPI for figures, MOPS PDFs for narrative), Yahoo Finance RSS (news), market-news sweep from udn/cmoney/cnyes listings; idempotent re-runs
+- **One-command data updates**: US filings on two tracks (SEC XBRL API for figures, incl. `ifrs-full` for foreign issuers; SEC EDGAR filing text incl. 6-K/20-F), TW filings on two tracks (official TWSE/TPEx OpenAPI for figures, MOPS PDFs for narrative), Yahoo Finance RSS (news), market-news sweep from udn/cmoney/cnyes listings; idempotent re-runs
 - **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only); company questions whose newest news is stale (>2 days, or not from today when you ask for "latest/today") re-fetch news once; company-less questions trigger a market-news sweep instead
 - **Chainlit web UI**: ChatGPT-style token streaming, multi-turn chat, downloadable PDF report per answer (charts embedded, rendered via headless Chrome; falls back to `.md` when no browser is found)
 - **Honest no-result path**: says "no data" instead of hallucinating
@@ -90,7 +90,7 @@ flowchart TD
 
 | Command | What it does |
 |---|---|
-| `python -m src.update report --market us --company AAPL [--form 10-K]` | Fetch latest US filing from SEC EDGAR (default 10-Q; falls back to 10-K/6-K/20-F/424B4/S-1) |
+| `python -m src.update report --market us --company AAPL [--form 10-K]` | Fetch latest US filing on two tracks: figures from the SEC XBRL API, filing text from SEC EDGAR (default 10-Q; falls back to 10-K/6-K/20-F/424B4/S-1). Exits non-zero only if both tracks fail |
 | `python -m src.update report --market tw --company 2330` | Fetch latest TW filing on two tracks: figures from the official TWSE/TPEx OpenAPI, narrative PDF from MOPS (prints manual steps if the MOPS track is blocked). Exits non-zero only if both tracks fail |
 | `python -m src.update news --company 2330 --limit 10` | Fetch news via Yahoo Finance RSS |
 | `python -m src.update market-news [--limit 10]` | Sweep market-news listing pages (udn tw/us, cmoney notes/tag, cnyes us/tw) for general market news |
@@ -163,7 +163,7 @@ chainlit run src/app.py -w    # 開 http://localhost:8000,用 Google 帳號登�
 - **財報/新聞問答**:回答附引用來源,結尾附結構化決策卡(事實、推論、估值、市場共識與門檻、情境解讀、法說會關注清單、立場、觸發條件、關鍵事件、觀察指標)
 - **即時市場快照含真實分析師共識**:用 yfinance 抓股價、52 週區間、本益比、目標價、分析師評等,加上共識資料——當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss、下次財報日——併入決策卡;抓取失敗時優雅降級,不影響回答
 - **回答附兩張互動圖表**(全部真資料,LLM 不參與畫圖):6 個月股價走勢線圖(含下次財報日標記)、近 8 季 EPS 預估 vs 實際 grouped bar(beat 綠/miss 紅)
-- **一鍵抓取更新**:SEC EDGAR(美股財報,外國發行人含 6-K/20-F)、台股財報兩軌(證交所/櫃買官方 OpenAPI 取數字、MOPS 取文字敘述)、Yahoo Finance RSS(新聞)、udn/cmoney/鉅亨網 cnyes 市場新聞列表頁掃描;重跑同一來源自動去重
+- **一鍵抓取更新**:美股財報兩軌(SEC XBRL API 取數字,外國發行人走 ifrs-full;SEC EDGAR 取申報全文,含 6-K/20-F)、台股財報兩軌(證交所/櫃買官方 OpenAPI 取數字、MOPS 取文字敘述)、Yahoo Finance RSS(新聞)、udn/cmoney/鉅亨網 cnyes 市場新聞列表頁掃描;重跑同一來源自動去重
 - **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司);最新新聞過期時(超過 2 天,問「最新/今天」時新聞必須是今天的)自動重抓一次;沒指定公司的問題則觸發市場新聞掃描
 - **Chainlit 網頁介面**:ChatGPT 風格逐字串流、多輪對話、每則回答附可下載 PDF 報告(內嵌圖表,headless Chrome 渲染;找不到瀏覽器時退回 `.md`)
 - **查無資料時誠實告知**,不幻覺
@@ -197,7 +197,7 @@ flowchart TD
 
 | 指令 | 用途 |
 |---|---|
-| `python -m src.update report --market us --company AAPL [--form 10-K]` | 抓美股最新財報(SEC EDGAR,預設 10-Q;依序退回 10-K/6-K/20-F/424B4/S-1) |
+| `python -m src.update report --market us --company AAPL [--form 10-K]` | 抓美股最新財報兩軌:數字走 SEC XBRL API,申報全文走 SEC EDGAR(預設 10-Q;依序退回 10-K/6-K/20-F/424B4/S-1)。兩軌都失敗才回非零結束碼 |
 | `python -m src.update report --market tw --company 2330` | 抓台股最新財報兩軌:數字走證交所/櫃買官方 OpenAPI,文字敘述走 MOPS PDF(MOPS 那軌被擋時印手動下載步驟)。兩軌都失敗才回非零結束碼 |
 | `python -m src.update news --company 2330 --limit 10` | 抓新聞(Yahoo Finance RSS) |
 | `python -m src.update market-news [--limit 10]` | 掃市場總覽新聞列表頁（udn tw/us、cmoney notes/tag、鉅亨網 cnyes us/tw） |

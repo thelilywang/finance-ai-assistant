@@ -10,14 +10,14 @@
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
 2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
-3. **美股財報數字改走 SEC XBRL API**（`src/update.py` 的 `fetch_edgar`）
-   台股本次已改為「官方 API 取數字 + 爬蟲取文字」雙軌，美股只做了一半：`fetch_edgar` 仍只從申報 HTML 抽純文字，數字精準度受制於 HTML 表格抽取。SEC 有對應的結構化端點（`data.sec.gov/api/xbrl/companyconcept`、`companyfacts`），實測可取得 AAPL 的營收與 EPS。**但難度與台股不同級**：單一公司的 `companyfacts` 達 3.8 MB、503 個 us-gaap 概念，且同一指標有多個標籤（營收同時存在 `Revenues` 與 `RevenueFromContractWithCustomerExcludingAssessedTax`），各公司採用不一，需要一套概念優先序對應表才能穩定取值；台股 API 則是固定欄位的單一列，直接格式化即可。屬獨立提案，不宜當作順手優化。
-4. **`src/update.py` 依資料類型拆分模組**（`src/update.py`）
+3. **`src/update.py` 依資料類型拆分模組**（`src/update.py`）
    目前 598 行、16 個函式。四個抓取器（EDGAR／台股財報兩軌／新聞／市場新聞）彼此不互相呼叫，共用的只有 `FetchResult`、`TIMEOUT` 與 `BROWSER_UA` 三樣，因此沒有「改 A 功能要先讀懂 B」的實際負擔，拆檔屬預防性整理而非解決現有痛點。真要拆時**依資料類型**切為 `report`（EDGAR + 台股雙軌）／`news`／`market_news`／`_common`（放上述三個共用項），因為這條線與實際修改動機吻合：某來源改版就只動該檔。**不建議依台股／美股切**——`fetch_news` 單一函式同時處理兩市場（只差 `.TW` 後綴）、`fetch_market_news` 兩者都掃，按市場切會迫使這兩個函式拆散或重複，市場並非此模組的變動軸線。拆檔需同步調整 `graph.py` 的延遲 import、`mcp_server.py` 的 import，以及 `tests/test_fetch.py` 的 monkeypatch——後者是打在 `src.update` 的模組屬性上，import 路徑一變會靜默失效變成真的連外而非報錯，是拆檔時最容易漏掉的一點。宜獨立成一次純搬遷 commit，不與功能改動混做。
-5. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
+4. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
    官方 OpenAPI 取得的結構化財報數字目前與 PDF 文字一樣進 `doc_chunks`，走同一條向量檢索路徑。「台積電最新一季 EPS 多少」這類純數字問題其實不需要 embedding 相似度比對——資料庫裡就有確定的那一格，繞過檢索可同時降低延遲與消除檢索誤差。要做需新增一個直查結構化數字的 MCP tool，並調整 `assemble`/`generate` 的 context 組裝與引用編號邏輯：現行設計的前提是「所有證據都可被 `[來源N]` 引用」，直答通道的數字若不進 `retrieved` 就沒有對應來源編號，等於在決策卡的反幻覺規則上開一個沒有引用的破口，需先想清楚這類數字如何標註出處。影響面大，刻意獨立處理。
-6. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+5. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
    若未來抓取從同步 API/套件轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前以 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 要到需服務多個併發 client 時才有實質效益。現況為同步 `requests`、單次數秒內完成，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現的問題，先記錄方向待實際需要時再評估。
+6. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
+   目前台美雙掛牌（台積電＝2330／TSM）的對應關係是寫死的靜態 dict，四檔手動維護。台股 ADR 檔數少且極少變動，靜態表在現階段夠用且零延遲，但新增標的要改程式。預期做法：先用 API 查詢對應關係，查到後落地存進資料表（等未來 ORM 優化一併處理），之後優先讀資料表、查不到才回頭打 API 補查。需先確認資料來源——ADR 對應關係在既有的 yfinance 與兩個官方 OpenAPI 都沒有直接欄位，靠公司名稱模糊比對不穩，須先找到可靠端點再動工。在那之前往靜態表加一行即可。
 7. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
@@ -253,6 +253,85 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 對話歷史持久化 | `app.py` 新增 `oauth_callback`／`_init_session()`／`on_chat_resume`／`_rebuild_history()`；`vectorstore.py` 新增 `delete_threads_older_than()`；`config.py` 新增 `THREAD_RETENTION_DAYS`；`chainlit_schema.sql` 加兩個 threads 索引並掛進 `docker-compose.yml`；新增 `tests/test_history_rebuild.py` | — |
 | 抓取層契約一致化 | `update.py` 的 `fetch_edgar` 拆出 `_fetch_edgar()`，網路錯誤收斂為 `FetchResult` 與其餘四支一致；`tests/test_update.py` 補契約斷言 | — |
 | 台股財報改雙軌 | `update.py` 新增 `fetch_tw_financials()` 與五個解析純函式、加固 `fetch_mops()`、CLI 失敗回非零結束碼；`graph.py` 台股分支併入第三軌；`tests/test_update.py` 補至 28 條斷言、`tests/test_fetch.py` 補兩軌案例 | — |
+
+---
+
+## 2026-09-09　美股財報改雙軌：SEC XBRL 取數字
+
+台股 09-09 已改為「官方 API 取數字 + 爬蟲取文字」雙軌，美股只做了一半：`fetch_edgar` 只從申報 HTML 抽純文字，表格經 tag 剝除後數字與欄位標題的對應會斷裂。本次補上缺的數字軌，兩軌各自獨立入庫、獨立成敗，靠檢索時相似度搜尋重聚（與台股同一設計，不合併成同一份文件）。
+
+### 三個實測發現決定了設計
+
+- **同一指標各公司標籤不同**：AAPL 營收用 `RevenueFromContractWithCustomerExcludingAssessedTax`、NVDA 用 `Revenues`，故需概念優先序清單。
+- **用 accession number 對帳即可**：每筆 XBRL 事實都帶 `accn`，而選申報時已取得 accession，因此不需要寫任何會計期間比對邏輯。
+- **外國發行人走 `ifrs-full`**：TSM 的 us-gaap 概念數為 0，且以 TWD/USD 雙幣別申報；companyfacts 還會落後最新申報（TSM 最新 20-F 一筆事實都沒有），故需「對不到 accession 就退回最新一期」的 fallback。
+
+### 實作期間抓到的三個靜默錯誤
+
+三者都不會報錯，只會讓 LLM 讀到錯誤數字，屬本案最需防範的失效模式：
+
+- **停用標籤蓋掉正確值**：AAPL 的 `Revenues` 最新只到 2018 年但排在概念清單首位，若「取第一個有值的就停」會拿 2018 年的 629 億當本季營收（正確值 1,094 億）。改為先掃完整串概念找命中該 accession 的，找不到才退回舊值。
+- **雙幣別 EPS 取錯幣別**：幣別鍵在金額是 `USD`、每股盈餘卻是 `USD/shares`，只比對 `USD` 會讓 TSM 的 EPS 取到 TWD 的 44.67 而非 USD 的 1.36，且原本標成籠統的「元/股」，量級差 30 倍以上。改為前綴比對，並一律照實寫出幣別。
+- **資產負債表取到比較期舊值**：時點數字沒有 `start`，原本只依 `start` 排序等於在同一份申報的本期與比較期之間任意挑一期。AAPL 實測取到的權益數是兩年前的 569 億（正確值 1,075 億）、資產總額為前一年度的 3,592 億（正確值 3,833 億）。改為先比 `end` 再比 `start`（期末日相同時取期間較短者＝當季而非年初至今）。此錯誤是加上期間標示後才浮現，先前三家公司的輸出核對都沒看出來。
+
+### 改動內容
+
+| 項目 | 改動說明 | commit |
+|---|---|---|
+| SEC XBRL 數字軌 | `update.py` 新增 `SEC_CONCEPTS` 概念優先序表、純函式 `_period_label()`/`_pick_fact()`/`_format_xbrl()` 與 `fetch_sec_financials()`（拆 `_fetch_sec_financials()` 收斂網路錯誤，沿用既有 `_select_filing()`/`_fmt_amount()`）；`graph.py` 美股分支併入數字軌並維持「新聞排最後」的順序契約；CLI 美股分支改為兩軌都跑、任一軌成功即成功 | — |
+| CIK 查詢加快取 | `_company_tickers()` 加 `lru_cache`：`company_tickers.json` 實測 800 KB，新增數字軌後同一支美股會被抓兩次。只做快取，不引入 Session/retry——後者需決定重試策略且會與既有節流頁防線衝突（該防線正是靠「拿到節流頁即判失敗」運作），與本次改動無因果關係 | — |
+| 測試 | `tests/test_update.py` 補 CIK 快取、`_pick_fact` 六情境與上述三個靜默錯誤的回歸斷言（含期間標示與落後警語）；`tests/test_fetch.py` 的 monkeypatch 加入新抓取器，否則會真的連外 | — |
+
+### 落後期數字必須標明期間
+
+SEC 的結構化資料對外國發行人常落後數期：TSM 2026-08-14 的 6-K 在 XBRL 中查不到，fallback 取到的是 2024 年報數字。標題寫申報日期、內容卻是舊期數字，會讓 LLM 把年報當成最新一季引用。故每條數字各自標出所屬期間，整份若非當期則在開頭加註說明；命中當期時不加註，否則警語會失去警示作用。這是反幻覺優先於版面精簡的取捨。
+
+**未變動範圍**：`fetch_edgar` 的文字抽取邏輯不動，數字精準度由新的 XBRL 軌負責；概念清單只涵蓋三大報表核心指標，未納入全部 503 個概念（其餘多為細項附註，灌入會稀釋 embedding 品質）。
+
+---
+
+## 2026-09-09　雙掛牌標的先確認市場再查詢
+
+### 問題
+
+TSMC 同時有台股（2330）與美股 ADR（TSM）兩套資料，兩邊數字都對卻不能互比：幣別不同（新台幣 vs 美元）、期間不同（台股按季、ADR 依 20-F/6-K）、每股基準不同（1 股 ADR 對應數股普通股），實測 EPS 分別是 49.33 元與 1.36 美元。原本 `extract_filters` 的 prompt 要求「台積電→2330」，等於在使用者沒說的情況下**默默選了台股**，問「台積電 EPS」的人拿到台股數字卻不知道還有另一套。
+
+檢索本身用 `company` 精確過濾，兩市場資料不會混進同一次回答（已實測驗證），所以問題不在污染，而在**替使用者做了他沒做的選擇**。
+
+### 做法
+
+`extract_filters` 增加 `market` 欄位，只記錄「使用者有沒有明講市場」，不做推測；新增 `resolve_market` 節點依此分流：明講了就把 `company` 對齊到該市場的代號直接查，沒講才走新增的 `ask_market` 節點反問。刻意不採「一律反問」——使用者已經說 TSM 還要再問一次會很囉嗦；也不採「兩邊都答」——只想問台股的人會拿到一堆美股數字。實測五種問法分類皆正確。
+
+`market="both"` 時保留兩個代號，由 `_seed_prompt` 指示 agent 分別檢索兩次（兩市場 `company` 欄位不同，一次查不到兩邊），並在 `generate` 注入警語，明確禁止把兩邊數字相除或換算——沒這句提醒，模型很容易把台幣 EPS 與美元 EPS 相除當成匯率或溢價。
+
+### 追問路徑的兩個坑
+
+反問後使用者只會回一句「美股」，這句話裡沒有公司名，實測踩到兩個問題：
+
+- **改寫遺失選擇**：`rewrite_question` 不知道自己在回答反問，把「都要」改寫成「所有業務部門」，市場意圖整個消失。已在 prompt 補上「上一則是在問台股或美股時，改寫務必保留這個選擇」。
+- **公司代號遺失**：改寫後的問句未必含公司名，`extract_filters` 抽不到 `company` 就會退化成不限公司的全庫檢索。新增 `_last_dual_listed()` 從對話歷史撿回代號，只認代號與已收錄公司名、不做模糊比對——寧可找不到而走一般流程，也不要猜錯公司拿別家數字回答。
+
+### 改動內容
+
+| 項目 | 改動說明 | commit |
+|---|---|---|
+| 雙掛牌對照表 | `tickers.py` 新增 `TW_US_DUAL_LISTED`／`DUAL_LISTED_NAMES` 與雙向查詢的 `dual_listed_peer()`（主板 5 檔），另立 `TW_US_OTC_ONLY`／`OTC_ONLY_NAMES` 與 `otc_adr_of()`（OTC 6 檔） | — |
+| 意圖確認流程 | `graph.py` 的 `ExtractedFilters` 增加 `market` 欄位與判斷規則；新增 `resolve_market`／`ask_market` 兩個節點與 `route_after_resolve_market`；`GraphState` 增加 `market`／`ask_market`／`peer_company` 三個欄位 | — |
+| 併陳與追問 | `_seed_prompt` 於 `both` 時指示分別檢索兩次；`generate` 注入不可換算的警語；`rewrite_question` 的 prompt 補上保留市場選擇；新增 `_last_dual_listed()` 從歷史撿回代號 | — |
+| 文案 | `i18n.py` 中英各新增 `ask_market`／`dual_market_warning` | — |
+| 測試 | 新增 `tests/test_dual_market.py`：對照表雙向查詢、五種問法分流、三種追問回覆、非雙掛牌不受影響 | — |
+
+### 收錄範圍：只收美股那側查得到財報的標的
+
+盤點台美雙掛牌共 12 檔，但**不能全部收進市場選擇流程**。本專案的美股資料全部來自 SEC（EDGAR 全文與 XBRL 數字），而 OTC 的 Level 1 與非贊助 ADR 不須向 SEC 申報。實測 `company_tickers.json` 與公司名稱雙向查詢，富邦金(FUISY)、國泰金(CHYYY)、鴻海(HNHPF)、中信金(CTBKY)、兆豐金(MEGAF)、友達(AUOTY) 六檔**連 CIK 都沒有**。若收進來，使用者被問「要台股還是美股」後選了美股，只會拿到查無資料，比不給這個選項更糟。
+
+故分兩層：主板 5 檔（台積電 TSM、聯電 UMC、中華電信 CHT、日月光投控 ASX、南茂 IMOS）進入市場選擇流程；OTC 6 檔另立一張表，查台股時由 `generate` 附帶告知「美股有 ADR，但取不到財報」，不假裝沒這回事。富智康（FXCNY）雖在 SEC 查得到，但其本體是港股 2038 而非台股，鍵位一律當台股代號用會被誤判成台股去查證交所 API，故不收。
+
+### LLM 記不住冷門代號，把表給它抄
+
+`extract_filters` 原本要 LLM 自行把公司名轉成代號，實測「南茂科技」被填成 2306（正確 8150）、「IMOS」被填成 3045，代號一錯後面整條流程都在查別家公司。代號表本來就在手邊，故把已收錄公司的名稱與代號直接列進 prompt 要它照抄（`_known_codes_block()`）。補上後五種問法的代號全部正確。
+
+**未變動範圍**：對照表為靜態 dict，改為 API 查詢 + 落地快取已列入待辦第 6 項。EDGAR 文字軌的幣別歧義（TSM 申報原文以新台幣計價，`NT$` 標記與數字常被切散到不同 chunk）未處理——該問題屬文字抽取層，XBRL 數字軌每條都標了幣別與期間不受影響。
 
 ---
 
