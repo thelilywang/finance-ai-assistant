@@ -59,11 +59,13 @@ See steps 1-3 of Quick Start above (Ollama models, database, Python env).
 flowchart TD
     U[User question] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> RT[retrieve]
-    RT -->|"hits, news fresh enough"| GEN[generate]
-    RT -->|"empty, news missing, or news stale (>2d; must be today's when asked for 'latest')"| AF[auto_fetch]
-    AF --> RT
-    RT -->|still empty after fetch| NR[no_result]
+    EF --> AG[agent]
+    AG -->|LLM picks a tool| TL[tools]
+    AG -->|no tool call, or round limit reached| AS[assemble]
+    TL -->|"news fresh enough (<=3d; must be today's when asked for 'latest')"| AS
+    TL -->|"empty, news missing, stale, or just fetched"| AG
+    AS -->|has chunks| GEN[generate]
+    AS -->|nothing retrieved| NR[no_result]
     GEN --> A[Answer + sources + decision card]
     NR --> B["Honest 'no data' reply + market snapshot"]
 
@@ -72,7 +74,7 @@ flowchart TD
         UP --> ING[src/ingest.py: chunk + embed]
         ING --> PG[(pgvector: doc_chunks)]
     end
-    PG --> RT
+    PG --> TL
     YF[yfinance snapshot] -.prompt only, not stored.-> GEN
 ```
 
@@ -156,11 +158,13 @@ chainlit run src/app.py -w    # 開 http://localhost:8000
 flowchart TD
     U[使用者問題] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> RT[retrieve]
-    RT -->|"有結果且新聞夠新"| GEN[generate]
-    RT -->|"全空、缺新聞或新聞過期（超過 2 天；問「最新」時須為今日）"| AF[auto_fetch]
-    AF --> RT
-    RT -->|補抓後仍無結果| NR[no_result]
+    EF --> AG[agent]
+    AG -->|LLM 選定要呼叫的 tool| TL[tools]
+    AG -->|不再呼叫 tool 或已達輪數上限| AS[assemble]
+    TL -->|"新聞夠新（3 天內；問「最新」時須為今日）"| AS
+    TL -->|"全空、缺新聞、已過期或剛補抓完"| AG
+    AS -->|有檢索結果| GEN[generate]
+    AS -->|完全沒有檢索結果| NR[no_result]
     GEN --> A[回答 + 引用來源 + 決策卡]
     NR --> B[誠實告知查無資料 + 市場快照]
 
@@ -169,7 +173,7 @@ flowchart TD
         UP --> ING[src/ingest.py: 切 chunk + embedding]
         ING --> PG[(pgvector: doc_chunks)]
     end
-    PG --> RT
+    PG --> TL
     YF[yfinance 即時快照] -.只進 prompt，不入庫.-> GEN
 ```
 

@@ -15,11 +15,13 @@ A local RAG assistant for stock financial reports and news, built with LangGraph
 flowchart TD
     U[User question] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> RT[retrieve]
-    RT -->|"hits, news fresh enough"| GEN[generate]
-    RT -->|"empty, news missing, or news stale (>2d; must be today's when asked for 'latest')"| AF[auto_fetch]
-    AF --> RT
-    RT -->|still empty after fetch| NR[no_result]
+    EF --> AG[agent]
+    AG -->|LLM picks a tool| TL[tools]
+    AG -->|no tool call, or round limit reached| AS[assemble]
+    TL -->|"news fresh enough (<=3d; must be today's when asked for 'latest')"| AS
+    TL -->|"empty, news missing, stale, or just fetched"| AG
+    AS -->|has chunks| GEN[generate]
+    AS -->|nothing retrieved| NR[no_result]
     GEN --> A[Answer + sources + decision card]
     NR --> B["Honest 'no data' reply + market snapshot"]
 
@@ -28,22 +30,23 @@ flowchart TD
         UP --> ING[src/ingest.py: chunk + embed]
         ING --> PG[(pgvector: doc_chunks)]
     end
-    PG --> RT
+    PG --> TL
     YF[yfinance snapshot] -.prompt only, not stored.-> GEN
 ```
 
 ### LangGraph node flow
 
-`rewrite_question → extract_filters → retrieve → (generate | auto_fetch → retrieve | no_result)`
+`rewrite_question → extract_filters → agent ⇄ tools → assemble → (generate | no_result)`
 
 | Node | Role |
 |---|---|
 | `rewrite_question` | With chat history, rewrites a follow-up ("what about margins?") into a standalone question so embedding retrieval works; passes through when history is empty |
 | `extract_filters` | LLM extracts company code (TW 4-digit or US ticker) / doc type from the question as retrieval filters (null = no filter) |
-| `retrieve` | Embeds the question (bge-m3) and runs cosine similarity search in pgvector, top-5; recency keywords ("latest", "today", …, shared `_RECENT_RE`) cap news at 90 days; for company questions also blends in top-3 company news and top-2 global market news as decision-card context |
-| `auto_fetch` | Runs once (guarded by `fetched`). Triggered when retrieval is empty, company news is missing, or the newest news is stale — older than 2 days, tightened to "must be today's" when the question carries a recency keyword. If a company was named: fetches its reports + news (report fetch skipped only when a `financial_report` chunk was actually retrieved), always also sweeps market-news (top-3, `fetch_market_news`); a company-less empty retrieval sweeps market-news too, so it never dead-ends at `no_result` on the first try. Single-source failures are swallowed, not fatal |
+| `agent` | Binds the MCP tools to the LLM and lets it decide which tool to call and whether to call another. Freshness rules live in the tool docstrings (`src/mcp_server.py`), not in code. `_trim_for_llm` strips the structured `chunks` from the copy sent to the model, keeping only `summary_for_llm` — the full payload stays in state for `assemble`. Capped at 4 tool rounds |
+| `tools` | Runs the tool the LLM chose (`ToolNode`). Afterwards `route_after_tools` short-circuits straight to `assemble` when the retrieved news is clearly fresh enough (within 3 days, tightened to "must be today's" when the question carries a recency keyword), saving one redundant agent round; every other case — empty, no news, stale, undated, or a fetch tool just ran — goes back to `agent` so the LLM keeps the fetch decision |
+| `assemble` | Restores the tool results into the fields downstream nodes already expect: `retrieved` from the last `search_knowledge_base` call, plus `fetched`/`fetch_results` for `no_result` |
 | `generate` | Answers strictly from retrieved chunks with `[SourceN]` citations, folds in a live yfinance market snapshot (price, 52w range, PE, target price, analyst view, plus analyst consensus: current-quarter EPS/revenue consensus range, analyst count, past-4-quarter beat/miss, next earnings date — prompt-only, never a citable source, degrades silently on failure), then appends a fixed decision-card section (facts w/ citations, inference, valuation, consensus & thresholds, scenario read, earnings-call watch list, stance, triggers, key event, watch metrics) with a disclaimer; stance is only asserted when filings+news+market data support it, but triggers/key event/watch metrics are always required so the answer never abstains outright |
-| `no_result` | When nothing is retrieved even after auto_fetch, honestly says so, still appending the market snapshot and watch items instead of hallucinating |
+| `no_result` | When nothing is retrieved even after the LLM's fetch attempts, honestly says so, still appending the market snapshot and watch items instead of hallucinating |
 
 ### Modules (`src/`)
 
@@ -120,11 +123,13 @@ Re-running any command on the same source replaces old chunks (idempotent).
 flowchart TD
     U[使用者問題] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> RT[retrieve]
-    RT -->|"有結果且新聞夠新"| GEN[generate]
-    RT -->|"全空、缺新聞或新聞過期（超過 2 天；問「最新」時須為今日）"| AF[auto_fetch]
-    AF --> RT
-    RT -->|補抓後仍無結果| NR[no_result]
+    EF --> AG[agent]
+    AG -->|LLM 選定要呼叫的 tool| TL[tools]
+    AG -->|不再呼叫 tool 或已達輪數上限| AS[assemble]
+    TL -->|"新聞夠新（3 天內；問「最新」時須為今日）"| AS
+    TL -->|"全空、缺新聞、已過期或剛補抓完"| AG
+    AS -->|有檢索結果| GEN[generate]
+    AS -->|完全沒有檢索結果| NR[no_result]
     GEN --> A[回答 + 引用來源 + 決策卡]
     NR --> B[誠實告知查無資料 + 市場快照]
 
@@ -133,20 +138,21 @@ flowchart TD
         UP --> ING[src/ingest.py: 切 chunk + embedding]
         ING --> PG[(pgvector: doc_chunks)]
     end
-    PG --> RT
+    PG --> TL
     YF[yfinance 即時快照] -.只進 prompt，不入庫.-> GEN
 ```
 
 ### LangGraph 節點流程
 
-`rewrite_question → extract_filters → retrieve → (generate | auto_fetch → retrieve | no_result)`
+`rewrite_question → extract_filters → agent ⇄ tools → assemble → (generate | no_result)`
 
 | 節點 | 職責 |
 |---|---|
 | `rewrite_question` | 有對話歷史時,把追問(「那毛利率呢?」)改寫成獨立問題,讓 embedding 檢索有效;無歷史直接通過 |
 | `extract_filters` | 用 LLM 從問題抽出公司代號(台股 4 碼或美股 ticker)/文件類型作為檢索 filter(null 表示不過濾) |
-| `retrieve` | 問題經 bge-m3 embedding 後,在 pgvector 做 cosine 相似度檢索,取 top-5;含時效關鍵字(「最新」「今天」等,共用 `_RECENT_RE`)時新聞限 90 天內;有指名公司時再補 top-3 該公司新聞與 top-2 全域市場新聞,作為決策卡素材 |
-| `auto_fetch` | 只執行一次（`fetched` 保護）。觸發條件:檢索全空、指名公司缺新聞,或最新新聞過期——超過 2 天,問題含時效關鍵字時收緊為「必須是今天的新聞」。有指名公司:抓財報+新聞(僅當檢索結果中確實有 `financial_report` chunk 才跳過財報抓取),並一律加掃市場新聞(`fetch_market_news`, top-3);沒指名公司但檢索全空時也觸發市場新聞掃描,避免第一輪就直接舉手投降。單一來源失敗不中斷整體流程 |
+| `agent` | 把 MCP tool 綁給 LLM,由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。時效判準寫在 tool 的 docstring(`src/mcp_server.py`)而非程式碼裡。`_trim_for_llm` 會把送進模型的複本中的結構化 `chunks` 裁掉、只留 `summary_for_llm`,完整內容留在 state 供 `assemble` 使用。tool 呼叫上限 4 輪 |
+| `tools` | 執行 LLM 選定的 MCP tool(`ToolNode`)。之後由 `route_after_tools` 判斷:檢索到的新聞明顯夠新時(3 天內,問題含時效關鍵字時收緊為「必須是今天」)直接跳到 `assemble`,省下一輪重複的 agent 決策;其餘情況(全空、沒有新聞、已過期、日期不明,或剛跑完補抓 tool)一律回 `agent`,補抓與否仍由 LLM 決定 |
+| `assemble` | 把 tool 回傳結果還原成下游節點原本就在用的欄位:`retrieved` 取最後一次 `search_knowledge_base` 的結果,另填 `fetched`/`fetch_results` 供 `no_result` 使用 |
 | `generate` | 僅根據檢索到的 chunk 回答並標示 `[來源N]`,並併入即時 yfinance 市場快照(股價、52 週區間、本益比、目標價、分析師評等,加上分析師共識:當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss、下次財報日——僅供 prompt 參考,不算引用來源,失敗時靜默降級),結尾固定追加決策卡一節(附引用的事實、推論、估值、市場共識與門檻、情境解讀、法說會關注清單、立場、觸發條件、關鍵事件、觀察指標)與免責聲明;立場只在財報+新聞+市場數據都支持時才給,但觸發條件/關鍵事件/觀察指標一律要有,回答不會整段棄權 |
 | `no_result` | 補抓後仍查無資料時誠實告知,並附上市場快照與觀察項目,避免幻覺 |
 
