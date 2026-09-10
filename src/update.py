@@ -238,14 +238,23 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
     base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}"
 
     doc = primary_doc
+    cover_only_reason = None
     if form == "6-K":
-        # 6-K 的主文只是封面頁，財報在 exhibit；抓不到目錄就退回主文，不讓這步變成新的失敗點
+        # 6-K 的主文只是封面頁（地址、表頭、簽名，無財務數字），財報在 exhibit。
+        # 目錄讀不到時仍退回主文以取得部分內容，但要記下原因往上報：
+        # 封面頁能通過 _MIN_FILING_CHARS 檢查，靜默當成功會讓「只有封面頁」的申報
+        # 混進向量庫且看起來一切正常（ASML 2026 Q2 就是這樣只入庫 2,923 字元）
         try:
             listing = requests.get(f"{base}/index.json", headers=headers, timeout=TIMEOUT)
             listing.raise_for_status()
             doc = _select_exhibit(listing.json()["directory"]["item"], primary_doc)
         except (requests.RequestException, KeyError, ValueError) as e:
-            print(f"[update] 讀取 {accession} 目錄失敗（{e}），改用主文。")
+            cover_only_reason = f"{type(e).__name__}: {e}"
+            print(
+                f"[update] {ticker.upper()} 讀取申報 {accession} 的目錄失敗"
+                f"（{cover_only_reason}），退回主文 {primary_doc}；"
+                f"6-K 主文通常只有封面頁，本次匯入可能缺漏財報本文。"
+            )
 
     url = f"{base}/{doc}"
     print(f"[update] 下載 {form}：{url}")
@@ -271,6 +280,15 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
         doc_type="financial_report",
         published_at=filing_date,
     )
+    if cover_only_reason:
+        # 內容已入庫（有總比沒有好，且 source 相同、之後重抓會覆蓋），但不回報成功：
+        # 呼叫端據此決定要不要重試或提示使用者，不會誤以為拿到了完整財報
+        return FetchResult(
+            False,
+            f"{ticker.upper()} {form}（{filing_date}）僅取得封面頁，可能缺漏本文："
+            f"申報 {accession} 目錄讀取失敗（{cover_only_reason}）。已匯入 {len(text.strip())} 字元，"
+            f"請稍後重抓。",
+        )
     return FetchResult(True, f"已匯入 {ticker.upper()} {form}（{filing_date}）")
 
 

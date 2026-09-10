@@ -36,8 +36,34 @@ assert f"今天是 {TODAY}" in summary
 assert "距今 60 天" in summary
 assert "距今 1 天" in summary
 # 時效結論只看新聞：財報 60 天不該被拿來當過期依據（實測模型會混用兩者的天數）
-assert "最新的「新聞」距今 1 天" in summary
+# 有指名公司時 header 會標明是哪家的新聞，免得模型把別家的新鮮度當成這家的
+assert "最新的 AAPL 的「新聞」距今 1 天" in summary
 assert "[財報｜EDGAR:AAPL:x]" in summary and "[新聞｜https://news/1]" in summary
+
+# 時效只算查詢公司自己的新聞：retrieve_context 會補進其他公司與全域市場新聞，
+# 那些通常更新，混進來會讓 header 報出別家的新鮮度，使用者問 AAPL 卻被告知
+# 「距今 0 天」（其實是別家的新聞）而不去補抓
+mixed = chunks + [
+    {"id": 3, "source": "https://news/global", "title": "大盤", "doc_type": "news",
+     "company": None, "published_at": TODAY, "content": "全域新聞"},
+    {"id": 4, "source": "https://news/other", "title": "他家", "doc_type": "news",
+     "company": "MSFT", "published_at": TODAY, "content": "別家新聞"},
+]
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: mixed
+mixed_summary = json.loads(
+    asyncio.run(mcp_server.search_knowledge_base("AAPL 新聞", "AAPL"))
+)["summary_for_llm"]
+assert "最新的 AAPL 的「新聞」距今 1 天" in mixed_summary, mixed_summary
+assert "距今 0 天" not in mixed_summary.split("以下是檢索結果")[0]
+
+# 不指名公司時維持原行為：全部新聞一起算，取最新的 0 天
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: mixed
+any_summary = json.loads(
+    asyncio.run(mcp_server.search_knowledge_base("大盤新聞"))
+)["summary_for_llm"]
+assert "最新的「新聞」距今 0 天" in any_summary, any_summary
+
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: chunks
 
 # 只有財報沒有新聞時要明講，否則模型會誤以為新聞夠新
 mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: [chunks[0]]

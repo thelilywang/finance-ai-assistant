@@ -58,6 +58,10 @@ async def search_knowledge_base(
     直接告訴你「目前最新的新聞距今 N 天」，時效判斷請只依據這個數字，不要自己推算日期，
     也不要拿財報的天數來判斷（財報按季發布，距今數十天屬正常，不代表資料過期）。
 
+    這個 N 的計算範圍：有帶 company 時只算該公司自己的新聞，不含檢索順帶補進來的
+    其他公司與全域市場新聞（那些通常更新，混進來會讓你以為該公司資料很新而不去補抓）；
+    company 留空時才把所有新聞一起算。該公司完全沒有新聞時 summary 會明講，不報 N。
+
     依上述「最新新聞距今 N 天」決定是否補抓（若要補抓，呼叫 fetch_company_data 或
     fetch_market_overview，本工具不會幫你補）：
     - 完全查無資料，而問題有指名公司 → 補抓該公司資料。
@@ -89,7 +93,12 @@ async def search_knowledge_base(
             # 直接算好距今天數：模型讀得到日期卻不見得會跟「今天」相減（實測過的失敗案例）
             age = (today - published).days if isinstance(published, dt.date) else None
             when = f"發布日期：{published}" + (f"，距今 {age} 天" if age is not None else "")
-            if age is not None and d["doc_type"] == "news":
+            # 有指名公司時，時效只算該公司自己的新聞：retrieve_context 會補進其他公司與
+            # 全域市場新聞，那些通常更新，混進來會讓 header 報出別家的新鮮度，
+            # 使用者問 A 公司卻被告知「距今 2 天」（其實是 B 公司的新聞）而不去補抓
+            if age is not None and d["doc_type"] == "news" and (
+                company is None or d.get("company") == company
+            ):
                 news_ages.append(age)
         else:
             when = "發布日期：不明"
@@ -99,7 +108,10 @@ async def search_knowledge_base(
     # 「最新新聞距今幾天」算好放在開頭，免得模型拿財報的天數去套新聞的門檻
     if blocks:
         if news_ages:
-            freshness = f"目前最新的「新聞」距今 {min(news_ages)} 天。"
+            scope = f" {company} 的" if company else ""
+            freshness = f"目前最新的{scope}「新聞」距今 {min(news_ages)} 天。"
+        elif company:
+            freshness = f"檢索結果中沒有任何 {company} 的新聞（其他公司或全域新聞不列入時效判斷）。"
         else:
             freshness = "檢索結果中沒有任何新聞（只有財報）。"
         header = f"今天是 {today}。{freshness}以下是檢索結果：\n\n"

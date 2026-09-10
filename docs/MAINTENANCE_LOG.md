@@ -6,19 +6,44 @@
 
 ## 目前待辦（依 CP 值排序）
 
-1. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
+### 檢索品質（2026-09-10 標注評估後新增）
+
+1. **相似度門檻與 Top-K 篩選機制**（`src/vectorstore.py` 的 `similarity_search`、`src/config.py` 的 `TOP_K`）
+   SQL 只有 `ORDER BY` 距離加 `LIMIT`，沒有任何相似度下限，且 `TOP_K=5` 是固定值。無論查詢與庫內內容多不相關，一律回滿 5 筆——問一家庫內沒有的公司，回的是「最不無關」的 5 筆而非空結果，這些低分內容照樣進 context 供 LLM 引用。回傳的 `similarity` 欄位目前算了卻沒被任何呼叫端使用。要做需先量測實際分數分布再定門檻，並決定門檻濾光時的行為（回空結果並提示，或降級為現行行為）。
+
+2. **階層化過濾放寬機制**（`src/graph.py` 的 `retrieve_context`）
+   目前只有單一步驟：`doc_type` 濾到空就整個拿掉重查，一次放寬到底。沒有「時間 → 類型 → 公司」的漸進降級，也沒有告知呼叫端實際放寬了哪一層。使用者問「2330 最近一週的財報」查無結果時，理想是先放寬時間窗、再放寬類型、最後才放寬公司，並在回傳中標明降級層級，讓 LLM 知道拿到的不是原本要的東西。
+
+3. **異質文檔重排與配額控制**（`src/graph.py` 的 `retrieve_context`）
+   四次檢索的結果直接串接，順序由各自的排序決定，沒有跨來源重排。財報與新聞的 embedding 分數不可直接比較（文體、長度、時效性質都不同），現行做法等於讓兩種文檔在同一個名次空間裡混排。配額目前是寫死的常數（主檢索 5、補新聞 3、補市場新聞 2），不隨問題類型調整——純財報問題仍固定補 3 條新聞。
+
+4. **`news_since_days` 的雙重用途解耦**（`src/graph.py` 的 `extract_filters`／`route_after_tools`、`src/vectorstore.py`）
+   同一個值被當三種東西用：在 `similarity_search` 是 SQL 絕對篩選（`published_at >= CURRENT_DATE - N`），在 `route_after_tools` 只是選門檻的二元開關（`<= 7` 取當天、否則取 3 天），在 `_seed_prompt` 又注入 agent 提示。窗值本身從不等於門檻，兩者的語意也不同：前者是「使用者要什麼範圍」，後者是「資料多新才算夠」。目前耦合的後果是無時效語意的問題（`None`）與 30 天、365 天窗吃到同一個 3 天門檻。
+
+5. **平行化檢索與向量快取**（`src/graph.py` 的 `retrieve_context`）
+   四次 `similarity_search` 完全循序，彼此無資料依賴（後兩次只需要前次結果的 id 集合去重，可先發後濾）。`embed_query` 每次呼叫都重算，同一問題在 agent 多輪迴圈中會重複 embedding。此項對總延遲的改善幅度需先量測——已知瓶頸是本地模型生成速度（每秒約 10 字），檢索佔比可能不足以讓優化顯著，量測後再決定是否值得做。
+
+6. **`fb24dbc` 之前的遺留資料無偵測機制**（`src/update.py`、`doc_chunks`）
+   ASML 財報只有 2,923 字元是靠人工比對各公司字數才發現的，系統本身不會察覺。目前庫內僅此一例且已重抓，但新增外國發行人時同類問題不會自動浮現。低成本做法是入庫時記錄字數並在明顯偏離同類文檔時警示，或在 `_select_exhibit` 選中的檔案顯著小於同申報其他 `.htm` 時提醒。
+
+7. **`_select_exhibit` 的「取最大 htm」啟發式**（`src/update.py`）
+   ASML 該份申報中，投影片（20KB）與法定中期報告（76KB）並存，這次選對只是因為後者較大。若某次申報的投影片檔案更大就會誤挑——原始碼的 ponytail 註解已標明此上限與升級路徑（改解析 index.html 表格的 EX-99.1 類型標籤）。尚未實際誤挑過，維持觀察。
+
+### 其他
+
+8. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
-2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
+9. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
-3. **`src/update.py` 依資料類型拆分模組**（`src/update.py`）
+10. **`src/update.py` 依資料類型拆分模組**（`src/update.py`）
    目前 598 行、16 個函式。四個抓取器（EDGAR／台股財報兩軌／新聞／市場新聞）彼此不互相呼叫，共用的只有 `FetchResult`、`TIMEOUT` 與 `BROWSER_UA` 三樣，因此沒有「改 A 功能要先讀懂 B」的實際負擔，拆檔屬預防性整理而非解決現有痛點。真要拆時**依資料類型**切為 `report`（EDGAR + 台股雙軌）／`news`／`market_news`／`_common`（放上述三個共用項），因為這條線與實際修改動機吻合：某來源改版就只動該檔。**不建議依台股／美股切**——`fetch_news` 單一函式同時處理兩市場（只差 `.TW` 後綴）、`fetch_market_news` 兩者都掃，按市場切會迫使這兩個函式拆散或重複，市場並非此模組的變動軸線。拆檔需同步調整 `graph.py` 的延遲 import、`mcp_server.py` 的 import，以及 `tests/test_fetch.py` 的 monkeypatch——後者是打在 `src.update` 的模組屬性上，import 路徑一變會靜默失效變成真的連外而非報錯，是拆檔時最容易漏掉的一點。宜獨立成一次純搬遷 commit，不與功能改動混做。
-4. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
+11. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
    官方 OpenAPI 取得的結構化財報數字目前與 PDF 文字一樣進 `doc_chunks`，走同一條向量檢索路徑。「台積電最新一季 EPS 多少」這類純數字問題其實不需要 embedding 相似度比對——資料庫裡就有確定的那一格，繞過檢索可同時降低延遲與消除檢索誤差。要做需新增一個直查結構化數字的 MCP tool，並調整 `assemble`/`generate` 的 context 組裝與引用編號邏輯：現行設計的前提是「所有證據都可被 `[來源N]` 引用」，直答通道的數字若不進 `retrieved` 就沒有對應來源編號，等於在決策卡的反幻覺規則上開一個沒有引用的破口，需先想清楚這類數字如何標註出處。影響面大，刻意獨立處理。
-5. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+12. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
    若未來抓取從同步 API/套件轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前以 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 要到需服務多個併發 client 時才有實質效益。現況為同步 `requests`、單次數秒內完成，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現的問題，先記錄方向待實際需要時再評估。
-6. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
+13. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
    目前台美雙掛牌（台積電＝2330／TSM）的對應關係是寫死的靜態 dict，四檔手動維護。台股 ADR 檔數少且極少變動，靜態表在現階段夠用且零延遲，但新增標的要改程式。預期做法：先用 API 查詢對應關係，查到後落地存進資料表（等未來 ORM 優化一併處理），之後優先讀資料表、查不到才回頭打 API 補查。需先確認資料來源——ADR 對應關係在既有的 yfinance 與兩個官方 OpenAPI 都沒有直接欄位，靠公司名稱模糊比對不穩，須先找到可靠端點再動工。在那之前往靜態表加一行即可。
-7. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+14. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
 ## 保持現狀（已評估，判斷暫不處理）
@@ -246,6 +271,39 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 併陳與追問 | `both` 時指示 agent 分別檢索兩次並注入不可換算的警語；改寫 prompt 補上保留市場選擇，另從歷史撿回代號 | — |
 | 反問的 UI 選項 | `app.py` 以 `cl.AskActionMessage` 給出三顆按鈕，點選後帶著 `market` 重跑。按鈕只是捷徑，打字回答仍走追問流程；逾時不中斷對話 | — |
 | 文案與測試 | `i18n.py` 中英各補反問、警語與按鈕字串；新增 `tests/test_dual_market.py` | — |
+
+---
+
+## 2026-09-10　檢索規則的標注評估、時效歸屬與外國發行人財報缺漏
+
+以 13 題標注問題集逐條驗證檢索規則，揭出三個獨立缺陷：兩個在檢索層修復，一個屬歷史資料，追查後與初步假設不符。
+
+### 背景
+
+`retrieve_context` 的四段補資料規則彼此影響，原本只有端到端手動驗證。新增 `tests/eval_data/rag_annotations.json` 與 `tests/eval_rag_retrieval.py`，依規則分類判準——放寬看非空、補充看筆數上限、時效看 header 文字，套單一 precision/recall 會蓋掉規則層級的差異。首輪 11/13，修復後 13/13。
+
+### 排查過程：ASML 財報只有 2,923 字元
+
+ASML 財報僅 5 個 chunk、2,923 字元，內容全是 SEC 表頭、地址與簽名，唯一的數字出現在未被抓取的 exhibit 標題裡；同期 MSFT 有 343,759 字元。
+
+初步判斷指向 `_select_exhibit` 的 except 分支：目錄讀取失敗會退回主文（6-K 主文只是封面頁），只印警告不影響回傳值。**此判斷有誤**，三項反證：以該申報真實的 `index.json` 餵入 `_select_exhibit`，正確選出 76KB 的法定中期報告；該 `index.json` 結構完整、HTTP 200，無觸發例外的條件；實跑抓取直接下載法定中期報告、抽出 64,972 字元，未印出任何警告。
+
+真正原因是時間差：ASML 入庫於 07-15，`_select_exhibit` 引入於 09-09（`fb24dbc`），抓取當時該邏輯尚未存在，程式必然只下載 `primaryDocument`。`fb24dbc` 已修好此 bug，但未回頭重抓先前入庫的資料。影響限 ASML 一家——TSM 同為外國發行人但在其後抓取（288,888 字元），MSFT／NVDA／AAPL 申報 10-Q/10-K，主文件本身即財報全文。
+
+### 修復內容
+
+| 項目 | 修復內容 | commit |
+|---|---|---|
+| 時效歸屬跨公司污染 | `mcp_server.py` 的 `search_knowledge_base` 計算最新新聞天數時只納入查詢公司自身的新聞；該公司無新聞時改為明講。`retrieve_context` 補進的他家與市場新聞通常更新，混入會讓 header 報出別家的新鮮度，而 tool 說明明講「時效判斷請只依據這個數字」，等同誘導模型跳過補抓。`tests/test_mcp_tools.py` 補兩條迴歸斷言 | — |
+| 市場新聞補充恆為 0 至 2 筆 | `graph.py` 的 `retrieve_context` 補充段改為排除查詢公司自身、依發布日期排序、多撈候選再去重回補。原本純語意檢索常撈回同公司內容，去重後補充數歸零（MSFT 實測 0 筆）。`vectorstore.py` 的 `similarity_search` 新增 `exclude_company` 與 `order_by_recency`，前者用 `IS DISTINCT FROM`，`!=` 不匹配 NULL 會吃掉市場新聞 | — |
+| 退回封面頁靜默視為成功 | `update.py` 的 `_fetch_edgar` 目錄讀取失敗時仍退回主文，但回傳 `FetchResult(ok=False)` 並在 detail 標註缺漏與 accession number。封面頁約 2,900 字元足以通過 `_MIN_FILING_CHARS`（500），靜默成功會讓只有封面頁的申報混進向量庫且看起來一切正常。非本次 ASML 的肇因，屬同區域的既有缺陷。新增 `tests/test_edgar_exhibit.py` | — |
+| ASML 財報重抓 | 沿用 `ingest_text` 內建的 `delete_by_source`，同 source 重跑自動覆蓋。5 chunk／2,923 字元 → 104 chunk／73,234 字元，內容含損益表、股東權益變動表與營運說明 | — |
+
+### 未變動範圍
+
+ASML 仍只有單一申報期別（2026-07-15），跨期比較問題依舊答不出來——內容完整性與期別覆蓋是兩件獨立的事，重抓不會生出上一季的申報。
+
+`fb24dbc` 之前入庫的資料無自動偵測機制，本次靠人工比對字數發現。目前庫內僅 ASML 一例，已處理。
 
 ---
 

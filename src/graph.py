@@ -240,6 +240,10 @@ def resolve_market(state: GraphState) -> GraphState:
     return {**state, "company": company, "ask_market": False, "peer_company": None}
 
 
+# 補給決策卡當市場脈絡的新聞條數；候選要多撈幾倍，去重後才補得滿
+_MARKET_NEWS_K = 2
+
+
 def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None,
                      news_since_days: int | None = None) -> list[dict]:
     """向量檢索 + 既有的補資料規則（doc_type 濾空放寬重查、財報補新聞、補全域市場新聞）。
@@ -266,11 +270,26 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
         )
         docs = docs + news
     if company and docs:
-        # ponytail: 補 2 條全域市場新聞給決策卡當市場脈絡（market-news 入庫多為 company=NULL）
+        # ponytail: 補 2 條市場新聞給決策卡當市場脈絡。三個條件缺一不可：
+        # exclude_company 排掉查詢公司自己（否則語意檢索多半又撈回同一家，補了等於沒補；
+        # 市場新聞掃描認得出標題公司時會填代號、認不出才是 NULL，所以「全域」不等於
+        # company IS NULL，用排除法才涵蓋得完整）；order_by_recency 讓脈絡取新不取準；
+        # 多撈候選再去重回補，避免撈回的正好都已在 docs 裡而補成 0 條。
         seen_ids = {d["id"] for d in docs}
-        market = similarity_search(query_vec, top_k=2, doc_type="news",
-                                   news_since_days=news_since_days)
-        docs = docs + [d for d in market if d["id"] not in seen_ids]
+        market = similarity_search(
+            query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
+            news_since_days=news_since_days,
+            exclude_company=company, order_by_recency=True,
+        )
+        extra = []
+        for d in market:
+            if d["id"] in seen_ids:
+                continue
+            seen_ids.add(d["id"])
+            extra.append(d)
+            if len(extra) == _MARKET_NEWS_K:
+                break
+        docs = docs + extra
     return docs
 
 

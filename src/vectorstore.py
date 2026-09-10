@@ -101,11 +101,18 @@ def similarity_search(
     company: str | None = None,
     doc_type: str | None = None,
     news_since_days: int | None = None,
+    exclude_company: str | None = None,
+    order_by_recency: bool = False,
 ) -> list[dict]:
     """回傳最相似的 chunk，附上 source 供引用。
 
     news_since_days 有值時只限縮新聞的日期（財報不受影響）；
     published_at 為 NULL 的新聞在此條件下會被排除，可接受。
+
+    exclude_company 排除指定公司（用 IS DISTINCT FROM，company 為 NULL 的列也會留下，
+    因為市場新聞掃描認不出標題公司時就填 NULL，那些正是要補的市場脈絡）。
+    order_by_recency=True 改以發布日期新到舊排序，供「補市場脈絡」這類要新不要準的用途；
+    published_at 為 NULL 的排最後，避免無日期的舊文佔住補充名額。
     """
     filters = []
     params: dict = {"embedding": query_embedding, "top_k": top_k}
@@ -113,6 +120,10 @@ def similarity_search(
     if company:
         filters.append("company = %(company)s")
         params["company"] = company
+    if exclude_company:
+        # != 不會匹配 NULL，全域新聞（company IS NULL）會被吃掉，故用 IS DISTINCT FROM
+        filters.append("company IS DISTINCT FROM %(exclude_company)s")
+        params["exclude_company"] = exclude_company
     if doc_type:
         filters.append("doc_type = %(doc_type)s")
         params["doc_type"] = doc_type
@@ -124,12 +135,18 @@ def similarity_search(
 
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
+    order_clause = (
+        "ORDER BY published_at DESC NULLS LAST, embedding <=> %(embedding)s::vector"
+        if order_by_recency
+        else "ORDER BY embedding <=> %(embedding)s::vector"
+    )
+
     sql = f"""
         SELECT id, source, title, doc_type, company, published_at, content,
                1 - (embedding <=> %(embedding)s::vector) AS similarity
         FROM doc_chunks
         {where_clause}
-        ORDER BY embedding <=> %(embedding)s::vector
+        {order_clause}
         LIMIT %(top_k)s
     """
 
