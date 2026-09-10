@@ -114,7 +114,12 @@ async def search_knowledge_base(
             freshness = f"檢索結果中沒有任何 {company} 的新聞（其他公司或全域新聞不列入時效判斷）。"
         else:
             freshness = "檢索結果中沒有任何新聞（只有財報）。"
-        header = f"今天是 {today}。{freshness}以下是檢索結果：\n\n"
+        # 放寬過就明講，否則 LLM 會把「新聞」當成它要的「財報」直接引用
+        relaxed = (
+            "註：找不到指定類型的資料，已放寬類型限制，以下結果可能不是你要的類型。"
+            if any(d.get("relaxed") == "doc_type" for d in docs) else ""
+        )
+        header = f"今天是 {today}。{freshness}{relaxed}以下是檢索結果：\n\n"
     else:
         header = ""
     summary = header + "\n\n".join(blocks) if blocks else "查無相關資料。"

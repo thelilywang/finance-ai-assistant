@@ -262,6 +262,10 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
             query_vec, company=company,
             news_since_days=news_since_days,
         )
+        # 標記放寬過，讓呼叫端能告訴 LLM「拿到的不是原本要的類型」；
+        # 掛在每筆 dict 上而非改回傳結構，assemble 與既有測試都不受影響
+        for d in docs:
+            d["relaxed"] = "doc_type"
     if company and docs and not any(d["doc_type"] == "news" for d in docs):
         # ponytail: 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 LLM 決定要不要補抓
         news = similarity_search(
