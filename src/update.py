@@ -158,8 +158,11 @@ def _select_exhibit(items: list[dict], primary_doc: str) -> str:
 
     6-K 的 primaryDocument 只是封面頁（抽出來約 1~2 千字元的地址與表頭），
     財報本文放在同一份申報的 exhibit。挑最大的 .htm 在 ASML/TSM/NIO 都命中本文。
-    ponytail: 「取最大的 htm」是啟發式，上限是可能誤挑到投影片；真的誤挑再改解析
-    index.html 表格的 exhibit 類型欄位（該表格含 EX-99.1 這類標籤）。
+    ponytail: 「取最大的 htm」是啟發式，上限是可能誤挑到投影片；真的誤挑再改善。
+    注意：優先選 EX-99.1 類型標籤不是可靠的升級路徑——實測 ASML 樣本 EX-99.1 是
+    新聞稿、EX-99.2 才是投影片、真正財報本文是 EX-99.4，且 index.htm 表格無
+    description 欄位可供關鍵字過濾。真要改善應解析 index.htm 表格本身的 size
+    欄位（而非 index.json 的 size），此表格才同時帶有 Type 可交叉比對。
     """
     candidates = [
         it for it in items

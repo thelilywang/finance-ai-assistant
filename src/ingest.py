@@ -25,6 +25,10 @@ def load_text(path: str) -> str:
         return f.read()
 
 
+# 財報全文通常數萬字；低於此值可能是抽到摘要頁或選錯檔案，值得人工確認（僅警示、不擋入庫）
+_MIN_FINANCIAL_REPORT_CHARS = 10000
+
+
 def chunk_text(text: str) -> list[str]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=config.CHUNK_SIZE,
@@ -45,6 +49,12 @@ def ingest_text(
     if not text or not text.strip():
         print(f"[ingest] 警告：{source} 內容為空（可能 PDF 抽不出文字），跳過。")
         return 0
+
+    if doc_type == "financial_report" and len(text.strip()) < _MIN_FINANCIAL_REPORT_CHARS:
+        print(
+            f"[ingest] 警示：{source} 為財報但僅 {len(text.strip())} 字元"
+            f"（低於 {_MIN_FINANCIAL_REPORT_CHARS}），可能選錯檔案或內容不完整，建議人工確認。"
+        )
 
     delete_by_source(source)
 
