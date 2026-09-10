@@ -8,45 +8,40 @@
 
 ### 檢索品質（2026-09-10 標注評估後新增）
 
-1. **相似度門檻與 Top-K 篩選機制**（`src/vectorstore.py` 的 `similarity_search`、`src/config.py` 的 `TOP_K`）
-   SQL 只有 `ORDER BY` 距離加 `LIMIT`，沒有任何相似度下限，且 `TOP_K=5` 是固定值。無論查詢與庫內內容多不相關，一律回滿 5 筆——問一家庫內沒有的公司，回的是「最不無關」的 5 筆而非空結果，這些低分內容照樣進 context 供 LLM 引用。回傳的 `similarity` 欄位目前算了卻沒被任何呼叫端使用。要做需先量測實際分數分布再定門檻，並決定門檻濾光時的行為（回空結果並提示，或降級為現行行為）。
-
-2. **階層化過濾放寬機制**（`src/graph.py` 的 `retrieve_context`）
-   目前只有單一步驟：`doc_type` 濾到空就整個拿掉重查，一次放寬到底。沒有「時間 → 類型 → 公司」的漸進降級，也沒有告知呼叫端實際放寬了哪一層。使用者問「2330 最近一週的財報」查無結果時，理想是先放寬時間窗、再放寬類型、最後才放寬公司，並在回傳中標明降級層級，讓 LLM 知道拿到的不是原本要的東西。
-
-3. **異質文檔重排與配額控制**（`src/graph.py` 的 `retrieve_context`）
-   四次檢索的結果直接串接，順序由各自的排序決定，沒有跨來源重排。財報與新聞的 embedding 分數不可直接比較（文體、長度、時效性質都不同），現行做法等於讓兩種文檔在同一個名次空間裡混排。配額目前是寫死的常數（主檢索 5、補新聞 3、補市場新聞 2），不隨問題類型調整——純財報問題仍固定補 3 條新聞。
-
-4. **`news_since_days` 的雙重用途解耦**（`src/graph.py` 的 `extract_filters`／`route_after_tools`、`src/vectorstore.py`）
+1. **`news_since_days` 的雙重用途解耦**（`src/graph.py` 的 `extract_filters`／`route_after_tools`、`src/vectorstore.py`）
    同一個值被當三種東西用：在 `similarity_search` 是 SQL 絕對篩選（`published_at >= CURRENT_DATE - N`），在 `route_after_tools` 只是選門檻的二元開關（`<= 7` 取當天、否則取 3 天），在 `_seed_prompt` 又注入 agent 提示。窗值本身從不等於門檻，兩者的語意也不同：前者是「使用者要什麼範圍」，後者是「資料多新才算夠」。目前耦合的後果是無時效語意的問題（`None`）與 30 天、365 天窗吃到同一個 3 天門檻。
 
-5. **平行化檢索與向量快取**（`src/graph.py` 的 `retrieve_context`）
+2. **平行化檢索與向量快取**（`src/graph.py` 的 `retrieve_context`）
    四次 `similarity_search` 完全循序，彼此無資料依賴（後兩次只需要前次結果的 id 集合去重，可先發後濾）。`embed_query` 每次呼叫都重算，同一問題在 agent 多輪迴圈中會重複 embedding。此項對總延遲的改善幅度需先量測——已知瓶頸是本地模型生成速度（每秒約 10 字），檢索佔比可能不足以讓優化顯著，量測後再決定是否值得做。
 
-6. **`fb24dbc` 之前的遺留資料無偵測機制**（`src/update.py`、`doc_chunks`）
+3. **`fb24dbc` 之前的遺留資料無偵測機制**（`src/update.py`、`doc_chunks`）
    ASML 財報只有 2,923 字元是靠人工比對各公司字數才發現的，系統本身不會察覺。目前庫內僅此一例且已重抓，但新增外國發行人時同類問題不會自動浮現。低成本做法是入庫時記錄字數並在明顯偏離同類文檔時警示，或在 `_select_exhibit` 選中的檔案顯著小於同申報其他 `.htm` 時提醒。
 
-7. **`_select_exhibit` 的「取最大 htm」啟發式**（`src/update.py`）
+4. **`_select_exhibit` 的「取最大 htm」啟發式**（`src/update.py`）
    ASML 該份申報中，投影片（20KB）與法定中期報告（76KB）並存，這次選對只是因為後者較大。若某次申報的投影片檔案更大就會誤挑——原始碼的 ponytail 註解已標明此上限與升級路徑（改解析 index.html 表格的 EX-99.1 類型標籤）。尚未實際誤挑過，維持觀察。
 
 ### 其他
 
-8. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
+5. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
-9. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
+6. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
    目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並同步調整 `retrieve_context`/`generate` 的 context 組裝邏輯（依公司分組）與 MCP tool 的參數定義，影響面較大，刻意留待下一階段獨立處理。
-10. **`src/update.py` 依資料類型拆分模組**（`src/update.py`）
+7. **`src/update.py` 依資料類型拆分模組**（`src/update.py`）
    目前 598 行、16 個函式。四個抓取器（EDGAR／台股財報兩軌／新聞／市場新聞）彼此不互相呼叫，共用的只有 `FetchResult`、`TIMEOUT` 與 `BROWSER_UA` 三樣，因此沒有「改 A 功能要先讀懂 B」的實際負擔，拆檔屬預防性整理而非解決現有痛點。真要拆時**依資料類型**切為 `report`（EDGAR + 台股雙軌）／`news`／`market_news`／`_common`（放上述三個共用項），因為這條線與實際修改動機吻合：某來源改版就只動該檔。**不建議依台股／美股切**——`fetch_news` 單一函式同時處理兩市場（只差 `.TW` 後綴）、`fetch_market_news` 兩者都掃，按市場切會迫使這兩個函式拆散或重複，市場並非此模組的變動軸線。拆檔需同步調整 `graph.py` 的延遲 import、`mcp_server.py` 的 import，以及 `tests/test_fetch.py` 的 monkeypatch——後者是打在 `src.update` 的模組屬性上，import 路徑一變會靜默失效變成真的連外而非報錯，是拆檔時最容易漏掉的一點。宜獨立成一次純搬遷 commit，不與功能改動混做。
-11. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
+8. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
    官方 OpenAPI 取得的結構化財報數字目前與 PDF 文字一樣進 `doc_chunks`，走同一條向量檢索路徑。「台積電最新一季 EPS 多少」這類純數字問題其實不需要 embedding 相似度比對——資料庫裡就有確定的那一格，繞過檢索可同時降低延遲與消除檢索誤差。要做需新增一個直查結構化數字的 MCP tool，並調整 `assemble`/`generate` 的 context 組裝與引用編號邏輯：現行設計的前提是「所有證據都可被 `[來源N]` 引用」，直答通道的數字若不進 `retrieved` 就沒有對應來源編號，等於在決策卡的反幻覺規則上開一個沒有引用的破口，需先想清楚這類數字如何標註出處。影響面大，刻意獨立處理。
-12. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
+9. **資料抓取全面爬蟲化的架構演進**（`src/update.py`、`src/mcp_server.py`）
    若未來抓取從同步 API/套件轉向動態或高併發爬蟲，可行方向：依資料特性分「即時輕量」與「重量級背景」（Task Queue，超時先回傳現有摘要）兩種管道、爬蟲層加入 rate-limit 防護與失敗降級。MCP tool 目前以 `asyncio.to_thread()` 包裝同步抓取避免卡住 event loop，改寫成原生 async 要到需服務多個併發 client 時才有實質效益。現況為同步 `requests`、單次數秒內完成，且未遇過真實的高併發或 rate-limit 問題，屬解決尚未出現的問題，先記錄方向待實際需要時再評估。
-13. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
+10. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
    目前台美雙掛牌（台積電＝2330／TSM）的對應關係是寫死的靜態 dict，四檔手動維護。台股 ADR 檔數少且極少變動，靜態表在現階段夠用且零延遲，但新增標的要改程式。預期做法：先用 API 查詢對應關係，查到後落地存進資料表（等未來 ORM 優化一併處理），之後優先讀資料表、查不到才回頭打 API 補查。需先確認資料來源——ADR 對應關係在既有的 yfinance 與兩個官方 OpenAPI 都沒有直接欄位，靠公司名稱模糊比對不穩，須先找到可靠端點再動工。在那之前往靜態表加一行即可。
-14. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+11. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 
 ## 保持現狀（已評估，判斷暫不處理）
+
+- **領域微調 Embedding 與 Cross-Encoder 重排——評估後不採用**（`src/config.py` 的 `EMBEDDING_MODEL`、`src/graph.py` 的 `retrieve_context`）— 兩者皆為擋掉離題查詢而評估，2026-09-10 判斷不做。**領域專用 Embedding**：提案前提是「通用模型對時間詞權重過高，導致帶時間詞的問題與新聞的時間特徵共振」，實測不成立——同一問題拿掉「今天」分數僅降 0.004（0.510→0.506），而無時間詞的「今天心情不好」仍有 0.52，真正原因是短句中文閒聊的相似度基線本就落在 0.50 附近，與時間詞無關。換模型需重跑全庫 3,656 筆 embedding、重新量測所有門檻（分數尺度不通用），成本高而針對的病因並不存在。**Cross-Encoder 重排**：技術上確實能區分「同樣有『今天』但天氣與財報無關」，但需新增 `bge-reranker` 類模型並對每次檢索的 top-K 逐筆推論，在本專案的瓶頸下不划算——現況單題總耗時 186 至 470 秒、瓶頸是本地模型生成速度，再加一次逐筆推論只會惡化延遲。兩者要解的問題已由待辦第 3 項（LLM 意圖分類，實測 12/12、零額外延遲）以更低成本覆蓋。若未來語料跨足多領域、或改用推理速度足夠的硬體，可重新評估 Cross-Encoder 作為檢索精度（而非離題過濾）的手段。
+
+- **異質文檔重排與配額控制——量測後判斷不需處理**（`src/graph.py` 的 `retrieve_context`）— 原列為待辦，2026-09-10 實測後撤下。跨來源重排的前提（兩種文檔在同一名次空間混排）不成立：四次檢索各自 `ORDER BY` 後串接，財報與新聞從未進入同一個排序，混排問題已被現行架構迴避，再加一層重排是重解已解的問題。配額（主檢索 5／補新聞 3／補市場新聞 2）亦維持不變：原本疑慮是純財報問題固定補 3 條新聞屬浪費，但實測跑完整的 `retrieve_context` → `generate` 並比對引用編號，補進來的新聞確實被引用（「微軟營收結構」一題決策卡直接引用兩條新聞）。這與決策卡設計一致——`trend_section` 的「利多」「風險」「下一個關鍵事件」「建議追蹤指標」四欄硬性必填，「建議傾向」明文要求財報＋新聞＋行情三者齊備，砍掉新聞會讓這些欄位失去素材。結論：那 3 條新聞是必要成本，不是浪費。
 
 - **回應延遲過長，架構層面已無可省**（`src/graph.py` 的 `generate` 節點）— 單題總耗時 186 至 470 秒。三個可行方向已於 09-09 收斂：`_trim_for_llm` 裁掉 agent 迴圈重複傳遞的 context（降低 context 膨脹，不改善延遲）、`route_after_tools` 在資料明顯足夠時跳過第二輪 agent 決策（結構性省下一次 LLM 呼叫，該節點原佔 82 至 106 秒）、決策卡字數約束經 A/B 實測反使輸出變長 35% 並遺漏免責聲明，已排除。另兩項候選亦已排除：合併 `rewrite_question`/`extract_filters` 僅佔 3%；換用較小或 MLX 版本的模型會先失去 tool calling 與結構化輸出能力。**剩餘瓶頸是本地模型的生成速度本身（穩定在每秒約 10 字，`generate` 一題需 90 至 160 秒），屬硬體限制而非架構問題**，換用推理速度更高的硬體才會改變，在此之前重新評估軟體層方向不具效益。詳見 2026-09-08、09-09 章節。
 - **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前覆蓋純函式與資料轉換層（`assemble`、`agent_route`、MCP tool 的回傳格式、`fetch_missing_data`、格式化函式等），`generate` 因直接耦合本地 LLM 未做 mock、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測生成節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
@@ -304,6 +299,46 @@ ASML 財報僅 5 個 chunk、2,923 字元，內容全是 SEC 表頭、地址與�
 ASML 仍只有單一申報期別（2026-07-15），跨期比較問題依舊答不出來——內容完整性與期別覆蓋是兩件獨立的事，重抓不會生出上一季的申報。
 
 `fb24dbc` 之前入庫的資料無自動偵測機制，本次靠人工比對字數發現。目前庫內僅 ASML 一例，已處理。
+
+---
+
+## 2026-09-10　離題查詢攔截與放寬告知
+
+### 背景
+
+檢索品質待辦的前兩項：相似度門檻與階層化放寬。兩項的前提都先量測再定奪，結果與原本的判斷不同。
+
+### 一、離題查詢：門檻走不通，改用意圖分類
+
+先量測分數分布（live DB 3,656 chunks／8 家公司，40 題）：離題查詢最高 0.537，財經查詢最低 0.450，兩區間重疊。任何單一門檻都無法兼顧——0.50 漏放 4 題誤殺 1 題，0.54 漏放 0 題誤殺 2 題。
+
+過程中修正了一個錯誤的因果判斷。原以為「今天／明天」這類時間詞與新聞標題的時間特徵共振而墊高分數，實測不成立：拿掉「今天」分數僅降 0.004，而無時間詞的「今天心情不好」仍有 0.52。真正原因是短句中文閒聊對本語料的相似度基線本就落在 0.50 附近。
+
+最終作法是在既有 `ExtractedFilters` 加 `in_scope: bool`，由 `extract_filters` 現有的 LLM 呼叫一併判定，22 題端到端實測全對，且因併進既有呼叫而非新增節點，額外延遲為零。離題時走新增的 `off_topic` 節點直接請使用者改問，形狀與既有的 `ask_market` 對稱（本輪不檢索、不補抓、直接收工）。
+
+門檻方案的殘留一併清除。曾試過保留門檻當防呆（`in_scope` 判離題時再確認庫內確實沒資料），實測反而更差：「今天天氣如何」0.51、「今天心情不好」0.52 都越過門檻，把正確的判定推翻，準確率從 22/22 掉到 19/22。**弱訊號否決強訊號只會損失準確率**，故移除門檻與 `similarity_search` 的 `min_similarity` 參數。
+
+### 二、階層化放寬：前提不成立，只補告知
+
+待辦設想「時間 → 類型 → 公司」三層漸進降級。但 `news_since_days` 的 SQL 條件是 `(doc_type != 'news' OR published_at >= ...)`，時間窗只作用於新聞，財報不受影響——待辦舉的「2330 最近一週的財報查無結果」實測回 5 筆財報，永遠不會空。三層降級沒有對應的真實失敗案例，不做。
+
+真正缺的是另一半：現行放寬完全靜默。已在 `retrieve_context` 放寬時於每筆 chunk 標 `relaxed="doc_type"`，`search_knowledge_base` 的 header 據此多印一句提示，避免模型把新聞當成它要的財報直接引用。
+
+### 三、順帶修掉的兩個問題
+
+- **門檻誤觸發放寬（實作過程中自己引入）**：門檻原本套在所有檢索路徑上，「MSFT 近兩季EPS趨勢」的財報最高分只有 0.497，被清空後誤觸發 `doc_type` 放寬，回一堆新聞卻宣稱「找不到指定類型」。移除門檻後消失。
+- **`resolve_market` 硬取 `state["question"]`（既有脆弱點）**：該函式其他欄位一律用 `.get()`，唯獨新增的離題判斷硬取，缺 `question` 的 state 會 `KeyError`。已改用 `.get()`。
+
+### 改動內容
+
+- `src/graph.py`：`ExtractedFilters` 加 `in_scope`（預設 True，漏填時當正常問題）；`extract_filters` 的 prompt 加第 7 點判準；新增 `_is_off_topic`／`off_topic` 節點與 `route_after_resolve_market` 的第三個出口；`retrieve_context` 放寬時標 `relaxed`。
+- `src/i18n.py`：新增 `off_topic` 文案（中英各一）。
+- `src/mcp_server.py`：header 依 `relaxed` 補一句放寬提示。
+- `tests/test_off_topic.py`：新增。`tests/test_dual_market.py`：`_FakeParsed` 補 `in_scope` 與真實 schema 同步。
+
+### 驗證
+
+單元測試 20 支全過；`eval_rag_retrieval.py` 13/13（放寬提示只出現在 JPM、SPCX 兩題庫內確實無財報的案例）；離題判斷端到端 22/22。
 
 ---
 
