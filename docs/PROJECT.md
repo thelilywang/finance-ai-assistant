@@ -15,7 +15,10 @@ A local RAG assistant for stock financial reports and news, built with LangGraph
 flowchart TD
     U[User question] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> AG[agent]
+    EF --> RM[resolve_market]
+    RM -->|"off-topic (not a finance question)"| OT[off_topic]
+    RM -->|"dual-listed, market not stated"| AM[ask_market]
+    RM -->|otherwise| AG[agent]
     AG -->|LLM picks a tool| TL[tools]
     AG -->|no tool call, or round limit reached| AS[assemble]
     TL -->|"news fresh enough (<=3d; must be today's when asked for 'latest')"| AS
@@ -24,6 +27,8 @@ flowchart TD
     AS -->|nothing retrieved| NR[no_result]
     GEN --> A[Answer + sources + decision card]
     NR --> B["Honest 'no data' reply + market snapshot"]
+    OT --> C[Ask the user to rephrase as a finance question]
+    AM --> D[Ask which market: TW or US]
 
     subgraph Data pipeline
         SRC[EDGAR / TWSE+TPEx API / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
@@ -36,12 +41,14 @@ flowchart TD
 
 ### LangGraph node flow
 
-`rewrite_question → extract_filters → agent ⇄ tools → assemble → (generate | no_result)`
+`rewrite_question → extract_filters → resolve_market → (off_topic | ask_market | agent ⇄ tools → assemble → (generate | no_result))`
 
 | Node | Role |
 |---|---|
 | `rewrite_question` | With chat history, rewrites a follow-up ("what about margins?") into a standalone question so embedding retrieval works; passes through when history is empty |
 | `extract_filters` | LLM extracts company code (TW 4-digit or US ticker) / doc type from the question as retrieval filters (null = no filter) |
+| `resolve_market` | Aligns the company code to the market the user asked for, and decides whether this turn stops early: off-topic questions go to `off_topic`, dual-listed tickers with no market stated go to `ask_market` |
+| `off_topic` | The question is outside finance (weather, recipes, chit-chat), judged by the `in_scope` field `extract_filters` already returns. Replies asking the user to rephrase; no retrieval, no fetching |
 | `agent` | Binds the MCP tools to the LLM and lets it decide which tool to call and whether to call another. Freshness rules live in the tool docstrings (`src/mcp_server.py`), not in code. `_trim_for_llm` strips the structured `chunks` from the copy sent to the model, keeping only `summary_for_llm` — the full payload stays in state for `assemble`. Capped at 4 tool rounds |
 | `tools` | Runs the tool the LLM chose (`ToolNode`). Afterwards `route_after_tools` short-circuits straight to `assemble` when the retrieved news is clearly fresh enough (within 3 days, tightened to "must be today's" when the question carries a recency keyword), saving one redundant agent round; every other case — empty, no news, stale, undated, or a fetch tool just ran — goes back to `agent` so the LLM keeps the fetch decision |
 | `assemble` | Restores the tool results into the fields downstream nodes already expect: `retrieved` from the last `search_knowledge_base` call, plus `fetched`/`fetch_results` for `no_result` |
@@ -122,7 +129,10 @@ Re-running any command on the same source replaces old chunks (idempotent).
 flowchart TD
     U[使用者問題] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> AG[agent]
+    EF --> RM[resolve_market]
+    RM -->|"離題（非財經問題）"| OT[off_topic]
+    RM -->|"雙掛牌且未指明市場"| AM[ask_market]
+    RM -->|其餘情況| AG[agent]
     AG -->|LLM 選定要呼叫的 tool| TL[tools]
     AG -->|不再呼叫 tool 或已達輪數上限| AS[assemble]
     TL -->|"新聞夠新（3 天內；問「最新」時須為今日）"| AS
@@ -131,6 +141,8 @@ flowchart TD
     AS -->|完全沒有檢索結果| NR[no_result]
     GEN --> A[回答 + 引用來源 + 決策卡]
     NR --> B[誠實告知查無資料 + 市場快照]
+    OT --> C[請使用者改問財經相關問題]
+    AM --> D[反問要看台股還是美股]
 
     subgraph 資料管線
         SRC[EDGAR / 證交所+櫃買 API / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
@@ -143,13 +155,15 @@ flowchart TD
 
 ### LangGraph 節點流程
 
-`rewrite_question → extract_filters → agent ⇄ tools → assemble → (generate | no_result)`
+`rewrite_question → extract_filters → resolve_market → (off_topic | ask_market | agent ⇄ tools → assemble → (generate | no_result))`
 
 | 節點 | 職責 |
 |---|---|
 | `rewrite_question` | 有對話歷史時,把追問(「那毛利率呢?」)改寫成獨立問題,讓 embedding 檢索有效;無歷史直接通過 |
 | `extract_filters` | 用 LLM 從問題抽出公司代號(台股 4 碼或美股 ticker)/文件類型作為檢索 filter(null 表示不過濾) |
 | `agent` | 把 MCP tool 綁給 LLM,由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。時效判準寫在 tool 的 docstring(`src/mcp_server.py`)而非程式碼裡。`_trim_for_llm` 會把送進模型的複本中的結構化 `chunks` 裁掉、只留 `summary_for_llm`,完整內容留在 state 供 `assemble` 使用。tool 呼叫上限 4 輪 |
+| `resolve_market` | 把公司代號對齊到使用者要的市場,並決定本輪是否提早收工:離題問題轉 `off_topic`,雙掛牌卻沒指明市場轉 `ask_market` |
+| `off_topic` | 問題不在財經範圍(天氣、食譜、閒聊),依 `extract_filters` 一併抽出的 `in_scope` 判定。直接請使用者改問,本輪不檢索也不補抓 |
 | `tools` | 執行 LLM 選定的 MCP tool(`ToolNode`)。之後由 `route_after_tools` 判斷:檢索到的新聞明顯夠新時(3 天內,`extract_filters` 抽出的時效窗在 7 天內時收緊為「必須是今天」)直接跳到 `assemble`,省下一輪重複的 agent 決策;其餘情況(全空、沒有新聞、已過期、日期不明,或剛跑完補抓 tool)一律回 `agent`,補抓與否仍由 LLM 決定 |
 | `assemble` | 把 tool 回傳結果還原成下游節點原本就在用的欄位:`retrieved` 取最後一次 `search_knowledge_base` 的結果,另填 `fetched`/`fetch_results` 供 `no_result` 使用 |
 | `generate` | 僅根據檢索到的 chunk 回答並標示 `[來源N]`,並併入即時 yfinance 市場快照(股價、52 週區間、本益比、目標價、分析師評等,加上分析師共識:當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss、下次財報日——僅供 prompt 參考,不算引用來源,失敗時靜默降級),結尾固定追加決策卡一節(附引用的事實、推論、估值、市場共識與門檻、情境解讀、法說會關注清單、立場、觸發條件、關鍵事件、觀察指標)與免責聲明;立場只在財報+新聞+市場數據都支持時才給,但觸發條件/關鍵事件/觀察指標一律要有,回答不會整段棄權 |

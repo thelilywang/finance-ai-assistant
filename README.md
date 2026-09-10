@@ -67,7 +67,10 @@ See steps 1-4 of Quick Start above (Ollama models, database, Python env, Google 
 flowchart TD
     U[User question] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> AG[agent]
+    EF --> RM[resolve_market]
+    RM -->|"off-topic (not a finance question)"| OT[off_topic]
+    RM -->|"dual-listed, market not stated"| AM[ask_market]
+    RM -->|otherwise| AG[agent]
     AG -->|LLM picks a tool| TL[tools]
     AG -->|no tool call, or round limit reached| AS[assemble]
     TL -->|"news fresh enough (<=3d; must be today's when asked for 'latest')"| AS
@@ -76,6 +79,8 @@ flowchart TD
     AS -->|nothing retrieved| NR[no_result]
     GEN --> A[Answer + sources + decision card]
     NR --> B["Honest 'no data' reply + market snapshot"]
+    OT --> C[Ask the user to rephrase as a finance question]
+    AM --> D[Ask which market: TW or US]
 
     subgraph Data pipeline
         SRC[EDGAR / TWSE+TPEx API / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
@@ -174,7 +179,10 @@ chainlit run src/app.py -w    # 開 http://localhost:8000,用 Google 帳號登�
 flowchart TD
     U[使用者問題] --> RW[rewrite_question]
     RW --> EF[extract_filters]
-    EF --> AG[agent]
+    EF --> RM[resolve_market]
+    RM -->|"離題（非財經問題）"| OT[off_topic]
+    RM -->|"雙掛牌且未指明市場"| AM[ask_market]
+    RM -->|其餘情況| AG[agent]
     AG -->|LLM 選定要呼叫的 tool| TL[tools]
     AG -->|不再呼叫 tool 或已達輪數上限| AS[assemble]
     TL -->|"新聞夠新（3 天內；問「最新」時須為今日）"| AS
@@ -183,6 +191,8 @@ flowchart TD
     AS -->|完全沒有檢索結果| NR[no_result]
     GEN --> A[回答 + 引用來源 + 決策卡]
     NR --> B[誠實告知查無資料 + 市場快照]
+    OT --> C[請使用者改問財經相關問題]
+    AM --> D[反問要看台股還是美股]
 
     subgraph 資料管線
         SRC[EDGAR / 證交所+櫃買 API / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
