@@ -53,6 +53,8 @@ class GraphState(TypedDict):
     model: str  # 本輪使用的 Ollama 模型，由 UI 選單決定；空值則用 config.LLM_MODEL
     market: str | None  # 使用者明講的市場（tw/us/both），沒講則 None
     ask_market: bool  # 雙掛牌但沒指明市場，需先反問使用者
+    in_scope: bool  # extract_filters 判定問題是否屬財經範疇
+    off_topic: bool  # 問題不在財經範圍，本輪不檢索、直接請使用者改問
     peer_company: str | None  # 另一市場的對應代號，反問與併陳兩用
     messages: Annotated[list[BaseMessage], add_messages]  # agent <-> tools 的往返記錄
 
@@ -129,6 +131,9 @@ class ExtractedFilters(BaseModel):
     # 使用者是否明講了要看哪個市場。雙掛牌公司（台積電＝2330／TSM）兩邊數字的幣別、
     # 期間與每股基準都不同，沒講清楚就直接挑一邊等於替使用者猜，故據此決定要不要反問。
     market: Literal["tw", "us", "both"] | None = None
+    # 問題是否屬於財經範疇。預設 True：模型漏填時當成正常問題照走檢索，
+    # 漏放只是多跑一輪，誤判成離題則是正常問題直接被拒答，代價高得多。
+    in_scope: bool = True
 
     @field_validator("company")
     @classmethod
@@ -175,6 +180,11 @@ def extract_filters(state: GraphState) -> GraphState:
    - 講「美股」「ADR」「美國」，或直接給美股 ticker（TSM）→ "us"
    - 只講中文公司名（「台積電」）而沒提市場 → null，不要自己猜
    注意 company 一律照第 1 點填代號，market 只反映「使用者有沒有講」，兩者互不影響
+7. in_scope: 問題是否屬於「上市公司財報、股市、投資、總體經濟」範疇。
+   屬於（含一般性的財經知識問題，如「法說會通常看什麼」「除權息要注意什麼」
+   「電動車供應鏈有哪些」，這類沒指名公司但仍是財經問題）→ true
+   完全不屬於（天氣、食物、健康、旅遊、程式、閒聊）→ false
+   拿不定主意就填 true——漏放只是多跑一輪檢索，誤判會讓正常問題直接被拒答
 
 使用者問題：{state['question']}
 """
@@ -183,7 +193,7 @@ def extract_filters(state: GraphState) -> GraphState:
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
         print(f"[extract_filters] 結構化輸出失敗：{e}")
         return {**state, "company": None, "doc_type": None, "news_since_days": None,
-                "market": None}
+                "market": None, "in_scope": True}
 
     if parsed.status == "error":
         print(f"[extract_filters] {parsed.error_message}")
@@ -193,7 +203,8 @@ def extract_filters(state: GraphState) -> GraphState:
     market = state.get("market") or parsed.market
     company = parsed.company or (state.get("company") if state.get("market") else None)
     return {**state, "company": company, "doc_type": parsed.doc_type,
-            "news_since_days": parsed.news_since_days, "market": market}
+            "news_since_days": parsed.news_since_days, "market": market,
+            "in_scope": parsed.in_scope}
 
 
 def _last_dual_listed(history: list[tuple[str, str]]) -> str | None:
@@ -208,6 +219,26 @@ def _last_dual_listed(history: list[tuple[str, str]]) -> str | None:
             if tw in user or name in user or TW_US_DUAL_LISTED[tw] in text.split():
                 return tw
     return None
+
+
+def _is_off_topic(state: GraphState) -> bool:
+    """問題是否完全不在財經範圍（天氣、食譜、閒聊），需請使用者改問。
+
+    只看 extract_filters 抽出的 in_scope——那是 LLM 讀懂問題後的判定，
+    22 題實測全對，包含相似度門檻擋不掉的「今天天氣如何」「明天會下雨嗎」
+    與門檻會誤殺的「法說會通常看什麼」「電動車供應鏈有哪些」。
+    判斷併在既有那次 LLM 呼叫裡，不增加延遲。
+
+    ponytail: 曾用相似度門檻當防呆（in_scope 判離題時再確認庫內真的沒資料），
+    實測反而更差——短句中文閒聊對本語料的相似度天然落在 0.50 附近，
+    「今天天氣如何」0.51、「今天心情不好」0.52 都會越過門檻，把正確的判定推翻。
+    弱訊號否決強訊號只會損失準確率，故移除。若日後換模型導致 in_scope 不穩，
+    要補的是 few-shot 例子或校準提示，不是把門檻加回來。
+
+    有指名公司一律不判離題——company 過濾本身就是最強的條件，庫內沒這家會直接回空，
+    走既有的補抓流程（fetch_company_data），不該在這裡攔下。
+    """
+    return not state.get("company") and not state.get("in_scope", True)
 
 
 def resolve_market(state: GraphState) -> GraphState:
@@ -225,19 +256,23 @@ def resolve_market(state: GraphState) -> GraphState:
 
     peer = dual_listed_peer(company) if company else None
     if peer is None:
-        return {**state, "company": company, "ask_market": False}
+        return {**state, "company": company, "ask_market": False,
+                "off_topic": _is_off_topic({**state, "company": company})}
 
     if market is None:
         # 沒講市場：停下來問，不要替使用者猜一邊
-        return {**state, "company": company, "ask_market": True, "peer_company": peer}
+        return {**state, "company": company, "ask_market": True, "peer_company": peer,
+                "off_topic": False}
 
     if market == "both":
-        return {**state, "company": company, "ask_market": False, "peer_company": peer}
+        return {**state, "company": company, "ask_market": False, "peer_company": peer,
+                "off_topic": False}
 
     # 講了市場：把 company 對齊到該市場的代號（問「台積電美股」會抽到 2330，要換成 TSM）
     want_tw = market == "tw"
     company = company if is_tw_ticker(company) == want_tw else peer
-    return {**state, "company": company, "ask_market": False, "peer_company": None}
+    return {**state, "company": company, "ask_market": False, "peer_company": None,
+            "off_topic": False}
 
 
 # 補給決策卡當市場脈絡的新聞條數；候選要多撈幾倍，去重後才補得滿
@@ -526,7 +561,12 @@ def route_after_assemble(state: GraphState) -> str:
 
 
 def route_after_resolve_market(state: GraphState) -> str:
-    return "ask_market" if state.get("ask_market") else "agent"
+    """本輪要不要檢索。兩種「先回問使用者就收工」的情況集中在這裡分岔。"""
+    if state.get("ask_market"):
+        return "ask_market"
+    if state.get("off_topic"):
+        return "off_topic"
+    return "agent"
 
 
 def unique_sources(retrieved: list[dict]) -> list[str]:
@@ -623,6 +663,11 @@ def no_result(state: GraphState) -> GraphState:
     return {**state, "answer": answer}
 
 
+def off_topic(state: GraphState) -> GraphState:
+    """問題不在財經範圍：直接請使用者改問，本輪不檢索也不補抓。"""
+    return {**state, "answer": t(state.get("lang", "zh"), "off_topic"), "retrieved": []}
+
+
 def ask_market(state: GraphState) -> GraphState:
     """雙掛牌但沒指明市場：直接回問使用者要看哪一邊，本輪不檢索也不抓資料。
 
@@ -645,6 +690,7 @@ async def build_graph():
     graph.add_node("extract_filters", extract_filters)
     graph.add_node("resolve_market", resolve_market)
     graph.add_node("ask_market", ask_market)
+    graph.add_node("off_topic", off_topic)
     graph.add_node("agent", agent)
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("assemble", assemble)
@@ -657,7 +703,7 @@ async def build_graph():
     # 雙掛牌又沒指明市場就先反問，本輪不檢索——猜錯市場給的是看似合理的錯誤數字
     graph.add_conditional_edges(
         "resolve_market", route_after_resolve_market,
-        {"ask_market": "ask_market", "agent": "agent"},
+        {"ask_market": "ask_market", "off_topic": "off_topic", "agent": "agent"},
     )
     graph.add_conditional_edges(
         "agent", agent_route, {"tools": "tools", "assemble": "assemble"},
@@ -673,5 +719,6 @@ async def build_graph():
     graph.add_edge("generate", END)
     graph.add_edge("no_result", END)
     graph.add_edge("ask_market", END)
+    graph.add_edge("off_topic", END)
 
     return graph.compile()

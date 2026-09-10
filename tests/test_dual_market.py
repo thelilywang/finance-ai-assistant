@@ -103,6 +103,7 @@ import src.graph as _g
 class _FakeParsed:
     status, error_message = "ok", None
     company = doc_type = news_since_days = market = None
+    in_scope = True  # 與 ExtractedFilters 同步；漏了會在 extract_filters 取值時炸開
 
 
 _orig_llms = _g._llms

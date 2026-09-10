@@ -44,6 +44,11 @@ STRINGS = {
             "問題若有指名上市公司（代號或 ticker）會自動抓取資料，"
             "也可以手動匯入：python -m src.ingest --file <路徑> --company <代號>，或換個問法。"
         ),
+        "off_topic": (
+            "這個問題看起來不在財經資料的範圍內。本助理只回答上市公司的財報與新聞相關問題。\n\n"
+            "請改問特定公司的財務表現、營運狀況或市場動態，例如「台積電最新一季毛利率如何」"
+            "或「NVDA 近期有什麼新聞」。"
+        ),
         "answer_lang_rule": "- 全文以繁體中文回答",
         "trend_section": (
             "## 📈 投資決策參考\n"
@@ -126,6 +131,13 @@ STRINGS = {
             "No filings or news related to this question were found in the database. "
             "If your question names a listed company (ticker or code), data will be auto-fetched; "
             "you can also import manually: python -m src.ingest --file <path> --company <ticker>, or rephrase your question."
+        ),
+        "off_topic": (
+            "This question appears to fall outside the scope of financial data. "
+            "This assistant only answers questions about listed companies' filings and news.\n\n"
+            "Please ask about a specific company's financial performance, operations, or market "
+            "activity, such as \"What was TSMC's gross margin last quarter?\" or "
+            "\"Any recent news on NVDA?\"."
         ),
         "answer_lang_rule": "- Answer entirely in English",
         "trend_section": (
