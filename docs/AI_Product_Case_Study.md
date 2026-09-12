@@ -545,7 +545,15 @@ extract_filters
 
 ↓
 
-retrieve
+resolve_market
+
+↓
+
+agent ⇄ tools     (the LLM decides which MCP tool to call, and whether to fetch more)
+
+↓
+
+assemble
 
 ↓
 
@@ -555,6 +563,10 @@ generate
 
 response
 ```
+
+Retrieval is no longer a node of its own. It is an MCP tool the agent calls, so the
+decision of whether the data is fresh enough to answer with — previously a hard-coded
+rule — now belongs to the model, with a tool-round cap guaranteeing termination.
 
 This design simplifies testing and enables independent optimization of each component.
 
@@ -1630,7 +1642,15 @@ extract_filters
 
 ↓
 
-retrieve
+resolve_market
+
+↓
+
+agent ⇄ tools     (由 LLM 決定要呼叫哪個 MCP tool、要不要補抓資料)
+
+↓
+
+assemble
 
 ↓
 
@@ -1640,6 +1660,9 @@ generate
 
 response
 ```
+
+檢索已不是獨立節點,而是 agent 呼叫的 MCP tool。「資料夠不夠新、要不要補抓」原本是寫死的程式規則,
+現在交由模型判斷,並以 tool 呼叫輪數上限保證收斂。
 
 這個設計讓測試更簡單,也讓每個元件可以獨立優化。
 
