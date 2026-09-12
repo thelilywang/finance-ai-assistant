@@ -35,7 +35,12 @@ try:
         log.info("測試事件", extra={"fields": {"elapsed_ms": 42, "node": "generate"}})
         logging_setup.log_duration(log, "耗時事件", time.monotonic(), node="agent")
 
-        logfile = Path(tmp) / "app.log"
+        # 容器內是 app.log，host 上要自動變成 app-local.log，兩邊不得共寫一檔
+        name = logging_setup._log_name("app")
+        in_docker = Path("/.dockerenv").exists()
+        assert name == ("app" if in_docker else "app-local"), name
+
+        logfile = Path(tmp) / f"{name}.log"
         assert logfile.exists(), "logfile 未建立"
         lines = [l for l in logfile.read_text(encoding="utf-8").splitlines() if l.strip()]
         assert len(lines) == 2, f"應寫入 2 行，實際 {len(lines)}"
@@ -58,8 +63,8 @@ try:
         # 按日期分檔：切檔後的檔名要帶日期且仍是 .log，方便 glob 與排序
         file_handler = next(h for h in logging.getLogger().handlers
                             if hasattr(h, "namer"))
-        rotated = file_handler.namer(str(Path(tmp) / "app.log.2026-09-13"))
-        assert Path(rotated).name == "app-2026-09-13.log", rotated
+        rotated = file_handler.namer(str(Path(tmp) / f"{name}.log.2026-09-13"))
+        assert Path(rotated).name == f"{name}-2026-09-13.log", rotated
 
         # 例外要記進 exc 欄位
         logging.getLogger().handlers[1].flush()

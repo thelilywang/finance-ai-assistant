@@ -43,10 +43,21 @@ class _JsonLinesFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+def _log_name(service: str) -> str:
+    """容器內用服務名，容器外再加 -local。
+
+    LOG_DIR 是 bind mount，host 直接跑測試時會寫進容器同一個檔。兩邊連的
+    DB 不同（host 沒開 5432，只會連線失敗），混在一起會讓回測把本機測試
+    的雜訊當成正式環境數據。
+    """
+    return service if Path("/.dockerenv").exists() else f"{service}-local"
+
+
 def _file_handler(service: str) -> logging.Handler:
     log_dir = Path(config.LOG_DIR)
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    service = _log_name(service)
     # 按日期而非大小輪替：大小輪替的 .1/.2 序號看不出日期，回測要逐檔翻。
     # app 與 mcp-server 是兩個 container，各寫各的檔——共寫一檔在切檔時會互相覆蓋。
     handler = TimedRotatingFileHandler(

@@ -18,6 +18,8 @@
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
 6. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
    logfile 已逐節點記錄耗時（`rewrite_question`／`extract_filters`／`agent`／`generate`／`retrieve`），同一題以 `qid` 串連。需累積一段時間的真實使用資料後，分析各節點耗時分佈：已知瓶頸是本地模型生成，但**佔比多少尚未用數據確認**，這是決定下一輪優化該投在哪裡的依據（例如若 `agent` 的 tool loop 輪數才是主因，優化 `generate` 就是做白工）。分析方式：`data/logs/*.log` 是 JSON Lines，可直接用 pandas 或 jq 彙總。
+
+   **2026-09-13 首次嘗試分析：資料量不足，未能得出結論。** 當日 203 行紀錄中，八個 `log_duration` 觀測點只有 `retrieve_context` 觸發過 6 次，四個 LLM 節點（`rewrite_question`／`extract_filters`／`agent`／`generate`）**一次都沒有**——logging 落地後尚未有真人問過完整的題目，六筆全來自 smoke test。**要等實際使用累積後再分析，不要拿 smoke test 的數字當結論。** 判斷可以開始分析的門檻：`generate` 事件累積約 30 筆以上（涵蓋不同題型與是否命中快取）。
 7. **其餘 `print` 遷移至 logging**（`update.py` 34 處、`charts.py` 7、`app.py` 6、`market.py` 5、`ingest.py` 4、`cli.py` 3、`i18n.py` 1）
    2026-09-13 只遷移了 AI 路徑（`graph.py`、`mcp_server.py`）。其餘屬 CLI 給人看的進度輸出，與 AI 耗時追蹤無關，優先度低。要做時注意 CLI 的即時進度顯示與 logging 的緩衝行為不同。
 8. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
@@ -335,6 +337,12 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
   切檔在台北午夜——`docker-compose.yml` 已設 `TZ=Asia/Taipei`，
   與專案其他「今天」的判斷（資料時效、MOPS 民國年）一致。
 - **兩個服務各寫各的檔**。`TimedRotatingFileHandler` 在多程序共寫同一檔時，切檔會互相覆蓋。
+- **容器外執行時檔名加 `-local` 後綴**（`_log_name()`）。`LOG_DIR` 在 bind mount 上，
+  host 直接跑測試會寫進容器同一個 `app.log`。這不只是吵——host 沒有 `PGVECTOR_URL`
+  （只在 `docker-compose.yml` 設定），會 fallback 到 `localhost:5432`，而 DB 未對 host 開 port，
+  於是每次 host 執行都往共用檔灌一批連線失敗。以 `/.dockerenv` 是否存在判斷執行環境。
+  這個問題是 2026-09-13 首次嘗試分析 logfile 時發現的：176／203 行是本機測試的雜訊，
+  若不隔離，未來的回測會把它們當成正式環境的故障。
 - 保留 `StreamHandler`，`docker logs` 的既有行為不變。
 
 記錄的欄位：四個 LLM 呼叫點（`rewrite_question`／`extract_filters`／`agent`／`generate`）
