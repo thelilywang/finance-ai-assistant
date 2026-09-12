@@ -3,6 +3,7 @@
 用法：
     chainlit run src/app.py -w    # 開 http://localhost:8000
 """
+import logging
 import os
 import re
 import sys
@@ -20,22 +21,26 @@ from chainlit.input_widget import Select
 from src import config
 from src.graph import build_graph, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
+from src.logging_setup import setup_logging
 from src.tickers import is_tw_ticker
 from src.vectorstore import delete_news_older_than, delete_threads_older_than
+
+setup_logging("app")  # chainlit 以模組載入方式啟動，沒有 __main__ 可掛
+log = logging.getLogger("app")
 
 try:  # 啟動時清過期新聞，DB 未起不擋 app
     pruned = delete_news_older_than(config.NEWS_RETENTION_DAYS)
     if pruned:
-        print(f"[app] 已清除 {pruned} 筆過期新聞 chunk")
+        log.info("已清除過期新聞 chunk", extra={"fields": {"pruned": pruned}})
 except Exception as e:
-    print(f"[app] 新聞清理略過：{e}")
+    log.warning("新聞清理略過：%s", e)
 
 try:  # 啟動時清過期對話 thread，DB 未起不擋 app
     pruned_threads = delete_threads_older_than(config.THREAD_RETENTION_DAYS)
     if pruned_threads:
-        print(f"[app] 已清除 {pruned_threads} 筆過期對話 thread")
+        log.info("已清除過期對話 thread", extra={"fields": {"pruned": pruned_threads}})
 except Exception as e:
-    print(f"[app] 對話清理略過：{e}")
+    log.warning("對話清理略過：%s", e)
 
 
 @cl.data_layer
@@ -190,7 +195,7 @@ async def _init_session():
         cl.user_session.set("graph", await build_graph())
         await loading.remove()
     except Exception as e:  # noqa: BLE001
-        print(f"[app] MCP server 連線失敗：{e}")
+        log.error("MCP server 連線失敗：%s", e)
         loading.content = t(browser, "connect_failed", error=e)
         await loading.update()
 
@@ -310,7 +315,7 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
                 if fig is not None:
                     figures.append((name, fig))
             except Exception as e:  # noqa: BLE001
-                print(f"[app] {name} 圖表生成失敗：{e}")
+                log.warning("圖表生成失敗", extra={"fields": {"chart": name, "error": str(e)}})
 
     msg.elements = [
         cl.Plotly(name=name, figure=fig, display="inline") for name, fig in figures

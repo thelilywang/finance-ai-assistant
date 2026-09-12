@@ -19,12 +19,14 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import config
 from .graph import fetch_missing_data, retrieve_context
+from .logging_setup import setup_logging
 from .tickers import normalize_ticker
 from .update import fetch_market_news
 
@@ -192,9 +194,10 @@ def _add_bearer_auth(app):
 if __name__ == "__main__":
     import uvicorn
 
+    setup_logging("mcp")
     http_app = mcp.streamable_http_app()
     if config.MCP_AUTH_TOKEN:
         http_app = _add_bearer_auth(http_app)
     else:
-        print("[mcp] MCP_AUTH_TOKEN 未設定，未啟用身分驗證（僅適合本機開發）")
+        logging.getLogger("mcp").warning("MCP_AUTH_TOKEN 未設定，未啟用身分驗證（僅適合本機開發）")
     uvicorn.run(http_app, host="0.0.0.0", port=8000)

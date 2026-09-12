@@ -35,6 +35,16 @@ CHUNK_OVERLAP = 120
 
 # 檢索參數
 TOP_K = 5
+# 同一問題在 agent tool loop 中常重複檢索；embedding 不依賴資料庫內容，故可短暫快取。
+# 0 代表關閉快取，方便除錯或量測冷快取基準。
+EMBEDDING_CACHE_MAX_ENTRIES = max(0, int(os.getenv("EMBEDDING_CACHE_MAX_ENTRIES", "256")))
+EMBEDDING_CACHE_TTL_SECONDS = max(0, int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "900")))
+
+# Logging：AI 執行耗時要能事後回測，故除了 stdout 另外落地成每日一檔的 JSON Lines。
+# 檔案落在 data/ 底下沿用既有的 volume 掛載（app 與 mcp-server 都掛了 ./data）。
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_DIR = os.getenv("LOG_DIR", "data/logs")
+LOG_BACKUP_DAYS = max(0, int(os.getenv("LOG_BACKUP_DAYS", "30")))
 
 # 資料/token 控制
 NEWS_RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "180"))

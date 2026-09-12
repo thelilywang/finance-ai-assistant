@@ -17,7 +17,13 @@ Graph 結構：
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
+import logging
+import threading
+import time
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from typing import Annotated, Literal, TypedDict
 
@@ -31,12 +37,13 @@ from pydantic import BaseModel, field_validator
 
 from . import config
 from .i18n import t
+from .logging_setup import log_duration
 from .market import get_market_snapshot
 from .tickers import (
     DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
     normalize_ticker, otc_adr_of,
 )
-from .vectorstore import similarity_search
+from .vectorstore import pool, similarity_search
 
 
 class GraphState(TypedDict):
@@ -91,6 +98,56 @@ def _llms(model: str) -> dict:
 
 embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
 
+log = logging.getLogger("graph")
+
+
+def _qid(question: str) -> str:
+    """同一題各節點共用的關聯鍵，回測時用來把一次問答的所有紀錄串起來。
+
+    GraphState 沒有 thread_id，加欄位會擴散到所有呼叫端；問題文字在 rewrite_question
+    之後就固定，拿它的短 hash 已足夠關聯，且不必把提問內容寫進 log。
+    """
+    return hashlib.sha1(question.encode()).hexdigest()[:8]
+
+# query embedding 只取決於模型、端點與問題文字，不會因為 doc_chunks 新增而失效。
+# 用程序內短 TTL/LRU 避免 agent 在同一題的 tool loop 重複打 Ollama；不落地，重啟即清空。
+_embedding_cache: OrderedDict[tuple[str, str, str], tuple[float, tuple[float, ...]]] = OrderedDict()
+_embedding_cache_lock = threading.RLock()
+
+
+def _clear_embedding_cache() -> None:
+    """清空 query embedding 快取；供測試與效能量測使用。"""
+    with _embedding_cache_lock:
+        _embedding_cache.clear()
+
+
+def _embed_query_cached(question: str) -> tuple[list[float], bool]:
+    """取得 query embedding，命中 TTL/LRU 快取時不重複呼叫 Ollama。回傳 (向量, 是否命中)。
+
+    鎖刻意涵蓋未命中的 embed 呼叫，避免多個同時抵達的相同問題產生重複請求。
+    Ollama 在此部署本來就是單一實體，序列化相同 query 的 cold miss 不降低有效吞吐。
+    命中與否回傳給呼叫端記錄，避免在鎖內做 I/O。
+    """
+    max_entries = config.EMBEDDING_CACHE_MAX_ENTRIES
+    ttl = config.EMBEDDING_CACHE_TTL_SECONDS
+    if max_entries == 0 or ttl == 0:
+        return list(embeddings.embed_query(question)), False
+
+    key = (config.EMBEDDING_MODEL, config.OLLAMA_BASE_URL, question)
+    with _embedding_cache_lock:
+        now = time.monotonic()
+        cached = _embedding_cache.pop(key, None)
+        if cached is not None and now - cached[0] <= ttl:
+            _embedding_cache[key] = cached  # pop + reinsert = 最近使用
+            return list(cached[1]), True
+
+        # 過期項已經 pop；失敗不可污染快取。
+        vector = tuple(embeddings.embed_query(question))
+        _embedding_cache[key] = (now, vector)
+        while len(_embedding_cache) > max_entries:
+            _embedding_cache.popitem(last=False)
+        return list(vector), False
+
 
 def _format_history(history: list[tuple[str, str]]) -> str:
     """把最近 3 輪對話排成「使用者/助理」逐行文字。"""
@@ -118,7 +175,10 @@ def rewrite_question(state: GraphState) -> GraphState:
 
 新問題：{state['question']}
 """
+    started = time.monotonic()
     rewritten = _llms(_model_of(state))["llm"].invoke(prompt).content.strip()
+    log_duration(log, "rewrite_question", started, node="rewrite_question",
+                 model=_model_of(state), qid=_qid(state["question"]))
     return {**state, "question": rewritten or state["question"]}
 
 
@@ -188,15 +248,21 @@ def extract_filters(state: GraphState) -> GraphState:
 
 使用者問題：{state['question']}
 """
+    qid = _qid(state["question"])
+    started = time.monotonic()
     try:
         parsed = _llms(_model_of(state))["filters"].invoke(prompt)
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
-        print(f"[extract_filters] 結構化輸出失敗：{e}")
+        log_duration(log, "extract_filters 結構化輸出失敗", started, node="extract_filters",
+                     model=_model_of(state), qid=qid, ok=False, error=str(e))
         return {**state, "company": None, "doc_type": None, "news_since_days": None,
                 "market": None, "in_scope": True}
+    log_duration(log, "extract_filters", started, node="extract_filters",
+                 model=_model_of(state), qid=qid, ok=True)
 
     if parsed.status == "error":
-        print(f"[extract_filters] {parsed.error_message}")
+        log.info("extract_filters 回報 error", extra={"fields": {
+            "node": "extract_filters", "qid": qid, "error": parsed.error_message}})
 
     # 呼叫端已指定市場（UI 按鈕點選）時不得被重抽的結果蓋掉——問句本身沒有市場字樣，
     # 重抽必然回 None，等於把使用者剛按下的選擇丟掉又問一次
@@ -286,50 +352,76 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
     news_since_days 由 extract_filters 的 LLM 從問題判斷（None 表示不限日期），
     四次檢索共用同一個值。不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
     """
-    query_vec = embeddings.embed_query(question)
-    docs = similarity_search(
-        query_vec, company=company, doc_type=doc_type,
-        news_since_days=news_since_days,
-    )
-    if not docs and doc_type:
-        # ponytail: doc_type 濾到空就放寬重查，避免問「財報」時把僅有的新聞全濾光
+    started = time.monotonic()
+    embed_started = started
+    query_vec, cache_hit = _embed_query_cached(question)
+    embed_ms = round((time.monotonic() - embed_started) * 1000)
+
+    # 同公司新聞與市場脈絡最後是否採用要看主檢索結果，但 SQL 本身不依賴它；先並行取
+    # 候選、後過濾即可省掉兩段等待。沒有 company 時維持單一主檢索，避免無意義工作。
+    if not company:
         docs = similarity_search(
-            query_vec, company=company,
+            query_vec, company=company, doc_type=doc_type,
             news_since_days=news_since_days,
         )
-        # 標記放寬過，讓呼叫端能告訴 LLM「拿到的不是原本要的類型」；
-        # 掛在每筆 dict 上而非改回傳結構，assemble 與既有測試都不受影響
-        for d in docs:
-            d["relaxed"] = "doc_type"
-    if company and docs and not any(d["doc_type"] == "news" for d in docs):
-        # ponytail: 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 LLM 決定要不要補抓
-        news = similarity_search(
-            query_vec, top_k=3, company=company, doc_type="news",
+        if not docs and doc_type:
+            docs = similarity_search(query_vec, company=company, news_since_days=news_since_days)
+            for d in docs:
+                d["relaxed"] = "doc_type"
+        log_duration(log, "retrieve_context", started, node="retrieve", parallel=False,
+                     qid=_qid(question), cache_hit=cache_hit, embed_ms=embed_ms, chunks=len(docs))
+        return docs
+
+    executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="rag-retrieve")
+    try:
+        primary: Future = executor.submit(
+            similarity_search, query_vec, company=company, doc_type=doc_type,
             news_since_days=news_since_days,
         )
-        docs = docs + news
-    if company and docs:
-        # ponytail: 補 2 條市場新聞給決策卡當市場脈絡。三個條件缺一不可：
-        # exclude_company 排掉查詢公司自己（否則語意檢索多半又撈回同一家，補了等於沒補；
-        # 市場新聞掃描認得出標題公司時會填代號、認不出才是 NULL，所以「全域」不等於
-        # company IS NULL，用排除法才涵蓋得完整）；order_by_recency 讓脈絡取新不取準；
-        # 多撈候選再去重回補，避免撈回的正好都已在 docs 裡而補成 0 條。
-        seen_ids = {d["id"] for d in docs}
-        market = similarity_search(
-            query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
+        company_news: Future = executor.submit(
+            similarity_search, query_vec, top_k=3, company=company, doc_type="news",
             news_since_days=news_since_days,
-            exclude_company=company, order_by_recency=True,
         )
-        extra = []
-        for d in market:
-            if d["id"] in seen_ids:
-                continue
-            seen_ids.add(d["id"])
-            extra.append(d)
-            if len(extra) == _MARKET_NEWS_K:
-                break
-        docs = docs + extra
-    return docs
+        market_news: Future = executor.submit(
+            similarity_search, query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
+            news_since_days=news_since_days, exclude_company=company, order_by_recency=True,
+        )
+
+        docs = primary.result()
+        if not docs and doc_type:
+            # doc_type 放寬是主結果為空才成立，無法預先決定；其餘兩個候選仍可平行等待。
+            docs = similarity_search(query_vec, company=company, news_since_days=news_since_days)
+            for d in docs:
+                d["relaxed"] = "doc_type"
+
+        if docs and not any(d["doc_type"] == "news" for d in docs):
+            # 財報問題也補 3 條同公司新聞給決策卡當素材。
+            docs = docs + company_news.result()
+
+        if docs:
+            # 補 2 條排除查詢公司的市場新聞；候選多撈後依既有順序去重回補。
+            seen_ids = {d["id"] for d in docs}
+            extra = []
+            for d in market_news.result():
+                if d["id"] in seen_ids:
+                    continue
+                seen_ids.add(d["id"])
+                extra.append(d)
+                if len(extra) == _MARKET_NEWS_K:
+                    break
+            docs = docs + extra
+        # pool 統計是決定 max_size 的依據：requests_waiting 持續大於 0 代表連線不夠用，
+        # 三段並行各佔一條，連線不足時會等到 timeout 而不是變慢
+        stats = pool.get_stats()
+        log_duration(log, "retrieve_context", started, node="retrieve", parallel=True,
+                     qid=_qid(question), cache_hit=cache_hit, embed_ms=embed_ms, chunks=len(docs),
+                     pool_waiting=stats.get("requests_waiting", 0),
+                     pool_size=stats.get("pool_size", 0))
+        return docs
+    finally:
+        # 未採用的預取不該拖慢「主檢索為空」或「主結果已有新聞」的回覆；已經開始的
+        # DB 查詢讓它自行收尾，尚未開始的則取消。需要的 future 都已在上方 result() 完成。
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
@@ -346,7 +438,7 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
         )
     except ImportError as e:  # 環境缺套件時降級成不抓，不炸整個對話
         msg = f"匯入失敗（環境缺套件？）：{e}"
-        print(f"[auto_fetch] {msg}")
+        log.error("auto_fetch %s", msg, extra={"fields": {"node": "auto_fetch"}})
         return [msg]
 
     calls = []
@@ -376,11 +468,15 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
 
     results = []
     for call in calls:
+        started = time.monotonic()
         try:
             results.append(call().detail)
+            log_duration(log, "auto_fetch 單一來源完成", started, node="auto_fetch",
+                         company=company, ok=True)
         except Exception as e:  # noqa: BLE001  單一來源失敗不中斷
             msg = f"抓取失敗：{e}"
-            print(f"[auto_fetch] {msg}")
+            log_duration(log, "auto_fetch 單一來源失敗", started, node="auto_fetch",
+                         company=company, ok=False, error=str(e))
             results.append(msg)
     return results
 
@@ -445,7 +541,8 @@ def _trim_for_llm(messages: list[BaseMessage]) -> list[BaseMessage]:
                 summary = json.loads(_tool_text(msg.content))["summary_for_llm"]
                 msg = msg.model_copy(update={"content": summary})
             except (json.JSONDecodeError, TypeError, KeyError) as e:
-                print(f"[agent] 檢索結果無法裁切，原樣送進模型：{e}")
+                log.warning("檢索結果無法裁切，原樣送進模型：%s", e,
+                            extra={"fields": {"node": "agent"}})
         trimmed.append(msg)
     return trimmed
 
@@ -454,9 +551,15 @@ async def agent(state: GraphState) -> GraphState:
     """把 MCP tool 綁給 LLM，由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。"""
     tools = await _mcp_client.get_tools()
     messages = state.get("messages") or [HumanMessage(content=_seed_prompt(state))]
+    started = time.monotonic()
     resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(
         _trim_for_llm(messages)
     )
+    # round 從既有訊息推算，與 agent_route 的算法一致，回測時可看出 tool loop 跑了幾輪、每輪多久
+    rounds = sum(1 for m in messages if isinstance(m, AIMessage) and m.tool_calls)
+    log_duration(log, "agent", started, node="agent", model=_model_of(state),
+                 qid=_qid(state["question"]), round=rounds + 1,
+                 tool_calls=len(getattr(resp, "tool_calls", None) or []))
     return {**state, "messages": [resp]}
 
 
@@ -464,7 +567,8 @@ def agent_route(state: GraphState) -> str:
     """LLM 還要呼叫 tool 就去 tools，否則收工；超過輪數上限一律強制收工。"""
     rounds = sum(1 for m in state["messages"] if isinstance(m, AIMessage) and m.tool_calls)
     if rounds >= _MAX_TOOL_ROUNDS:
-        print(f"[agent] 已達 tool 呼叫輪數上限（{_MAX_TOOL_ROUNDS}），停止呼叫工具。")
+        log.info("已達 tool 呼叫輪數上限，停止呼叫工具",
+                 extra={"fields": {"node": "agent", "rounds": rounds, "limit": _MAX_TOOL_ROUNDS}})
         return "assemble"
     last = state["messages"][-1]
     return "tools" if getattr(last, "tool_calls", None) else "assemble"
@@ -500,7 +604,8 @@ def assemble(state: GraphState) -> GraphState:
             try:
                 retrieved = json.loads(_tool_text(msg.content)).get("chunks", [])
             except (json.JSONDecodeError, TypeError, AttributeError) as e:
-                print(f"[assemble] 解析檢索結果失敗，視為查無資料：{e}")
+                log.warning("解析檢索結果失敗，視為查無資料：%s", e,
+                            extra={"fields": {"node": "assemble"}})
         elif msg.name in ("fetch_company_data", "fetch_market_overview"):
             fetched = True
             fetch_results.append(_tool_text(msg.content))
@@ -551,7 +656,8 @@ def route_after_tools(state: GraphState) -> str:
     days = state.get("news_since_days")
     limit = 0 if days is not None and days <= 7 else 3
     if min(ages) <= limit:
-        print(f"[tools] 最新新聞距今 {min(ages)} 天（門檻 {limit}），資料已足夠，跳過 agent 決策。")
+        log.info("新聞夠新，跳過 agent 決策", extra={"fields": {
+            "node": "tools", "news_age_days": min(ages), "limit": limit}})
         return "assemble"
     return "agent"
 
@@ -643,7 +749,13 @@ def generate(state: GraphState) -> GraphState:
 {market_block}{dual_block}{history_block}
 使用者問題：{state['question']}
 """
+    started = time.monotonic()
     resp = _llms(_model_of(state))["llm"].invoke(prompt)
+    # 已知端到端瓶頸在本地模型生成，prompt/回應長度是判斷「慢在輸入還是輸出」的依據；
+    # 只記長度不記內容，避免把提問寫進 log（保留策略未定前先不落地個資）
+    log_duration(log, "generate", started, node="generate", model=_model_of(state),
+                 qid=_qid(state["question"]), prompt_chars=len(prompt),
+                 answer_chars=len(resp.content or ""), retrieved=len(state.get("retrieved") or []))
     return {**state, "answer": resp.content}
 
 
