@@ -39,6 +39,9 @@ TOP_K = 5
 # 0 代表關閉快取，方便除錯或量測冷快取基準。
 EMBEDDING_CACHE_MAX_ENTRIES = max(0, int(os.getenv("EMBEDDING_CACHE_MAX_ENTRIES", "256")))
 EMBEDDING_CACHE_TTL_SECONDS = max(0, int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "900")))
+# 檢索的三段候選是否並行送出。關閉則走循序路徑，兩者結果相同，僅耗時與連線佔用不同。
+# 保留循序路徑是為了能在同一份程式碼上跑 A/B，也是並行若不划算時的回退點。
+RETRIEVE_PARALLEL = os.getenv("RETRIEVE_PARALLEL", "1").lower() not in ("0", "false", "no")
 
 # Logging：AI 執行耗時要能事後回測，故除了 stdout 另外落地成每日一檔的 JSON Lines。
 # 檔案落在 data/ 底下沿用既有的 volume 掛載（app 與 mcp-server 都掛了 ./data）。

@@ -353,25 +353,84 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
     四次檢索共用同一個值。不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
     """
     started = time.monotonic()
-    embed_started = started
     query_vec, cache_hit = _embed_query_cached(question)
-    embed_ms = round((time.monotonic() - embed_started) * 1000)
+    embed_ms = round((time.monotonic() - started) * 1000)
 
-    # 同公司新聞與市場脈絡最後是否採用要看主檢索結果，但 SQL 本身不依賴它；先並行取
-    # 候選、後過濾即可省掉兩段等待。沒有 company 時維持單一主檢索，避免無意義工作。
+    parallel = bool(company) and config.RETRIEVE_PARALLEL
+    if parallel:
+        docs = _retrieve_parallel(query_vec, company, doc_type, news_since_days)
+    else:
+        docs = _retrieve_sequential(query_vec, company, doc_type, news_since_days)
+
+    # pool 統計是決定 max_size 的依據：requests_waiting 持續大於 0 代表連線不夠用，
+    # 三段並行各佔一條，連線不足時會等到 timeout 而不是變慢
+    stats = pool.get_stats()
+    log_duration(log, "retrieve_context", started, node="retrieve", parallel=parallel,
+                 qid=_qid(question), cache_hit=cache_hit, embed_ms=embed_ms, chunks=len(docs),
+                 pool_waiting=stats.get("requests_waiting", 0),
+                 pool_size=stats.get("pool_size", 0))
+    return docs
+
+
+def _relax_doc_type(query_vec, company, news_since_days) -> list[dict]:
+    """doc_type 濾到空就放寬重查，避免問「財報」時把僅有的新聞全濾光。
+
+    標記放寬過，讓呼叫端能告訴 LLM「拿到的不是原本要的類型」；
+    掛在每筆 dict 上而非改回傳結構，assemble 與既有測試都不受影響。
+    """
+    docs = similarity_search(query_vec, company=company, news_since_days=news_since_days)
+    for d in docs:
+        d["relaxed"] = "doc_type"
+    return docs
+
+
+def _merge_market_news(docs: list[dict], candidates: list[dict]) -> list[dict]:
+    """補 _MARKET_NEWS_K 條市場新聞給決策卡當市場脈絡；候選多撈後去重回補。
+
+    多撈候選再去重，避免撈回的正好都已在 docs 裡而補成 0 條。
+    """
+    seen_ids = {d["id"] for d in docs}
+    extra = []
+    for d in candidates:
+        if d["id"] in seen_ids:
+            continue
+        seen_ids.add(d["id"])
+        extra.append(d)
+        if len(extra) == _MARKET_NEWS_K:
+            break
+    return docs + extra
+
+
+def _retrieve_sequential(query_vec, company, doc_type, news_since_days) -> list[dict]:
+    """循序版本：無 company 時的唯一路徑，也是 RETRIEVE_PARALLEL=0 的回退路徑。"""
+    docs = similarity_search(
+        query_vec, company=company, doc_type=doc_type, news_since_days=news_since_days,
+    )
+    if not docs and doc_type:
+        docs = _relax_doc_type(query_vec, company, news_since_days)
     if not company:
-        docs = similarity_search(
-            query_vec, company=company, doc_type=doc_type,
-            news_since_days=news_since_days,
-        )
-        if not docs and doc_type:
-            docs = similarity_search(query_vec, company=company, news_since_days=news_since_days)
-            for d in docs:
-                d["relaxed"] = "doc_type"
-        log_duration(log, "retrieve_context", started, node="retrieve", parallel=False,
-                     qid=_qid(question), cache_hit=cache_hit, embed_ms=embed_ms, chunks=len(docs))
         return docs
 
+    if docs and not any(d["doc_type"] == "news" for d in docs):
+        # 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 LLM 決定要不要補抓
+        docs = docs + similarity_search(
+            query_vec, top_k=3, company=company, doc_type="news",
+            news_since_days=news_since_days,
+        )
+    if docs:
+        # exclude_company 排掉查詢公司自己（否則語意檢索多半又撈回同一家，補了等於沒補；
+        # 市場新聞掃描認得出標題公司時會填代號、認不出才是 NULL，所以「全域」不等於
+        # company IS NULL，用排除法才涵蓋得完整）；order_by_recency 讓脈絡取新不取準。
+        docs = _merge_market_news(docs, similarity_search(
+            query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
+            news_since_days=news_since_days, exclude_company=company, order_by_recency=True,
+        ))
+    return docs
+
+
+def _retrieve_parallel(query_vec, company, doc_type, news_since_days) -> list[dict]:
+    """同公司新聞與市場脈絡最後是否採用要看主檢索結果，但 SQL 本身不依賴它；先並行取
+    候選、後過濾即可省掉兩段等待。採用條件與順序和 _retrieve_sequential 完全相同。"""
     executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="rag-retrieve")
     try:
         primary: Future = executor.submit(
@@ -390,33 +449,13 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
         docs = primary.result()
         if not docs and doc_type:
             # doc_type 放寬是主結果為空才成立，無法預先決定；其餘兩個候選仍可平行等待。
-            docs = similarity_search(query_vec, company=company, news_since_days=news_since_days)
-            for d in docs:
-                d["relaxed"] = "doc_type"
+            docs = _relax_doc_type(query_vec, company, news_since_days)
 
         if docs and not any(d["doc_type"] == "news" for d in docs):
-            # 財報問題也補 3 條同公司新聞給決策卡當素材。
             docs = docs + company_news.result()
 
         if docs:
-            # 補 2 條排除查詢公司的市場新聞；候選多撈後依既有順序去重回補。
-            seen_ids = {d["id"] for d in docs}
-            extra = []
-            for d in market_news.result():
-                if d["id"] in seen_ids:
-                    continue
-                seen_ids.add(d["id"])
-                extra.append(d)
-                if len(extra) == _MARKET_NEWS_K:
-                    break
-            docs = docs + extra
-        # pool 統計是決定 max_size 的依據：requests_waiting 持續大於 0 代表連線不夠用，
-        # 三段並行各佔一條，連線不足時會等到 timeout 而不是變慢
-        stats = pool.get_stats()
-        log_duration(log, "retrieve_context", started, node="retrieve", parallel=True,
-                     qid=_qid(question), cache_hit=cache_hit, embed_ms=embed_ms, chunks=len(docs),
-                     pool_waiting=stats.get("requests_waiting", 0),
-                     pool_size=stats.get("pool_size", 0))
+            docs = _merge_market_news(docs, market_news.result())
         return docs
     finally:
         # 未採用的預取不該拖慢「主檢索為空」或「主結果已有新聞」的回覆；已經開始的
