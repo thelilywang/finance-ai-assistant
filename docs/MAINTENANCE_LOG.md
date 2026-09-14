@@ -319,24 +319,21 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 ### 從 `print` 改為 logging，AI 行為每日落檔
 
-原本全專案用 `print` 輸出，AI 路徑共 9 處（`graph.py` 8、`mcp_server.py` 1）。
-`print` 沒有時間戳、沒有層級、只進 stdout，而 `docker logs` 有輪替上限、容器重啟即失去歷史，
-結果是**無法回答「上週那一題為什麼跑了 400 秒」**——這對一個以本地模型生成為瓶頸的專案來說，
-等於永久放棄優化的判斷依據。
+AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間戳、只進 stdout，而 `docker logs` 有輪替上限、容器重啟即失去歷史——**無法回答「上週那一題為什麼跑了 400 秒」**，對一個以本地模型生成為瓶頸的專案等於放棄優化依據。
 
-新增 `src/logging_setup.py`，`app` 與 `mcp-server` 進入點各呼叫一次 `setup_logging(service)`，保留 `StreamHandler` 使 `docker logs` 行為不變。用標準庫 `logging` 而非 structlog／loguru：需要的結構化欄位用 `extra` 加一個 JSON formatter 就能解決，不值得為此增加依賴。輸出為每日一檔的 JSON Lines，寫入已掛載的 `data/logs/`（不需新增 volume，`.gitignore` 已含 `data/`）——目的是回測，JSONL 可直接餵 pandas／jq，純文字要先寫 parser。輪替按日期而非大小，因為 `RotatingFileHandler` 的 `.1`／`.2` 序號無法對應到日期，回測「上週三那題」得逐檔翻；改用 `TimedRotatingFileHandler(when="midnight")` 並設 `namer` 產出 `app-2026-09-13.log` 這類檔名（利於 glob 與排序），切檔落在台北午夜，與專案其他「今天」的判斷（資料時效、MOPS 民國年）一致。兩個服務各寫各的檔，因為多程序共寫同一檔時切檔會互相覆蓋。
+新增 `src/logging_setup.py`，`app` 與 `mcp-server` 進入點各呼叫一次 `setup_logging(service)`，保留 `StreamHandler` 使 `docker logs` 行為不變。用標準庫 `logging` 而非 structlog／loguru——`extra` 加一個 JSON formatter 就夠，不值得為此增依賴。輸出為每日一檔的 JSON Lines 寫入已掛載的 `data/logs/`（`.gitignore` 已含 `data/`，不需新增 volume），因為回測要能直接餵 pandas／jq。輪替按日期而非大小：`RotatingFileHandler` 的 `.1`／`.2` 序號對不回日期，改用 `TimedRotatingFileHandler(when="midnight")` 並設 `namer` 產出 `app-2026-09-13.log`，切檔落在台北午夜，與專案其他「今天」的判斷（資料時效、MOPS 民國年）一致。兩服務各寫各的檔，避免多程序共寫時切檔互相覆蓋。
 
-容器外執行時檔名加 `-local` 後綴（`_log_name()`，以 `/.dockerenv` 是否存在判斷）。`LOG_DIR` 在 bind mount 上，host 直接跑測試會寫進容器同一個 `app.log`，而 host 沒有 `PGVECTOR_URL`（只在 `docker-compose.yml` 設定）會 fallback 到 `localhost:5432`、DB 又未對 host 開 port，於是每次 host 執行都往共用檔灌一批連線失敗——首次分析 logfile 時 203 行中有 176 行是這類雜訊，不隔離的話回測會把它們當成正式環境的故障。
+容器外執行時檔名加 `-local` 後綴（`_log_name()`，以 `/.dockerenv` 判斷）：`LOG_DIR` 在 bind mount 上，host 執行會寫進容器同一個 `app.log`，且 host 無 `PGVECTOR_URL` 而 fallback 到未開 port 的 `localhost:5432`，每跑一次就灌一批連線失敗——首次分析時 203 行中有 176 行是這類雜訊，不隔離會被回測當成正式環境故障。
 
 記錄的欄位：四個 LLM 呼叫點（`rewrite_question`／`extract_filters`／`agent`／`generate`）與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid`（問題文字的短 hash）串連；`GraphState` 沒有 `thread_id`，加欄位會擴散到所有呼叫端，故以 `qid` 代替。`generate` 另記 `prompt_chars`／`answer_chars` 以區分「慢在輸入還是輸出」，**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦 8）。
 
 ### 檢索平行化與 query embedding 快取
 
-`retrieve_context()` 原本會依序執行主檢索、同公司新聞補充與市場新聞補充；agent 在同一題的 tool loop 重查時，也會對相同 question 重複呼叫 Ollama embedding（把文字轉成向量的服務，每次都是一趟網路往返）。改為程序內、有界的 TTL/LRU 快取，加上候選檢索預取：有 company 時主檢索、同公司新聞與市場新聞同時送出，待主結果確定後才依原有條件採用候選。`doc_type` 放寬仍只在主檢索為空時執行，來源順序與配額維持「主結果（或放寬結果）→ 同公司新聞最多 3 筆 → 市場新聞最多 2 筆」。
+`retrieve_context()` 原本依序執行主檢索、同公司新聞補充與市場新聞補充；agent 在同一題的 tool loop 重查時，又會對相同 question 重複呼叫 Ollama embedding（把文字轉成向量的服務，每次一趟網路往返）。改為程序內、有界的 TTL/LRU 快取，加上候選檢索預取：有 company 時三段同時送出，待主結果確定後才依原有條件採用候選。`doc_type` 放寬仍只在主檢索為空時執行，來源順序與配額維持「主結果（或放寬結果）→ 同公司新聞最多 3 筆 → 市場新聞最多 2 筆」。
 
-快取 key 包含 embedding model、Ollama URL 與原始 question；預設 256 筆、900 秒，可由 `EMBEDDING_CACHE_MAX_ENTRIES`／`EMBEDDING_CACHE_TTL_SECONDS` 設定，設為 0 可完全關閉。只快取成功結果、不落地、重啟即清空；鎖覆蓋 cold miss，避免同時抵達的相同問題重複打 Ollama。
+快取 key 含 embedding model、Ollama URL 與原始 question，預設 256 筆／900 秒（`EMBEDDING_CACHE_MAX_ENTRIES`／`EMBEDDING_CACHE_TTL_SECONDS`，設 0 關閉）；只快取成功結果、不落地、重啟即清空，鎖覆蓋 cold miss 以免同時抵達的相同問題重複打 Ollama。
 
-**取捨**：快取讓同一題的重複檢索幾乎免費（下方實測省約 212 ms），代價是答案在 TTL 內對同一字面問題不反映新入庫的資料——以本專案的入庫頻率（每日批次）與 900 秒 TTL 判斷可接受。
+**取捨**：快取讓同一題的重複檢索幾乎免費，代價是答案在 TTL 內對同一字面問題不反映新入庫的資料——以本專案的入庫頻率（每日批次）判斷可接受。
 
 ### 檢索效能實測
 
@@ -349,19 +346,15 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 並行 + 無快取 | 202.5 ms | 198.1 | 215.1 |
 | 並行 + 有快取 | **11.5 ms** | 9.3 | 19.1 |
 
-貢獻幾乎全來自快取（循序 236.5 → 24.6，省約 212 ms）：每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL。並行的 13-34 ms 幅度小但穩定，且最大值較循序集中（215.1 對 263.6）。兩條路徑在真實資料上回傳的 chunk id 序列完全相同（`[4596, 3222, 3200, 3781, 3216, 3854, 3809]`）。
+貢獻幾乎全來自快取：每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL。並行的 13-34 ms 幅度小但穩定，離散度也較低。兩條路徑回傳的 chunk id 序列完全相同（`[4596, 3222, 3200, 3781, 3216, 3854, 3809]`）。
 
-### 連線池：原本擔心的 PoolTimeout 不存在
+### 連線池容量
 
-改動前單次檢索借 1 條連線，改動後三段並行各借 1 條，`vectorstore.py` 的 pool 是 `max_size=5`
-的模組級單例，因此**推導**上兩個並行檢索就會超額並在 `timeout=2` 後拋 `PoolTimeout`。
-實測推翻了這個推論：4 個並行檢索在 `max_size` 為 5／8／12 時的批次中位數分別為 27.1／27.7／28.8 ms，零失敗，差距落在雜訊範圍內；進一步壓到 8、12、20 個並行檢索（理論上分別需要 24、36、60 條連線）在 `max_size=5` 下仍全部成功，累計等待分別為 517 / 828 / 1154 ms。前提不成立的原因是每段 `similarity_search` 持有連線的時間極短（單條 SQL 約數毫秒即歸還），連線快速輪轉而非同時被三段長期佔住，「3 × 並行數」這個推估因此不適用。
-
-**結論：`max_size` 維持 5，不做調整。** 若照原本的推導直接改成 12，就是在沒有問題的地方加了一個看似合理、實則無依據的數字。
+**結論：`max_size` 維持 5，不做調整。** 改動後三段並行各借 1 條連線，而 `vectorstore.py` 的 pool 是模組級單例，**推導**上兩個並行檢索就會超額並在 `timeout=2` 後拋 `PoolTimeout`。實測相反：4 個並行檢索在 `max_size` 為 5／8／12 時中位數分別為 27.1／27.7／28.8 ms，差距落在雜訊內；壓到 8、12、20 個並行（理論上需 24、36、60 條連線）在 `max_size=5` 下仍零失敗，累計等待 517／828／1154 ms。前提錯在每段 `similarity_search` 只持有連線數毫秒即歸還，連線快速輪轉而非被三段長期佔住，「3 × 並行數」的推估不適用。照原推導改成 12，就是在沒有問題的地方加一個看似合理、實則無依據的數字。
 
 ### 保留循序路徑的理由
 
-端到端延遲仍以本地模型生成為主（單題數十秒至數百秒），省下的數十毫秒對體感沒有可觀察的影響；以並行為預設只是因為它不會更慢、離散度更低，成本也已付掉。保留 `RETRIEVE_PARALLEL=0` 是為了 DB 端競爭情況改變時（資料量成長、改用共享資料庫）能直接重測與回退而不必改程式。為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用，兩者只差在候選如何取得；等價性測試以故障注入驗證過有鑑別力（破壞其中一條的去重邏輯會被抓到）。
+端到端延遲仍以生成為主（單題數十秒至數百秒），省下的數十毫秒對體感沒有可觀察的影響；以並行為預設只因它不會更慢，成本也已付掉。保留 `RETRIEVE_PARALLEL=0` 是為了 DB 端競爭情況改變時（資料量成長、改用共享資料庫）能直接重測與回退而不必改程式。為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用，只差在候選如何取得；等價性測試以故障注入驗證過有鑑別力（破壞去重邏輯會被抓到）。
 
 本次評估後不採用的三個方向（Redis 取代程序內快取、單一 SQL 用 `UNION ALL` 取回三段、改用 async DB driver），理由與重新評估的觸發條件見上方「保持現狀」區塊。
 
