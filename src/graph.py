@@ -509,9 +509,12 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
     for call in calls:
         started = time.monotonic()
         try:
-            results.append(call().detail)
+            # 取 FetchResult.ok 而非「沒拋例外就算成功」：查無 CIK、OpenAPI 查無公司、
+            # MOPS 改版等失敗都是正常返回 FetchResult(False, ...)，原本全被記成成功。
+            result = call()
+            results.append(result.detail)
             log_duration(log, "auto_fetch 單一來源完成", started, node="auto_fetch",
-                         company=company, ok=True)
+                         company=company, ok=result.ok)
         except Exception as e:  # noqa: BLE001  單一來源失敗不中斷
             msg = f"抓取失敗：{e}"
             log_duration(log, "auto_fetch 單一來源失敗", started, node="auto_fetch",
