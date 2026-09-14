@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 import email.utils
 import html as html_lib
+import logging
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -28,6 +29,8 @@ import trafilatura
 from . import config
 from .ingest import ingest_file, ingest_text
 from .tickers import is_tw_ticker
+
+log = logging.getLogger("update")
 
 TIMEOUT = 30
 # 財報全文動輒數萬字；低於此值代表拿到的是節流頁、維護頁或空殼，不是財報
@@ -205,7 +208,8 @@ def fetch_edgar(ticker: str, form: str = "10-Q") -> FetchResult:
         # 與其餘抓取器一致：抓取失敗回 FetchResult 而非拋錯，CLI 才印得出可讀訊息。
         # ingest_text 不在此範圍內（見 fetch_mops 的同一原則），DB 失敗仍往上拋
         msg = f"SEC EDGAR 取得失敗：{e}"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "edgar", "reason": "http_error", "error": str(e)}})
         return FetchResult(False, msg)
 
 
@@ -216,7 +220,8 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
     )
     if entry is None:
         msg = f"找不到 ticker {ticker} 對應的 CIK。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "edgar", "reason": "no_cik"}})
         return FetchResult(False, msg)
     cik = entry["cik_str"]
 
@@ -231,7 +236,8 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
     selected = _select_filing(recent, forms)
     if selected is None:
         msg = f"{ticker} 近期沒有 {'/'.join(dict.fromkeys(forms))} 申報。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "edgar", "reason": "no_filing"}})
         return FetchResult(False, msg)
     form, idx = selected
 
@@ -253,11 +259,12 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
             doc = _select_exhibit(listing.json()["directory"]["item"], primary_doc)
         except (requests.RequestException, KeyError, ValueError) as e:
             cover_only_reason = f"{type(e).__name__}: {e}"
-            print(
-                f"[update] {ticker.upper()} 讀取申報 {accession} 的目錄失敗"
-                f"（{cover_only_reason}），退回主文 {primary_doc}；"
-                f"6-K 主文通常只有封面頁，本次匯入可能缺漏財報本文。"
-            )
+            log.warning(
+                "讀取 6-K 申報目錄失敗，退回主文；主文通常只有封面頁，本次匯入可能缺漏財報本文",
+                extra={"fields": {
+                    "company": ticker.upper(), "source": "edgar", "reason": "cover_only",
+                    "accession": accession, "primary_doc": primary_doc,
+                    "error": cover_only_reason}})
 
     url = f"{base}/{doc}"
     print(f"[update] 下載 {form}：{url}")
@@ -273,7 +280,8 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
     # 警告文字當成財報寫進向量庫並回報成功，靜默污染檢索結果。財報全文遠長於此
     if len(text.strip()) < _MIN_FILING_CHARS or "Undeclared Automated Tool" in text:
         msg = f"{ticker.upper()} 的 {form} 內容異常（僅 {len(text.strip())} 字，可能是節流或維護頁）。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "edgar", "reason": "no_content"}})
         return FetchResult(False, msg)
 
     ingest_text(
@@ -408,7 +416,8 @@ def fetch_sec_financials(ticker: str) -> FetchResult:
         return _fetch_sec_financials(ticker, headers)
     except requests.RequestException as e:
         msg = f"SEC XBRL 取得失敗：{e}"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "sec_xbrl", "reason": "http_error", "error": str(e)}})
         return FetchResult(False, msg)
 
 
@@ -419,7 +428,8 @@ def _fetch_sec_financials(ticker: str, headers: dict) -> FetchResult:
     )
     if entry is None:
         msg = f"找不到 ticker {ticker} 對應的 CIK。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "sec_xbrl", "reason": "no_cik"}})
         return FetchResult(False, msg)
     cik = entry["cik_str"]
 
@@ -433,7 +443,8 @@ def _fetch_sec_financials(ticker: str, headers: dict) -> FetchResult:
     selected = _select_filing(recent, forms)
     if selected is None:
         msg = f"{ticker} 近期沒有 {'/'.join(dict.fromkeys(forms))} 申報。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "sec_xbrl", "reason": "no_filing"}})
         return FetchResult(False, msg)
     form, idx = selected
     accession = recent["accessionNumber"][idx]
@@ -451,7 +462,8 @@ def _fetch_sec_financials(ticker: str, headers: dict) -> FetchResult:
     text = _format_xbrl(facts, taxonomy, accession, ticker, f"{form}（{filing_date}）")
     if text is None:
         msg = f"{ticker.upper()} 的 XBRL 無可用數字（{taxonomy} 概念皆缺漏或落後）。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": ticker, "source": "sec_xbrl", "reason": "xbrl_empty"}})
         return FetchResult(False, msg)
 
     ingest_text(
@@ -583,7 +595,8 @@ def fetch_tw_financials(co_id: str) -> FetchResult:
                     found.append((title, row))
         except requests.RequestException as e:
             # 單一市場的端點掛掉不影響另一個市場，繼續試下一個
-            print(f"[update] {source_name} OpenAPI 取得失敗（{e}），略過。")
+            log.warning(f"{source_name} OpenAPI 取得失敗（{e}），略過。", extra={"fields": {
+                "company": co_id, "source": source_name, "reason": "api_down", "error": str(e)}})
             continue
         reachable = True
         if not found:
@@ -592,7 +605,8 @@ def fetch_tw_financials(co_id: str) -> FetchResult:
         formatted = _format_rows(found, co_id)
         if formatted is None:
             msg = f"{source_name} OpenAPI 查到 {co_id} 但欄位無法解析（格式可能已變動）。"
-            print(f"[update] {msg}")
+            log.warning(msg, extra={"fields": {
+                "company": co_id, "source": source_name, "reason": "api_miss"}})
             return FetchResult(False, msg)
         text, published_at, label = formatted
         ingest_text(
@@ -609,7 +623,8 @@ def fetch_tw_financials(co_id: str) -> FetchResult:
         f"官方 OpenAPI 查無 {co_id}（可能為興櫃、金融業或已下市）。" if reachable
         else "官方 OpenAPI 兩個來源皆無法取得（端點或網路異常）。"
     )
-    print(f"[update] {msg}")
+    log.warning(msg, extra={"fields": {
+        "company": co_id, "source": "twse_api", "reason": "api_miss" if reachable else "api_down"}})
     return FetchResult(False, msg)
 
 
@@ -640,12 +655,15 @@ def fetch_mops(co_id: str) -> FetchResult:
                 break
         if not filename:
             msg = f"MOPS 查無 {co_id} 的財報檔案。"
-            print(f"[update] {msg}")
+            log.warning(msg, extra={"fields": {
+                "company": co_id, "source": "mops", "reason": "mops_blocked"}})
             print(MOPS_MANUAL_GUIDE)
             return FetchResult(False, msg)
         if not filename.endswith("_AI1.pdf"):
             # 中文主文缺席才會退而求其次選到這份，主動告警而非靜默接受降級結果
-            print(f"[update] {co_id} 查無中文主文，改抓 {filename}。")
+            log.warning("查無中文主文，改抓替代檔案", extra={"fields": {
+                "company": co_id, "source": "mops", "reason": "no_chinese_doc",
+                "filename": filename}})
 
         resp = requests.post(
             endpoint,
@@ -657,7 +675,8 @@ def fetch_mops(co_id: str) -> FetchResult:
         m = re.search(r"href=['\"](/pdf/[^'\"]+)['\"]", resp.text)
         if not m:
             msg = f"MOPS 第二步找不到 PDF 連結（{filename}）。"
-            print(f"[update] {msg}")
+            log.warning(msg, extra={"fields": {
+                "company": co_id, "source": "mops", "reason": "mops_blocked"}})
             print(MOPS_MANUAL_GUIDE)
             return FetchResult(False, msg)
 
@@ -669,7 +688,8 @@ def fetch_mops(co_id: str) -> FetchResult:
         # 錯誤訊息指向 pypdf 而非真正的失敗點 MOPS
         if not resp.content.startswith(b"%PDF"):
             msg = f"MOPS 回傳的不是 PDF（{filename}，可能是錯誤頁）。"
-            print(f"[update] {msg}")
+            log.warning(msg, extra={"fields": {
+                "company": co_id, "source": "mops", "reason": "mops_blocked"}})
             print(MOPS_MANUAL_GUIDE)
             return FetchResult(False, msg)
         path = f"data/{filename}"
@@ -685,7 +705,8 @@ def fetch_mops(co_id: str) -> FetchResult:
         # 只收「抓取／寫檔」這段的失敗。ingest_file 內的 DB 或 embedding 失敗不是
         # MOPS 的錯，讓它往上拋給 graph.py 的 handler，不要誤報成 MOPS 抓取異常、
         # 也不要印一份無關的手動下載指引
-        print(f"[update] MOPS 抓取異常：{e}")
+        log.warning(f"MOPS 抓取異常：{e}", extra={"fields": {
+            "company": co_id, "source": "mops", "reason": "mops_blocked", "error": str(e)}})
         print(MOPS_MANUAL_GUIDE)
         return FetchResult(False, f"MOPS 抓取異常：{e}")
 
@@ -701,13 +722,15 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
     resp = requests.get(url, headers=BROWSER_UA, timeout=TIMEOUT)
     if resp.status_code != 200:
         msg = f"Yahoo RSS 取得失敗（HTTP {resp.status_code}），稍後再試。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": company, "source": "yahoo_rss", "reason": "http_error"}})
         return FetchResult(False, msg)
 
     items = ET.fromstring(resp.content).findall(".//item")[:limit]
     if not items:
         msg = f"{symbol} 的 RSS 沒有新聞。"
-        print(f"[update] {msg}")
+        log.warning(msg, extra={"fields": {
+            "company": company, "source": "yahoo_rss", "reason": "no_content"}})
         return FetchResult(False, msg)
 
     total = 0
@@ -731,9 +754,11 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
         except (requests.RequestException, OSError, ValueError) as e:
             # 單篇文章的下載或解析失敗就跳過。DB/embedding 失敗不會落在這裡，
             # 會往上拋——那是系統性問題，逐篇印錯再回報「寫入 0 筆」等於靜默失敗
-            print(f"[update] 新聞處理失敗（{link}）：{e}")
+            log.warning(f"新聞處理失敗（{link}）：{e}", extra={"fields": {
+                "company": company, "source": "yahoo_rss", "reason": "news_failed",
+                "error": str(e)}})
     msg = f"新聞更新完成，共寫入 {total} 筆 chunk。"
-    print(f"[update] {msg}")
+    log.info(msg, extra={"fields": {"company": company, "source": "yahoo_rss", "chunks": total}})
     return FetchResult(total > 0, msg)
 
 
@@ -754,7 +779,8 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
             listing_url, headers=BROWSER_UA, timeout=TIMEOUT
         )
         if resp.status_code != 200:
-            print(f"[update] {name} 列表頁取得失敗（HTTP {resp.status_code}），跳過。")
+            log.warning(f"{name} 列表頁取得失敗（HTTP {resp.status_code}），跳過。", extra={"fields": {
+                "source": name, "reason": "http_error"}})
             continue
 
         urls: list[str] = []
@@ -765,7 +791,8 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
                 seen.add(url)
                 urls.append(url)
         if not urls:
-            print(f"[update] {name} 找不到任何文章連結（版面可能改版），跳過。")
+            log.warning(f"{name} 找不到任何文章連結（版面可能改版），跳過。", extra={"fields": {
+                "source": name, "reason": "http_error"}})
             continue
 
         for url in urls[:limit_per_source]:
@@ -775,11 +802,13 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
             try:
                 html = trafilatura.fetch_url(url)
                 if not html:
-                    print(f"[update] {name} 文章下載失敗：{url}")
+                    log.warning(f"{name} 文章下載失敗：{url}", extra={"fields": {
+                        "source": name, "reason": "http_error"}})
                     continue
                 doc = trafilatura.bare_extraction(html, with_metadata=True)
                 if not doc or len(doc.text or "") < 100:
-                    print(f"[update] {name} 內文過短或抽取失敗：{url}")
+                    log.warning(f"{name} 內文過短或抽取失敗：{url}", extra={"fields": {
+                        "source": name, "reason": "no_content"}})
                     continue
 
                 title = (doc.title or "").strip() or None
@@ -792,10 +821,11 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
                 )
             except (requests.RequestException, OSError, ValueError) as e:
                 # 同 fetch_news：單篇失敗跳過，DB/embedding 失敗往上拋
-                print(f"[update] {name} 文章處理失敗（{url}）：{e}")
+                log.warning(f"{name} 文章處理失敗（{url}）：{e}", extra={"fields": {
+                    "source": name, "reason": "news_failed", "error": str(e)}})
 
     msg = f"市場新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
-    print(f"[update] {msg}")
+    log.info(msg, extra={"fields": {"chunks": total, "skipped": skipped}})
     return FetchResult(total > 0 or skipped > 0, msg)
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import logging
 
 from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -15,6 +16,8 @@ from pypdf import PdfReader
 
 from . import config
 from .vectorstore import delete_by_source, insert_chunks
+
+log = logging.getLogger("ingest")
 
 
 def load_text(path: str) -> str:
@@ -47,20 +50,21 @@ def ingest_text(
     寫入前先 delete_by_source(source) 去重，重跑同一來源不會累積重複資料。
     """
     if not text or not text.strip():
-        print(f"[ingest] 警告：{source} 內容為空（可能 PDF 抽不出文字），跳過。")
+        log.warning("內容為空（可能 PDF 抽不出文字），跳過", extra={"fields": {
+            "source": source, "company": company, "reason": "no_content"}})
         return 0
 
     if doc_type == "financial_report" and len(text.strip()) < _MIN_FINANCIAL_REPORT_CHARS:
-        print(
-            f"[ingest] 警示：{source} 為財報但僅 {len(text.strip())} 字元"
-            f"（低於 {_MIN_FINANCIAL_REPORT_CHARS}），可能選錯檔案或內容不完整，建議人工確認。"
-        )
+        log.warning("財報字數偏低，可能選錯檔案或內容不完整，建議人工確認", extra={"fields": {
+            "source": source, "company": company, "reason": "short_report",
+            "chars": len(text.strip()), "min_chars": _MIN_FINANCIAL_REPORT_CHARS}})
 
     delete_by_source(source)
 
     embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
     chunks = chunk_text(text)
-    print(f"[ingest] {source} 切成 {len(chunks)} 個 chunk，開始 embedding...")
+    log.info("開始 embedding", extra={"fields": {
+        "source": source, "company": company, "chunks": len(chunks)}})
 
     vectors = embeddings.embed_documents(chunks)
 
@@ -79,7 +83,8 @@ def ingest_text(
     ]
 
     insert_chunks(rows)
-    print(f"[ingest] 完成，已寫入 {len(rows)} 筆到 pgvector。")
+    log.info("已寫入 pgvector", extra={"fields": {
+        "source": source, "company": company, "rows": len(rows)}})
     return len(rows)
 
 

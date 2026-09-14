@@ -1,9 +1,12 @@
 """即時行情快照（yfinance），只進 prompt 不入庫。"""
 from __future__ import annotations
 
+import logging
 import sys
 
 from .tickers import is_tw_ticker
+
+log = logging.getLogger("market")
 
 
 def format_snapshot(info: dict) -> str:
@@ -48,13 +51,17 @@ def format_consensus(ticker) -> str:
             if avg is not None:
                 lines.append(f"{label}: {avg} / {low} / {high}")
     except Exception as e:  # noqa: BLE001
-        print(f"[market] calendar 取得失敗：{e}")
+        log.warning("calendar 取得失敗", extra={"fields": {
+            "symbol": getattr(ticker, "ticker", None), "field": "calendar",
+            "reason": "market_failed", "error": str(e)}})
 
     try:  # 當季分析師人數
         n = ticker.earnings_estimate.loc["0q"]["numberOfAnalysts"]
         lines.append(f"numberOfAnalysts (current quarter): {int(n)}")
     except Exception as e:  # noqa: BLE001
-        print(f"[market] earnings_estimate 取得失敗：{e}")
+        log.warning("earnings_estimate 取得失敗", extra={"fields": {
+            "symbol": getattr(ticker, "ticker", None), "field": "earnings_estimate",
+            "reason": "market_failed", "error": str(e)}})
 
     try:  # 近 4 季 EPS 預估 vs 實際 vs surprise
         df = ticker.earnings_dates
@@ -65,7 +72,9 @@ def format_consensus(ticker) -> str:
                 f"actual {row['Reported EPS']} / surprise {row['Surprise(%)']:+.2f}%"
             )
     except Exception as e:  # noqa: BLE001
-        print(f"[market] earnings_dates 取得失敗：{e}")
+        log.warning("earnings_dates 取得失敗", extra={"fields": {
+            "symbol": getattr(ticker, "ticker", None), "field": "earnings_dates",
+            "reason": "market_failed", "error": str(e)}})
 
     if not lines:
         return ""
@@ -89,7 +98,8 @@ def get_market_snapshot(company: str) -> str | None:
             text = f"{text}\n{consensus}" if text else consensus
         return text or None
     except Exception as e:  # noqa: BLE001
-        print(f"[market] 行情取得失敗：{e}")
+        log.warning("行情取得失敗", extra={"fields": {
+            "company": company, "reason": "market_failed", "error": str(e)}})
         return None
 
 

@@ -4,9 +4,12 @@
 """
 from __future__ import annotations
 
+import logging
 import sys
 
 from .market import to_symbol
+
+log = logging.getLogger("charts")
 
 BLUE = "#2a78d6"
 GREEN = "#0ca30c"
@@ -59,11 +62,13 @@ def price_chart(company: str):
                     annotation_text="下次財報", annotation_font_color=INK_MUTED,
                 )
         except Exception as e:  # noqa: BLE001
-            print(f"[charts] 財報日標記略過：{e}")
+            log.warning("財報日標記略過", extra={"fields": {
+                "company": company, "reason": "chart_failed", "error": str(e)}})
 
         return fig
     except Exception as e:  # noqa: BLE001
-        print(f"[charts] 股價圖生成失敗：{e}")
+        log.warning("股價圖生成失敗", extra={"fields": {
+            "company": company, "chart": "price", "reason": "chart_failed", "error": str(e)}})
         return None
 
 
@@ -98,7 +103,8 @@ def eps_chart(company: str):
         fig.update_yaxes(gridcolor=GRID)
         return fig
     except Exception as e:  # noqa: BLE001
-        print(f"[charts] EPS 圖生成失敗：{e}")
+        log.warning("EPS 圖生成失敗", extra={"fields": {
+            "company": company, "chart": "eps", "reason": "chart_failed", "error": str(e)}})
         return None
 
 
@@ -126,7 +132,8 @@ def report_pdf(report_md: str, figures: list) -> bytes | None:
 
         chrome = next((p for p in _CHROME_PATHS if os.path.exists(p)), None)
         if chrome is None:
-            print("[charts] 找不到 Chrome/Chromium/Edge，PDF 退回 .md")
+            log.warning("找不到 Chrome/Chromium/Edge，PDF 退回 .md",
+                        extra={"fields": {"reason": "pdf_failed"}})
             return None
 
         body = markdown.markdown(report_md, extensions=["tables"])
@@ -156,7 +163,8 @@ def report_pdf(report_md: str, figures: list) -> bytes | None:
             with open(out, "rb") as f:
                 return f.read()
     except Exception as e:  # noqa: BLE001
-        print(f"[charts] PDF 生成失敗，退回 .md：{e}")
+        log.warning("PDF 生成失敗，退回 .md",
+                    extra={"fields": {"reason": "pdf_failed", "error": str(e)}})
         return None
 
 
