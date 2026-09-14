@@ -61,6 +61,9 @@ services:
       # 會少一天，讓資料時效判斷與 MOPS 民國年計算全部偏移
       TZ: ${TZ:-Asia/Taipei}
       MCP_SERVER_URL: http://mcp-server:8000/mcp
+      # 映像檔沒有 .git，tracing 的 git fallback 取不到版本，得由外部帶進來，
+      # 否則 Langfuse 上所有 trace 的 release 都是 unknown，無法歸因版本
+      LANGFUSE_RELEASE: ${LANGFUSE_RELEASE:-dev}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

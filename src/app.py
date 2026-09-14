@@ -18,7 +18,7 @@ import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
-from src import config
+from src import config, tracing
 from src.graph import build_graph, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.logging_setup import setup_logging
@@ -252,8 +252,20 @@ async def _stream_answer(state: dict, msg: cl.Message, tracker: _StepTracker) ->
     graph = cl.user_session.get("graph")
     final_state = None
 
+    # Langfuse：handler 掛在這裡就會跟著 graph 傳到每個 LLM 節點，不必逐一加 decorator。
+    # session 用 chainlit thread id，同一串對話在 UI 上才收得在一起；拿不到不影響追蹤。
+    user = cl.user_session.get("user")
+    trace_config = tracing.callbacks(
+        session_id=getattr(cl.context.session, "thread_id", None),
+        user_id=getattr(user, "identifier", None),
+        model=state.get("model"),
+        lang=state.get("lang"),
+    )
+
     # 同時訂閱 messages（逐 token）、updates（節點完成通知）與 values（完整 state）
-    async for mode, payload in graph.astream(state, stream_mode=["messages", "updates", "values"]):
+    async for mode, payload in graph.astream(
+        state, stream_mode=["messages", "updates", "values"], config=trace_config
+    ):
         if mode == "messages":
             chunk, metadata = payload
             if metadata.get("langgraph_node") != "generate" or not chunk.content:

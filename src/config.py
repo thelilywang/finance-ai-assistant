@@ -49,6 +49,14 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_DIR = os.getenv("LOG_DIR", "data/logs")
 LOG_BACKUP_DAYS = max(0, int(os.getenv("LOG_BACKUP_DAYS", "30")))
 
+# Langfuse 可觀測性。公鑰留空即整個關閉追蹤（CI、剛 clone 的專案不必設金鑰也能跑）。
+# base_url 容器內要用 host.docker.internal：Langfuse 只綁 127.0.0.1，容器裡的 localhost
+# 指向容器自己（實測 Connection refused）。SDK 本身讀 LANGFUSE_* 環境變數，這裡只留
+# 開關與歸因用的欄位，金鑰不進程式碼。
+LANGFUSE_ENABLED = bool(os.getenv("LANGFUSE_PUBLIC_KEY"))
+# release：UI 上用來區分版本的欄位。沒帶就用 git commit（見 tracing.py）。
+LANGFUSE_RELEASE = os.getenv("LANGFUSE_RELEASE", "")
+
 # 資料/token 控制
 NEWS_RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "180"))
 # 對話含提問內容，屬個資，留短一點
