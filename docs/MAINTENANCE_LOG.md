@@ -359,15 +359,35 @@ AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間�
 | 量測腳本 | 新增 `tests/bench_retrieve.py`（需在 container 內執行，DB 未對 host 開 port） | `74789e9` |
 | 新增 self-check | `tests/test_logging_setup.py`；`tests/test_retrieve_context.py` 補等價性、快取關閉、embed 失敗不污染快取、並行分支例外傳遞。等價性測試以故障注入驗證過有鑑別力（破壞去重邏輯會被抓到） | `f6f5de8`／`f4d398c` |
 
-## 2026-09-14　抓取路徑可觀測性修正
+## 2026-09-14　抓取路徑紀錄修正與自架 Langfuse 追蹤
 
-承接 09-13 的 logging 落地：剩餘的 `print` 原被歸類為 CLI 進度輸出，但依呼叫端重新分類後，50 處中約 39 處其實會在服務請求中執行（`charts.py` 的繪圖由 `app.py` 呼叫、`market.py` 的行情快照由 `generate` 呼叫、`update.py` 的六個 fetcher 則同時被 CLI 與 `fetch_missing_data`／`mcp_server.py` 呼叫），輸出只進 stdout、重啟即失去歷史。這一項因此不是低優先的 CLI 清理，而是 09-13 儀器化未完成的另一半。
+同一條可觀測性線的兩段：先把剩下的抓取路徑儀器化並修掉一個讓紀錄失真的判準錯誤，再接上 Langfuse 補足 logfile 答不出的 prompt／token 層級。
 
-同時修掉一個更根本的缺陷：**`fetch_missing_data` 的觀測點以「沒拋例外」為成功判準，但 fetcher 的失敗多半不拋例外。** 原本寫成 `results.append(call().detail)`，取了 `detail` 卻丟掉 `FetchResult.ok`，於是一律記 `ok=True`；而查無 CIK、官方 OpenAPI 查無公司、MOPS 版面改版都是正常返回 `FetchResult(False, msg)`，只有網路層例外才會走到 `except`。也就是說 logfile 裡「補抓成功」這個欄位過去從未為真過，回測時分不出補抓究竟成功幾次。
+### 抓取路徑可觀測性修正
 
-`reason` 一律用短代碼（`no_cik`／`no_filing`／`api_miss`／`mops_blocked` 等）而非自由文字，否則 `jq` 彙總不動——回測要問的是「哪一類失敗最多」。另有兩處是**降級**而非失敗，特別標成 `cover_only`（6-K 讀不到申報目錄，退回只有封面頁的主文）與 `no_chinese_doc`（MOPS 查無中文主文改抓替代檔）。後者仍回 `FetchResult(True, ...)`，`ok` 顯示成功而內容是替代檔，logfile 是唯一能保留這個區別的地方。
+剩餘的 `print` 原被歸類為 CLI 進度輸出，但依呼叫端重新分類後，50 處中約 39 處其實會在服務請求中執行（`charts.py` 由 `app.py` 呼叫、`market.py` 由 `generate` 呼叫、`update.py` 的六個 fetcher 同時被 CLI 與 `fetch_missing_data`／`mcp_server.py` 呼叫）。這不是低優先的 CLI 清理，而是 09-13 儀器化未完成的另一半。
 
-**已知限制**：本次只改紀錄的正確性，未改變任何抓取行為；補抓成功率要等實際使用累積後才答得出來（門檻見待辦 6）。純 CLI 進度輸出與 self-check 的結果輸出不在遷移範圍內。
+同時修掉一個更根本的缺陷：**`fetch_missing_data` 以「沒拋例外」為成功判準，但 fetcher 的失敗多半不拋例外。** 原本 `results.append(call().detail)` 丟掉了 `FetchResult.ok`，一律記 `ok=True`；而查無 CIK、官方 OpenAPI 查無公司、MOPS 版面改版都是正常返回 `FetchResult(False, msg)`。也就是說 logfile 裡「補抓成功」從未為真過，回測時分不出補抓究竟成功幾次。
+
+`reason` 一律用短代碼（`no_cik`／`no_filing`／`api_miss`／`mops_blocked` 等）而非自由文字，否則 `jq` 彙總不動——回測要問的是「哪一類失敗最多」。另有兩處是**降級**而非失敗：`cover_only`（6-K 讀不到申報目錄，退回封面頁主文）與 `no_chinese_doc`（MOPS 查無中文主文改抓替代檔）。後者仍回 `FetchResult(True, ...)`，`ok` 顯示成功而內容是替代檔，logfile 是唯一能保留這個區別的地方。
+
+**已知限制**：只改紀錄的正確性，未改變任何抓取行為；補抓成功率要等實際使用累積後才答得出來（門檻見待辦 6）。純 CLI 進度輸出與 self-check 輸出不在遷移範圍內。
+
+### 接上自架 Langfuse 與節點層級追蹤
+
+logfile 已能回答「哪個節點花了多久」，但答不出「送進模型的 prompt 長什麼樣、模型回了什麼、花了多少 token」。Langfuse 是自架的 LLM 追蹤平台，這層內容留在自己機器上，不必把提問送進第三方服務。掛載點只有一處：`app.py` 的 `_stream_answer` 呼叫 `graph.astream` 時把官方 SDK 的 LangChain callback handler 放進 `config`。
+
+**追蹤失敗不得影響問答**：`tracing.py` 的三個進入點全部吞例外，初始化失敗只記一次 warning 後靜默跳過，`callbacks()` 退化成回傳 `{}`——空 config 對 LangGraph 無副作用，呼叫端不必寫任何判斷。未設 `LANGFUSE_PUBLIC_KEY` 即視為關閉，CI 與剛 clone 的專案不必有金鑰也能跑。
+
+**兩個容器限制**：Langfuse 只綁 `127.0.0.1:18300`，容器內的 `localhost` 指向容器自己（實測 `Connection refused`），改用 `host.docker.internal` 則回 200；映像檔裡沒有 `.git`，`_release()` 的 git fallback 取不到版本會讓所有 trace 的 `release` 成為 `unknown`，改由 compose 以 `LANGFUSE_RELEASE` 帶入。
+
+**原假設被實測推翻**：原以為 handler 會跟著 graph 往下傳、四個 LLM 呼叫點自動成為同一 trace 的 observation。實際上 handler 記錄的是 LangChain runnable（模型呼叫）而非 LangGraph 節點——UI 上只看得到底層 ChatOllama 呼叫，而 `resolve_market`／`assemble`／`no_result` 這類不呼叫 LLM 的節點根本不會出現。`build_graph()` 因此改用 `node_span()` 逐一包住九個節點，LLM generation 靠 OTel context 掛在所屬節點底下，形成「一次問答一個 trace、每節點一個 span」。
+
+**SDK 的 `@observe` 同樣不可用**：它會讓每個節點的 input/output 疊到 trace 根上互相覆蓋（正是「每個節點 output 都一樣」的成因），因為 span 在函式回傳當下就結束，之後寫入就落到父層。改為自行開 span、在 span 仍存活時寫入。包裝掛在 `add_node()` 註冊處而非裝飾函式，否則 `route_after_tools()` 內部呼叫 `assemble()` 時會多送一個不存在於流程上的 span。
+
+**取捨**：節點 input/output 送 `_brief()` 摘要而非完整 `GraphState`——長字串截至 500 字，`retrieved`／`messages` 只留筆數。代價是 UI 看不到 chunk 全文（要看全文回 logfile），換得單一節點 span 從 22,485 bytes 降到 605 bytes（七筆 chunk、1,200 字回答實測）。追蹤關閉時 `node_span()` 原樣回傳原函式。
+
+**驗收**：實跑一次 `qwen3.5:9b` 問答，trace 記錄到 input、output、`user_id`／`session_id`／`tags`／`environment`，延遲 23,871 ms，token input 21／output 33。**已知限制**：span 樹結構以 OTel in-memory exporter 驗證，未經 Langfuse UI 目視確認。
 
 ### 改動內容
 
@@ -379,30 +399,16 @@ AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間�
 | 決策卡圖表與行情快照 | `charts.py`（5 處，`price_chart`／`eps_chart`／`report_pdf`）、`market.py`（4 處，`format_consensus`／`get_market_snapshot`）。`market.py` 帶 `symbol` 而非 `company`，因 `format_consensus` 收到的是 yfinance ticker 物件 | `—` |
 | 入庫警示與進度 | `ingest.py` 的 `ingest_text`：空內容與財報字數偏低改 `log.warning`，chunk 數與寫入筆數改 `log.info` | `—` |
 | self-check 改收 log record | `tests/test_ingest.py` 原以 `redirect_stdout` 攔截財報字數警示，改走 logging 後攔不到，改為掛 handler 收 `LogRecord`，並補驗 `source` 與 `reason` 欄位 | `—` |
-
-## 2026-09-14　接上自架 Langfuse 追蹤
-
-延續 09-13、09-14 兩章的可觀測性線：logfile 已能回答「哪個節點花了多久」，但答不出「這一題送進模型的 prompt 長什麼樣、模型回了什麼、花了多少 token」。Langfuse 是自架的 LLM 追蹤平台，把這層內容留在自己的機器上，不必把提問送進第三方服務。
-
-用官方 SDK 的 LangChain callback handler。**掛載點只有一處**：`app.py` 的 `_stream_answer` 呼叫 `graph.astream` 時把 handler 放進 `config`，LangGraph 會往下傳給每個節點，`rewrite_question`／`extract_filters`／`agent`／`generate` 四個 LLM 呼叫點因此自動成為同一個 trace 下的 observation，不需要逐一加 decorator。
-
-**追蹤失敗不得影響問答**：`tracing.py` 的三個進入點（`callbacks`／`flush`／內部的 client 建立）全部吞例外，初始化失敗只記一次 warning 後靜默跳過，`callbacks()` 退化成回傳 `{}`——多傳一個空 config 對 LangGraph 無副作用，呼叫端因此不必寫任何判斷。未設 `LANGFUSE_PUBLIC_KEY` 即視為關閉，讓 CI 與剛 clone 的專案不必有金鑰也能跑。
-
-**容器內不能用 `localhost`。** Langfuse 只綁 `127.0.0.1:18300`，而本專案的 `app` 也在容器裡，容器內的 `localhost` 指向容器自己——實測 `Connection refused`，改用 compose 已設好的 `host.docker.internal` 則回 200。另一個容器限制是映像檔裡沒有 `.git`，`_release()` 的 git fallback 取不到版本，所有 trace 的 `release` 都會是 `unknown`，失去版本歸因能力；改由 compose 以 `LANGFUSE_RELEASE` 帶入。
-
-**驗收**：實際跑一次 `qwen3.5:9b` 的問答，trace 確認記錄到 input、output、`user_id`／`session_id`／`tags`／`environment`，延遲 23,871 ms，token 為 input 21／output 33。
-
-### 改動內容
-
-| 項目 | 涉及檔案與函式 | commit |
-|---|---|---|
 | 追蹤模組 | 新增 `src/tracing.py`（`callbacks`／`flush`／`_release`／`_get_client`）。用官方 SDK 的 `langfuse.langchain.CallbackHandler` 而非手刻 HTTP | `—` |
 | handler 掛載與 metadata | `src/app.py` 的 `_stream_answer`：`session_id` 取 chainlit 的 `thread_id`（同一串對話在 UI 才收得在一起）、`user_id` 取 OAuth `identifier`，未登入或拿不到仍能追蹤；model 與 lang 進 tags | `—` |
 | CLI 的 flush | `src/cli.py`：短生命週期程序結束前須 `flush()`，否則最後幾輪 trace 隨程序消失。長駐的 chainlit 靠 SDK 背景批次，不呼叫 | `—` |
 | 設定項 | `config.LANGFUSE_ENABLED`（總開關）／`LANGFUSE_RELEASE`；金鑰只進 `.env`（已在 `.gitignore`），`.env.example` 留空欄位與容器內外兩種 base_url 的說明 | `—` |
 | 容器版本歸因 | `docker-compose.yml` 的 `app` 服務加 `LANGFUSE_RELEASE`，補上映像檔內無 `.git` 導致的 `unknown` | `—` |
 | 相依套件 | `requirements.txt` 加 `langfuse>=4,<5` | `—` |
-| self-check | 新增 `tests/test_tracing.py`：驗關閉時回空 config、初始化失敗時不拋例外、開啟時 metadata 帶齊 session／user／release／tags 且 None 欄位被濾掉 | `—` |
+| 節點包裝 | `src/tracing.py` 新增 `node_span()`／`_brief()`／`_MAX_IO_CHARS`。不用 SDK 的 `@observe`（span 提早關閉，見上），改用 `client.start_as_current_observation()` 自行開關 | `822834f` |
+| 九個節點掛上 span | `src/graph.py` 的 `build_graph()`：包在 `add_node()` 而非裝飾函式，避免 `route_after_tools()` 內部呼叫 `assemble()` 時產生多餘 span | `822834f` |
+| self-check | 新增 `tests/test_tracing.py`：驗關閉時回空 config、初始化失敗時不拋例外、metadata 帶齊 session／user／release／tags 且 None 欄位被濾掉；並補驗截斷上限、`retrieved`／`messages` 只留筆數、關閉時原樣回傳、`functools.wraps` 保留節點名（名稱錯誤會讓 span 名變成 `wrapper`） | `—`／`822834f` |
+| CLI 無法啟動修復 | `src/cli.py`：`build_graph()` 於 `ef76670` 改為 async 後未同步更新，`python -m src.cli` 啟動即 `AttributeError`。僅 await 不足——`agent` 節點本身也是 async，同步 `.invoke()` 會拋 `No synchronous function provided`，故 `main()` 改 async 並改用 `ainvoke()` | `135c674` |
 
 ## 待補紀錄
 
