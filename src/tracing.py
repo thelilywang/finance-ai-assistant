@@ -9,12 +9,19 @@
     graph.astream(state, config=callbacks(session_id=..., user_id=...))
     flush()   # 只有 CLI / script 這類短生命週期程式需要
 
-節點層級不必逐一加 decorator：LangChain callback handler 會跟著 graph 傳下去，
-rewrite_question / extract_filters / agent / generate 四個 LLM 節點都會自動成為
-同一個 trace 底下的 observation，input/output/token/延遲由 SDK 直接帶走。
+一次問答＝一個 trace：callbacks() 只在 app.py / cli.py 的進入點掛一次，
+整張 graph 跑完都在同一個 trace 底下。
+
+節點層級則由 build_graph() 用 node_span() 逐一包起來（見該函式說明）——
+只靠 callback handler 的話，Langfuse 上看到的全是底層 ChatOllama 呼叫，
+每個節點名字、內容都長一樣，而 resolve_market / assemble 這類不呼叫 LLM 的
+節點根本不會出現。包過之後每個節點是一個具名 span，LLM generation 會靠
+OTel context 自動掛在所屬節點底下，節點的 input/output 另外送截斷過的摘要。
 """
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 import subprocess
 
@@ -86,6 +93,69 @@ def callbacks(
     except Exception as e:
         log.warning("Langfuse callback 建立失敗，本輪不送追蹤：%s", e)
         return {}
+
+
+_MAX_IO_CHARS = 500
+
+
+def _brief(state) -> dict:
+    """節點的 input/output 摘要。只留看得懂流程的欄位，長值截斷。
+
+    刻意不直接送整個 GraphState：retrieved 的 chunk 全文與 messages 往返動輒數千字，
+    送進 Langfuse 只會把 UI 塞爆，而判斷流程走向靠的是下面這幾個欄位。
+    """
+    if not isinstance(state, dict):
+        return {"value": str(state)[:_MAX_IO_CHARS]}
+    brief = {}
+    for key in ("question", "company", "doc_type", "market", "lang", "model",
+                "news_since_days", "in_scope", "off_topic", "ask_market",
+                "fetched", "answer"):
+        if (value := state.get(key)) is not None:
+            brief[key] = str(value)[:_MAX_IO_CHARS] if isinstance(value, str) else value
+    if (retrieved := state.get("retrieved")) is not None:
+        brief["retrieved_count"] = len(retrieved)
+    if (messages := state.get("messages")) is not None:
+        brief["messages_count"] = len(messages)
+    if fetch_results := state.get("fetch_results"):
+        brief["fetch_results"] = [str(r)[:_MAX_IO_CHARS] for r in fetch_results]
+    return brief
+
+
+def node_span(func):
+    """把 LangGraph 節點包成一個具名 span，帶截斷過的 input/output。
+
+    Langfuse 自動追蹤只看得到底層的 ChatOllama 呼叫，UI 上每個節點長得一模一樣，
+    也完全看不到 resolve_market/assemble 這些不呼叫 LLM 的節點。包一層之後，
+    節點名就是 span 名，LLM generation 靠 OTel context 自動掛在該節點底下。
+
+    追蹤未啟用時原樣回傳，不付任何代價，也不會因為 Langfuse 有問題而拖垮節點。
+    """
+    client = _get_client()
+    if client is None:
+        return func
+
+    # 刻意不用 @observe：它的 span 在函式回傳時就關了，之後再寫 input/output 會落到
+    # 父層（實測會全部疊在 trace 根上互相覆蓋，正是「每個節點 output 都一樣」的成因）。
+    # 自己開 span 才能在 span 還活著的時候把 output 寫進去。
+    if inspect.iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def wrapper(state, *args, **kwargs):
+            with client.start_as_current_observation(
+                name=func.__name__, input=_brief(state)
+            ) as span:
+                result = await func(state, *args, **kwargs)
+                span.update(output=_brief(result))
+                return result
+    else:
+        @functools.wraps(func)
+        def wrapper(state, *args, **kwargs):
+            with client.start_as_current_observation(
+                name=func.__name__, input=_brief(state)
+            ) as span:
+                result = func(state, *args, **kwargs)
+                span.update(output=_brief(result))
+                return result
+    return wrapper
 
 
 def flush() -> None:

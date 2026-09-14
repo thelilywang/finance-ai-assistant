@@ -48,4 +48,42 @@ else:
 # _release 任何情況都要回非空字串
 assert tracing._release(), "_release 不可回空字串"
 
+
+# --- _brief：節點 I/O 摘要 ---
+# 長字串要截斷，否則整份 prompt / 回答會被送進 Langfuse 把 UI 塞爆
+brief = tracing._brief({"question": "x" * 900, "company": "2330", "lang": "zh"})
+assert len(brief["question"]) == tracing._MAX_IO_CHARS, "長字串應截斷"
+assert brief["company"] == "2330"
+
+# 大宗欄位只留筆數，不送內容
+brief = tracing._brief({"retrieved": [{"id": 1}, {"id": 2}], "messages": [1, 2, 3]})
+assert brief["retrieved_count"] == 2 and brief["messages_count"] == 3
+assert "retrieved" not in brief and "messages" not in brief, "chunk/訊息內容不可送出"
+
+# None 欄位濾掉；非 dict（理論上不該發生）也不能炸
+assert "company" not in tracing._brief({"company": None})
+assert tracing._brief("abc") == {"value": "abc"}
+
+# fetch_results 每則各自截斷
+brief = tracing._brief({"fetch_results": ["y" * 900]})
+assert len(brief["fetch_results"][0]) == tracing._MAX_IO_CHARS
+
+
+# --- node_span：關閉時零成本，開啟時不改變節點行為 ---
+def _sample_node(state):
+    return {**state, "answer": "ok"}
+
+
+config.LANGFUSE_ENABLED = False
+reset()
+assert tracing.node_span(_sample_node) is _sample_node, "關閉時應原樣回傳，不付包裝成本"
+
+config.LANGFUSE_ENABLED = original
+reset()
+if config.LANGFUSE_ENABLED:
+    wrapped = tracing.node_span(_sample_node)
+    # span 名取自 __name__，functools.wraps 沒包好的話 Langfuse 上會變成 wrapper
+    assert wrapped.__name__ == "_sample_node", "節點名要保留，否則 span 名會錯"
+    assert wrapped({"question": "q"})["answer"] == "ok", "包裝不得改變節點回傳值"
+
 print("test_tracing OK")

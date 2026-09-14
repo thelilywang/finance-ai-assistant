@@ -43,6 +43,7 @@ from .tickers import (
     DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
     normalize_ticker, otc_adr_of,
 )
+from .tracing import node_span
 from .vectorstore import pool, similarity_search
 
 
@@ -840,16 +841,19 @@ async def build_graph():
     tools = await _mcp_client.get_tools()
 
     graph = StateGraph(GraphState)
-    graph.add_node("rewrite_question", rewrite_question)
-    graph.add_node("extract_filters", extract_filters)
-    graph.add_node("resolve_market", resolve_market)
-    graph.add_node("ask_market", ask_market)
-    graph.add_node("off_topic", off_topic)
-    graph.add_node("agent", agent)
+    # node_span 包在註冊這一層而非直接裝飾函式：assemble 另外被 route_after_tools 內部
+    # 呼叫一次（只為了看 retrieved），裝飾函式會讓每次路由判斷都多送一個假節點 span。
+    # 包在這裡則「是圖上的節點」才產生 span，測試也繼續拿到未包裝的原函式。
+    graph.add_node("rewrite_question", node_span(rewrite_question))
+    graph.add_node("extract_filters", node_span(extract_filters))
+    graph.add_node("resolve_market", node_span(resolve_market))
+    graph.add_node("ask_market", node_span(ask_market))
+    graph.add_node("off_topic", node_span(off_topic))
+    graph.add_node("agent", node_span(agent))
     graph.add_node("tools", ToolNode(tools))
-    graph.add_node("assemble", assemble)
-    graph.add_node("generate", generate)
-    graph.add_node("no_result", no_result)
+    graph.add_node("assemble", node_span(assemble))
+    graph.add_node("generate", node_span(generate))
+    graph.add_node("no_result", node_span(no_result))
 
     graph.set_entry_point("rewrite_question")
     graph.add_edge("rewrite_question", "extract_filters")
