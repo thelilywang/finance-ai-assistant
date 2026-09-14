@@ -22,10 +22,7 @@
    **2026-09-13 首次嘗試分析：資料量不足，未能得出結論。** 當日 203 行紀錄中，八個 `log_duration` 觀測點只有 `retrieve_context` 觸發過 6 次，四個 LLM 節點（`rewrite_question`／`extract_filters`／`agent`／`generate`）**一次都沒有**——logging 落地後尚未有真人問過完整的題目，六筆全來自 smoke test。**要等實際使用累積後再分析，不要拿 smoke test 的數字當結論。** 判斷可以開始分析的門檻：`generate` 事件累積約 30 筆以上（涵蓋不同題型與是否命中快取）。
 
    **2026-09-14 複查：仍為 0 筆，門檻未達。** `data/logs/` 累積 263 行，`generate` 事件依然一次都沒有。隔一天沒有進展不代表機制有問題——這段期間沒有真人完整問過題目而已。**再次複查前先確認期間內是否真有實際使用**，否則只是重複確認同一個空集合。
-7. **其餘 `print` 遷移至 logging**（`update.py` 34 處、`charts.py` 7、`market.py` 5、`ingest.py` 4）
-   2026-09-13 遷移了 AI 路徑（`graph.py`、`mcp_server.py`）與 `app.py`。剩餘四檔共 50 處屬 CLI 給人看的進度輸出，與 AI 耗時追蹤無關，優先度低。要做時注意 CLI 的即時進度顯示與 logging 的緩衝行為不同。
-   **不列入範圍**：`cli.py` 的 3 處是 `rich` 的 `console.print`（終端排版輸出，非 stdout 除錯）；`i18n.py:220` 的 1 處是 self-check 的結果輸出，隨 self-check 走。兩者先前被計入而重複盤點過，故在此註明。
-8. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
+7. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
    目前只記錄長度（`prompt_chars`／`answer_chars`）而非內容，故無個資疑慮。若未來為了回測要記錄 prompt／回應全文，需先決定保留天數與去識別化方式——專案已有 `NEWS_RETENTION_DAYS`／`THREAD_RETENTION_DAYS` 的保留期慣例可循（後者的註解明確指出「對話含提問內容，屬個資，留短一點」）。另需觀測 `LOG_BACKUP_DAYS=30` 是否合適：日檔大小取決於實際使用量，累積一段時間後回頭確認磁碟佔用與「回測要看多久以前」的實際需求是否匹配。
 
 ## 保持現狀（已評估，判斷暫不處理）
@@ -324,19 +321,17 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間戳、只進 stdout，而 `docker logs` 有輪替上限、容器重啟即失去歷史——**無法回答「上週那一題為什麼跑了 400 秒」**，對一個以本地模型生成為瓶頸的專案等於放棄優化依據。
 
-改用標準庫 `logging` 輸出 JSON Lines 到已掛載的 `data/logs/`，四個 LLM 呼叫點與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid` 串連（設定細節見改動內容表）。**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦 8）。落檔位置本身帶一個坑：`LOG_DIR` 在 bind mount 上，host 執行會寫進容器同一個 `app.log` 並灌入連線失敗，首次分析時 203 行中有 176 行是這類雜訊，不隔離會被回測當成正式環境故障，故容器外執行時檔名加 `-local` 後綴。
+改用標準庫 `logging` 輸出 JSON Lines 到已掛載的 `data/logs/`，四個 LLM 呼叫點與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid` 串連（設定細節見改動內容表）。**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦 7）。另因 `LOG_DIR` 在 bind mount 上，host 執行會寫進容器同一個檔並灌入連線失敗雜訊，被回測誤判成正式環境故障，故容器外執行時檔名加 `-local` 後綴。
 
 ### 檢索平行化與 query embedding 快取
 
-`retrieve_context()` 原本依序執行主檢索、同公司新聞補充與市場新聞補充；agent 在同一題的 tool loop 重查時，又會對相同 question 重複呼叫 Ollama embedding（把文字轉成向量的服務，每次一趟網路往返）。改為程序內、有界的 TTL/LRU 快取，加上候選檢索預取：有 company 時三段同時送出，待主結果確定後才依原有條件採用候選。行為維持不變——`doc_type` 放寬仍只在主檢索為空時執行，來源順序與配額照舊。
-
-快取 key 含 embedding model、Ollama URL 與原始 question，預設 256 筆／900 秒（`EMBEDDING_CACHE_MAX_ENTRIES`／`EMBEDDING_CACHE_TTL_SECONDS`，設 0 關閉）；只快取成功結果、重啟即清空，鎖覆蓋 cold miss 以免同時抵達的相同問題重複打 Ollama。
+`retrieve_context()` 原本依序執行主檢索、同公司新聞補充與市場新聞補充；agent 在同一題的 tool loop 重查時，又會對相同 question 重複呼叫 Ollama embedding（把文字轉成向量的服務，每次一趟網路往返）。改為程序內、有界的 TTL/LRU 快取（`EMBEDDING_CACHE_MAX_ENTRIES`／`EMBEDDING_CACHE_TTL_SECONDS`，設 0 關閉），加上候選檢索預取：有 company 時三段同時送出，待主結果確定後才依原有條件採用候選。行為維持不變——`doc_type` 放寬仍只在主檢索為空時執行，來源順序與配額照舊。
 
 **取捨**：快取讓同一題的重複檢索幾乎免費，代價是答案在 TTL 內對同一字面問題不反映新入庫的資料——以本專案的入庫頻率（每日批次）判斷可接受。
 
 ### 檢索效能實測
 
-`RETRIEVE_PARALLEL` 開關（`src/config.py`）讓 `tests/bench_retrieve.py` 能在**同一個 image、同一個容器、同一批資料**上切換行為做 A/B。六題輪替、每組 7 次取中位數，第一次（含連線池初始化與 Ollama 冷啟動）另計。
+`RETRIEVE_PARALLEL` 開關（`src/config.py`）讓 `tests/bench_retrieve.py` 能在**同一個 image、同一個容器、同一批資料**上切換行為做 A/B。六題輪替、每組 7 次取中位數。
 
 | 組合 | 中位數 | 最小 | 最大 |
 |---|---|---|---|
@@ -345,11 +340,11 @@ AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間�
 | 並行 + 無快取 | 202.5 ms | 198.1 | 215.1 |
 | 並行 + 有快取 | **11.5 ms** | 9.3 | 19.1 |
 
-貢獻幾乎全來自快取：每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL。並行的幅度小但離散度較低。兩條路徑回傳的 chunk id 序列完全相同（`[4596, 3222, 3200, 3781, 3216, 3854, 3809]`）。
+貢獻幾乎全來自快取：每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL。並行的幅度小但離散度較低。兩條路徑回傳的 chunk id 序列完全相同。
 
-**連線池 `max_size` 維持 5。** 三段並行各借 1 條連線、pool 又是模組級單例，**推導**上兩個並行檢索就會超額並在 `timeout=2` 後拋 `PoolTimeout`。實測相反：壓到 8、12、20 個並行（理論上需 24、36、60 條連線）在 `max_size=5` 下仍零失敗，改用 8／12 也只在雜訊內。前提錯在每段 `similarity_search` 只持有連線數毫秒即歸還，連線快速輪轉而非被三段長期佔住，「3 × 並行數」的推估不適用。
+**連線池 `max_size` 維持 5。** 三段並行各借 1 條連線、pool 又是模組級單例，**推導**上兩個並行檢索就會超額並在 `timeout=2` 後拋 `PoolTimeout`。實測相反：壓到 8、12、20 個並行（理論上需 24、36、60 條連線）在 `max_size=5` 下仍零失敗。前提錯在每段 `similarity_search` 只持有連線數毫秒即歸還，連線快速輪轉而非被三段長期佔住，「3 × 並行數」的推估不適用。
 
-端到端延遲仍以生成為主（單題數十秒至數百秒），這數十毫秒對體感沒有可觀察的影響。保留 `RETRIEVE_PARALLEL=0` 是為了 DB 端競爭情況改變時（資料量成長、改用共享資料庫）能直接重測與回退而不必改程式；為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用，只差在候選如何取得。評估後不採用的三個方向見上方「保持現狀」區塊。
+端到端延遲仍以生成為主，這數十毫秒對體感沒有可觀察的影響。保留 `RETRIEVE_PARALLEL=0` 是為了 DB 端競爭情況改變時能直接重測與回退而不必改程式；為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用。評估後不採用的三個方向見上方「保持現狀」區塊。
 
 ### 改動內容
 
@@ -363,6 +358,51 @@ AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間�
 | 檢索並行開關與路徑拆分 | `config.RETRIEVE_PARALLEL`；`graph.py` 的 `_retrieve_parallel`／`_retrieve_sequential`／`_relax_doc_type`／`_merge_market_news` | `f4d398c` |
 | 量測腳本 | 新增 `tests/bench_retrieve.py`（需在 container 內執行，DB 未對 host 開 port） | `74789e9` |
 | 新增 self-check | `tests/test_logging_setup.py`；`tests/test_retrieve_context.py` 補等價性、快取關閉、embed 失敗不污染快取、並行分支例外傳遞。等價性測試以故障注入驗證過有鑑別力（破壞去重邏輯會被抓到） | `f6f5de8`／`f4d398c` |
+
+## 2026-09-14　抓取路徑可觀測性修正
+
+承接 09-13 的 logging 落地：剩餘的 `print` 原被歸類為 CLI 進度輸出，但依呼叫端重新分類後，50 處中約 39 處其實會在服務請求中執行（`charts.py` 的繪圖由 `app.py` 呼叫、`market.py` 的行情快照由 `generate` 呼叫、`update.py` 的六個 fetcher 則同時被 CLI 與 `fetch_missing_data`／`mcp_server.py` 呼叫），輸出只進 stdout、重啟即失去歷史。這一項因此不是低優先的 CLI 清理，而是 09-13 儀器化未完成的另一半。
+
+同時修掉一個更根本的缺陷：**`fetch_missing_data` 的觀測點以「沒拋例外」為成功判準，但 fetcher 的失敗多半不拋例外。** 原本寫成 `results.append(call().detail)`，取了 `detail` 卻丟掉 `FetchResult.ok`，於是一律記 `ok=True`；而查無 CIK、官方 OpenAPI 查無公司、MOPS 版面改版都是正常返回 `FetchResult(False, msg)`，只有網路層例外才會走到 `except`。也就是說 logfile 裡「補抓成功」這個欄位過去從未為真過，回測時分不出補抓究竟成功幾次。
+
+`reason` 一律用短代碼（`no_cik`／`no_filing`／`api_miss`／`mops_blocked` 等）而非自由文字，否則 `jq` 彙總不動——回測要問的是「哪一類失敗最多」。另有兩處是**降級**而非失敗，特別標成 `cover_only`（6-K 讀不到申報目錄，退回只有封面頁的主文）與 `no_chinese_doc`（MOPS 查無中文主文改抓替代檔）。後者仍回 `FetchResult(True, ...)`，`ok` 顯示成功而內容是替代檔，logfile 是唯一能保留這個區別的地方。
+
+**已知限制**：本次只改紀錄的正確性，未改變任何抓取行為；補抓成功率要等實際使用累積後才答得出來（門檻見待辦 6）。純 CLI 進度輸出與 self-check 的結果輸出不在遷移範圍內。
+
+### 改動內容
+
+| 項目 | 涉及檔案與函式 | commit |
+|---|---|---|
+| `auto_fetch` 成敗判準修正 | `graph.py` 的 `fetch_missing_data`：接住 `FetchResult` 再取 `.ok`，取代「沒拋例外即成功」 | `—` |
+| 六個 fetcher 的失敗訊息遷移 | `update.py` 的 `fetch_edgar`／`fetch_sec_financials`／`fetch_tw_financials`／`fetch_mops`／`fetch_news`／`fetch_market_news`，共 15 處 | `—` |
+| 降級路徑改為具名警示 | `update.py`：6-K 退回封面頁記 `cover_only`、MOPS 替代檔記 `no_chinese_doc`。兩者原為 `print`；後者回傳 `ok=True`，不記則無從得知內容是替代檔 | `—` |
+| 決策卡圖表與行情快照 | `charts.py`（5 處，`price_chart`／`eps_chart`／`report_pdf`）、`market.py`（4 處，`format_consensus`／`get_market_snapshot`）。`market.py` 帶 `symbol` 而非 `company`，因 `format_consensus` 收到的是 yfinance ticker 物件 | `—` |
+| 入庫警示與進度 | `ingest.py` 的 `ingest_text`：空內容與財報字數偏低改 `log.warning`，chunk 數與寫入筆數改 `log.info` | `—` |
+| self-check 改收 log record | `tests/test_ingest.py` 原以 `redirect_stdout` 攔截財報字數警示，改走 logging 後攔不到，改為掛 handler 收 `LogRecord`，並補驗 `source` 與 `reason` 欄位 | `—` |
+
+## 2026-09-14　接上自架 Langfuse 追蹤
+
+延續 09-13、09-14 兩章的可觀測性線：logfile 已能回答「哪個節點花了多久」，但答不出「這一題送進模型的 prompt 長什麼樣、模型回了什麼、花了多少 token」。Langfuse 是自架的 LLM 追蹤平台，把這層內容留在自己的機器上，不必把提問送進第三方服務。
+
+用官方 SDK 的 LangChain callback handler。**掛載點只有一處**：`app.py` 的 `_stream_answer` 呼叫 `graph.astream` 時把 handler 放進 `config`，LangGraph 會往下傳給每個節點，`rewrite_question`／`extract_filters`／`agent`／`generate` 四個 LLM 呼叫點因此自動成為同一個 trace 下的 observation，不需要逐一加 decorator。
+
+**追蹤失敗不得影響問答**：`tracing.py` 的三個進入點（`callbacks`／`flush`／內部的 client 建立）全部吞例外，初始化失敗只記一次 warning 後靜默跳過，`callbacks()` 退化成回傳 `{}`——多傳一個空 config 對 LangGraph 無副作用，呼叫端因此不必寫任何判斷。未設 `LANGFUSE_PUBLIC_KEY` 即視為關閉，讓 CI 與剛 clone 的專案不必有金鑰也能跑。
+
+**容器內不能用 `localhost`。** Langfuse 只綁 `127.0.0.1:18300`，而本專案的 `app` 也在容器裡，容器內的 `localhost` 指向容器自己——實測 `Connection refused`，改用 compose 已設好的 `host.docker.internal` 則回 200。另一個容器限制是映像檔裡沒有 `.git`，`_release()` 的 git fallback 取不到版本，所有 trace 的 `release` 都會是 `unknown`，失去版本歸因能力；改由 compose 以 `LANGFUSE_RELEASE` 帶入。
+
+**驗收**：實際跑一次 `qwen3.5:9b` 的問答，trace 確認記錄到 input、output、`user_id`／`session_id`／`tags`／`environment`，延遲 23,871 ms，token 為 input 21／output 33。
+
+### 改動內容
+
+| 項目 | 涉及檔案與函式 | commit |
+|---|---|---|
+| 追蹤模組 | 新增 `src/tracing.py`（`callbacks`／`flush`／`_release`／`_get_client`）。用官方 SDK 的 `langfuse.langchain.CallbackHandler` 而非手刻 HTTP | `—` |
+| handler 掛載與 metadata | `src/app.py` 的 `_stream_answer`：`session_id` 取 chainlit 的 `thread_id`（同一串對話在 UI 才收得在一起）、`user_id` 取 OAuth `identifier`，未登入或拿不到仍能追蹤；model 與 lang 進 tags | `—` |
+| CLI 的 flush | `src/cli.py`：短生命週期程序結束前須 `flush()`，否則最後幾輪 trace 隨程序消失。長駐的 chainlit 靠 SDK 背景批次，不呼叫 | `—` |
+| 設定項 | `config.LANGFUSE_ENABLED`（總開關）／`LANGFUSE_RELEASE`；金鑰只進 `.env`（已在 `.gitignore`），`.env.example` 留空欄位與容器內外兩種 base_url 的說明 | `—` |
+| 容器版本歸因 | `docker-compose.yml` 的 `app` 服務加 `LANGFUSE_RELEASE`，補上映像檔內無 `.git` 導致的 `unknown` | `—` |
+| 相依套件 | `requirements.txt` 加 `langfuse>=4,<5` | `—` |
+| self-check | 新增 `tests/test_tracing.py`：驗關閉時回空 config、初始化失敗時不拋例外、開啟時 metadata 帶齊 session／user／release／tags 且 None 欄位被濾掉 | `—` |
 
 ## 待補紀錄
 
