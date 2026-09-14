@@ -33,6 +33,12 @@
 
 - **異質文檔重排與配額控制——量測後判斷不需處理**（`src/graph.py` 的 `retrieve_context`）— 原列為待辦，2026-09-10 實測後撤下。跨來源重排的前提（兩種文檔在同一名次空間混排）不成立：四次檢索各自 `ORDER BY` 後串接，財報與新聞從未進入同一個排序，混排問題已被現行架構迴避，再加一層重排是重解已解的問題。配額（主檢索 5／補新聞 3／補市場新聞 2）亦維持不變：原本疑慮是純財報問題固定補 3 條新聞屬浪費，但實測跑完整的 `retrieve_context` → `generate` 並比對引用編號，補進來的新聞確實被引用（「微軟營收結構」一題決策卡直接引用兩條新聞）。這與決策卡設計一致——`trend_section` 的「利多」「風險」「下一個關鍵事件」「建議追蹤指標」四欄硬性必填，「建議傾向」明文要求財報＋新聞＋行情三者齊備，砍掉新聞會讓這些欄位失去素材。結論：那 3 條新聞是必要成本，不是浪費。
 
+- **Redis 取代程序內的 query embedding 快取——評估後不採用**（`src/graph.py` 的 `_embed_query_cached`）— 2026-09-13 判斷不做。原設想是快取跨程序共享能提高命中率，但現在只有 `app` 與 `mcp-server` 兩個單一程序，而快取收益集中在同一題的 agent tool loop 內，本來就在同一程序，跨程序共享收不到額外命中。代價則包含一個 container、網路依賴、1024 維向量序列化（每筆約 8KB，往返可能比本機 dict 慢）與一組「Redis 掛了怎麼辦」的降級路徑。**觸發條件**：MCP server 要跑多 worker／多副本，或希望快取跨重啟存活；屆時 `_embed_query_cached()` 的介面不用改，只換內部儲存。
+
+- **單一 SQL 用 `UNION ALL` 取回三段檢索——評估後不採用**（`src/graph.py` 的 `retrieve_context`）— 2026-09-13 判斷不做。可省下兩次往返與連線佔用，但要在 SQL 裡表達「主結果有新聞就不要同公司新聞」這類條件邏輯，會把現在讀得懂的 Python 條件變成難維護的 SQL；三段各自 `ORDER BY` 也是刻意設計，見上方「異質文檔重排」一項。連線佔用本身經實測並非問題（詳見 2026-09-13 章節），這個優化要解的成本並不存在。
+
+- **改用 async DB driver 取代 ThreadPoolExecutor——評估後不採用**（`src/graph.py` 的 `_retrieve_parallel`）— 2026-09-13 判斷不做。`retrieve_context` 是同步函式、被 `asyncio.to_thread` 包著呼叫，改 async 要一路改到 graph 節點與 MCP tool，影響面遠大於收益——而並行本身的效益僅 13-34 ms，遠小於快取的 212 ms（量測數字見 2026-09-13 章節）。
+
 - **回應延遲過長，架構層面已無可省**（`src/graph.py` 的 `generate` 節點）— 單題總耗時 186 至 470 秒。三個可行方向已於 09-09 收斂：`_trim_for_llm` 裁掉 agent 迴圈重複傳遞的 context（降低 context 膨脹，不改善延遲）、`route_after_tools` 在資料明顯足夠時跳過第二輪 agent 決策（結構性省下一次 LLM 呼叫，該節點原佔 82 至 106 秒）、決策卡字數約束經 A/B 實測反使輸出變長 35% 並遺漏免責聲明，已排除。另兩項候選亦已排除：合併 `rewrite_question`/`extract_filters` 僅佔 3%；換用較小或 MLX 版本的模型會先失去 tool calling 與結構化輸出能力。**剩餘瓶頸是本地模型的生成速度本身（穩定在每秒約 10 字，`generate` 一題需 90 至 160 秒），屬硬體限制而非架構問題**，換用推理速度更高的硬體才會改變，在此之前重新評估軟體層方向不具效益。詳見 2026-09-08、09-09 章節。
 - **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前覆蓋純函式與資料轉換層（`assemble`、`agent_route`、MCP tool 的回傳格式、`fetch_missing_data`、格式化函式等），`generate` 因直接耦合本地 LLM 未做 mock、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測生成節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
 - **LLM 選用 tool 的正確性無自動化測試**（`src/mcp_server.py` 的 tool 說明、`src/graph.py` 的 `_tool_llm`）— 「資料過期時會不會主動補抓」取決於模型行為，需真實 Ollama 呼叫且結果不保證重現，不適合寫成自動化斷言。目前靠端到端手動驗證，且需連續執行多次確認一致性（09-08 有過單次成功、重複執行皆失敗的實例）。模型換版、調整 tool 說明或改動 `_tool_llm` 的參數時都需重跑。
@@ -292,30 +298,24 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 ### 改動內容
 
-| 項目 | 涉及檔案與函式 |
-|---|---|
-| 標注評估 | 新增 `tests/eval_data/rag_annotations.json` 與 `tests/eval_rag_retrieval.py` |
-| 離題攔截 | `graph.py` 新增 `_is_off_topic`；`i18n.py` 補 `off_topic` 文案；新增 `tests/test_off_topic.py` |
-| 放寬告知 | `mcp_server.py` 的 header 補提示 |
-| `resolve_market` 防禦性修補 | 對 `state["question"]` 硬取值改用 `.get()` |
-| 補充新聞未排除自家公司（時效歸屬污染／市場新聞恆為 0-2 筆） | `mcp_server.py` 計算最新新聞天數時只納入查詢公司自身新聞，避免 header 報錯新鮮度、誘導模型跳過補抓；`retrieve_context` 補充段改為排除查詢公司自身、依發布日期排序，`similarity_search` 新增 `exclude_company`（`IS DISTINCT FROM`，避免 `!=` 漏掉 NULL）與 `order_by_recency` |
-| 退回封面頁靜默視為成功 | `_fetch_edgar` 目錄讀取失敗退回主文時，回傳 `FetchResult(ok=False)` 而非靜默成功；封面頁字數足以通過 `_MIN_FILING_CHARS`，屬同區域既有缺陷、非本次肇因 |
-| 入庫字數警示 | `ingest.py` 的 `ingest_text()` 新增 `_MIN_FINANCIAL_REPORT_CHARS`；新增 `tests/test_ingest.py` |
-| ASML 財報重抓 | 沿用 `ingest_text` 的 `delete_by_source` 覆蓋重抓：5 chunk／2,923 字元 → 104 chunk／73,234 字元 |
+| 項目 | 涉及檔案與函式 | commit |
+|---|---|---|
+| 標注評估 | 新增 `tests/eval_data/rag_annotations.json` 與 `tests/eval_rag_retrieval.py` | `65b1ba9` |
+| 離題攔截 | `graph.py` 新增 `_is_off_topic`；`i18n.py` 補 `off_topic` 文案；新增 `tests/test_off_topic.py` | `233a509` |
+| 放寬告知 | `mcp_server.py` 的 header 補提示 | `37d5075` |
+| `resolve_market` 防禦性修補 | 對 `state["question"]` 硬取值改用 `.get()` | `36c9511` |
+| 補充新聞未排除自家公司（時效歸屬污染／市場新聞恆為 0-2 筆） | `mcp_server.py` 計算最新新聞天數時只納入查詢公司自身新聞，避免 header 報錯新鮮度、誘導模型跳過補抓；`retrieve_context` 補充段改為排除查詢公司自身、依發布日期排序，`similarity_search` 新增 `exclude_company`（`IS DISTINCT FROM`，避免 `!=` 漏掉 NULL）與 `order_by_recency` | `65b1ba9` |
+| 退回封面頁靜默視為成功 | `_fetch_edgar` 目錄讀取失敗退回主文時，回傳 `FetchResult(ok=False)` 而非靜默成功；封面頁字數足以通過 `_MIN_FILING_CHARS`，屬同區域既有缺陷、非本次肇因 | `65b1ba9` |
+| 入庫字數警示 | `ingest.py` 的 `ingest_text()` 新增 `_MIN_FINANCIAL_REPORT_CHARS`；新增 `tests/test_ingest.py` | `a1baa73` |
+| 架構圖同步 | 依 `draw_mermaid()` 重新產生 `README.md`、`docs/PROJECT.md`、`docs/AI_Product_Case_Study.md` 的中英架構圖 | `fe1e915` |
+| 文字版節點流程同步 | 同檔的中英純文字流程仍停在 `retrieve` 獨立節點，改為 `resolve_market → agent ⇄ tools → assemble`：檢索已是 agent 呼叫的 MCP tool，資料是否足夠改由模型判斷（詳見 2026-09-07 章節） | `5c89749` |
+| ASML 財報重抓 | 沿用 `ingest_text` 的 `delete_by_source` 覆蓋重抓：5 chunk／2,923 字元 → 104 chunk／73,234 字元 | `—` |
 
 ---
 
-## 2026-09-10　檢索平行化與 query embedding 快取
+## 2026-09-13　AI 可觀測性：logging 落地、檢索平行化與效能實測
 
-`retrieve_context()` 原本會依序執行主檢索、同公司新聞補充與市場新聞補充；agent 在同一題的 tool loop 重查時，也會對相同 question 重複呼叫 Ollama embedding。改為程序內、有界的 TTL/LRU 快取，加上候選檢索預取：有 company 時主檢索、同公司新聞與市場新聞同時送出，待主結果確定後才依原有條件採用候選。`doc_type` 放寬仍只在主檢索為空時執行，來源順序與配額維持「主結果（或放寬結果）→ 同公司新聞最多 3 筆 → 市場新聞最多 2 筆」。
-
-快取 key 包含 embedding model、Ollama URL 與原始 question；預設 256 筆、900 秒，可由 `EMBEDDING_CACHE_MAX_ENTRIES`／`EMBEDDING_CACHE_TTL_SECONDS` 設定，設為 0 可完全關閉。只快取成功結果、不落地、重啟即清空；鎖覆蓋 cold miss，避免同時抵達的相同問題重複打 Ollama。
-
-量測與連線池的結論見下方 2026-09-13 一節。
-
----
-
-## 2026-09-13　AI 可觀測性：logging 落地與檢索效能實測
+同一條線上的三件事：先把 AI 執行過程落檔，取得可回測的耗時數據；再依這些數據做檢索平行化與 query embedding 快取；最後用同一套量測驗證兩項優化各自的貢獻，並回頭檢查它們對連線池的影響。
 
 ### 從 `print` 改為 logging，AI 行為每日落檔
 
@@ -324,38 +324,23 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 結果是**無法回答「上週那一題為什麼跑了 400 秒」**——這對一個以本地模型生成為瓶頸的專案來說，
 等於永久放棄優化的判斷依據。
 
-新增 `src/logging_setup.py`，`app` 與 `mcp-server` 進入點各呼叫一次 `setup_logging(service)`：
+新增 `src/logging_setup.py`，`app` 與 `mcp-server` 進入點各呼叫一次 `setup_logging(service)`，保留 `StreamHandler` 使 `docker logs` 行為不變。用標準庫 `logging` 而非 structlog／loguru：需要的結構化欄位用 `extra` 加一個 JSON formatter 就能解決，不值得為此增加依賴。輸出為每日一檔的 JSON Lines，寫入已掛載的 `data/logs/`（不需新增 volume，`.gitignore` 已含 `data/`）——目的是回測，JSONL 可直接餵 pandas／jq，純文字要先寫 parser。輪替按日期而非大小，因為 `RotatingFileHandler` 的 `.1`／`.2` 序號無法對應到日期，回測「上週三那題」得逐檔翻；改用 `TimedRotatingFileHandler(when="midnight")` 並設 `namer` 產出 `app-2026-09-13.log` 這類檔名（利於 glob 與排序），切檔落在台北午夜，與專案其他「今天」的判斷（資料時效、MOPS 民國年）一致。兩個服務各寫各的檔，因為多程序共寫同一檔時切檔會互相覆蓋。
 
-- **用標準庫 `logging`，不加第三方依賴**。structlog／loguru 的賣點是結構化輸出與較好的 API，
-  但需要的結構化欄位用 `extra` 加一個 JSON formatter 就能解決，不值得為此增加依賴。
-- **每日一檔、JSON Lines**，寫入 `data/logs/`（`app` 與 `mcp-server` 都已掛載 `./data`，
-  不需新增 volume；`.gitignore` 已含 `data/`）。選 JSONL 是因為目的是回測，
-  可直接餵 pandas／jq，純文字要先寫 parser。
-- **按日期輪替而非按大小**：`RotatingFileHandler` 的 `.1`／`.2` 序號無法對應到日期，
-  回測「上週三那題」得逐檔翻。改用 `TimedRotatingFileHandler(when="midnight")`，
-  並設 `namer` 讓檔名是 `app-2026-09-13.log` 而非預設的 `app.log.2026-09-13`（利於 glob 與排序）。
-  切檔在台北午夜——`docker-compose.yml` 已設 `TZ=Asia/Taipei`，
-  與專案其他「今天」的判斷（資料時效、MOPS 民國年）一致。
-- **兩個服務各寫各的檔**。`TimedRotatingFileHandler` 在多程序共寫同一檔時，切檔會互相覆蓋。
-- **容器外執行時檔名加 `-local` 後綴**（`_log_name()`）。`LOG_DIR` 在 bind mount 上，
-  host 直接跑測試會寫進容器同一個 `app.log`。這不只是吵——host 沒有 `PGVECTOR_URL`
-  （只在 `docker-compose.yml` 設定），會 fallback 到 `localhost:5432`，而 DB 未對 host 開 port，
-  於是每次 host 執行都往共用檔灌一批連線失敗。以 `/.dockerenv` 是否存在判斷執行環境。
-  這個問題是 2026-09-13 首次嘗試分析 logfile 時發現的：176／203 行是本機測試的雜訊，
-  若不隔離，未來的回測會把它們當成正式環境的故障。
-- 保留 `StreamHandler`，`docker logs` 的既有行為不變。
+容器外執行時檔名加 `-local` 後綴（`_log_name()`，以 `/.dockerenv` 是否存在判斷）。`LOG_DIR` 在 bind mount 上，host 直接跑測試會寫進容器同一個 `app.log`，而 host 沒有 `PGVECTOR_URL`（只在 `docker-compose.yml` 設定）會 fallback 到 `localhost:5432`、DB 又未對 host 開 port，於是每次 host 執行都往共用檔灌一批連線失敗——首次分析 logfile 時 203 行中有 176 行是這類雜訊，不隔離的話回測會把它們當成正式環境的故障。
 
-記錄的欄位：四個 LLM 呼叫點（`rewrite_question`／`extract_filters`／`agent`／`generate`）
-與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid`（問題文字的短 hash）串連。
-`generate` 另記 `prompt_chars`／`answer_chars` 以區分「慢在輸入還是輸出」；
-**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦 8）。
-`GraphState` 沒有 `thread_id`，加欄位會擴散到所有呼叫端，故以 `qid` 代替。
+記錄的欄位：四個 LLM 呼叫點（`rewrite_question`／`extract_filters`／`agent`／`generate`）與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid`（問題文字的短 hash）串連；`GraphState` 沒有 `thread_id`，加欄位會擴散到所有呼叫端，故以 `qid` 代替。`generate` 另記 `prompt_chars`／`answer_chars` 以區分「慢在輸入還是輸出」，**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦 8）。
+
+### 檢索平行化與 query embedding 快取
+
+`retrieve_context()` 原本會依序執行主檢索、同公司新聞補充與市場新聞補充；agent 在同一題的 tool loop 重查時，也會對相同 question 重複呼叫 Ollama embedding（把文字轉成向量的服務，每次都是一趟網路往返）。改為程序內、有界的 TTL/LRU 快取，加上候選檢索預取：有 company 時主檢索、同公司新聞與市場新聞同時送出，待主結果確定後才依原有條件採用候選。`doc_type` 放寬仍只在主檢索為空時執行，來源順序與配額維持「主結果（或放寬結果）→ 同公司新聞最多 3 筆 → 市場新聞最多 2 筆」。
+
+快取 key 包含 embedding model、Ollama URL 與原始 question；預設 256 筆、900 秒，可由 `EMBEDDING_CACHE_MAX_ENTRIES`／`EMBEDDING_CACHE_TTL_SECONDS` 設定，設為 0 可完全關閉。只快取成功結果、不落地、重啟即清空；鎖覆蓋 cold miss，避免同時抵達的相同問題重複打 Ollama。
+
+**取捨**：快取讓同一題的重複檢索幾乎免費（下方實測省約 212 ms），代價是答案在 TTL 內對同一字面問題不反映新入庫的資料——以本專案的入庫頻率（每日批次）與 900 秒 TTL 判斷可接受。
 
 ### 檢索效能實測
 
-新增 `RETRIEVE_PARALLEL` 開關（`src/config.py`），讓循序與並行兩條路徑並存於同一份程式碼，
-量測腳本 `tests/bench_retrieve.py` 因此能在**同一個 image、同一個容器、同一批資料**上切換行為做 A/B。
-六題輪替、每組 7 次取中位數，第一次（含連線池初始化與 Ollama 冷啟動）另計。
+`RETRIEVE_PARALLEL` 開關（`src/config.py`）讓兩條路徑並存於同一份程式碼，`tests/bench_retrieve.py` 因此能在**同一個 image、同一個容器、同一批資料**上切換行為做 A/B。六題輪替、每組 7 次取中位數，第一次（含連線池初始化與 Ollama 冷啟動）另計。
 
 | 組合 | 中位數 | 最小 | 最大 |
 |---|---|---|---|
@@ -364,75 +349,34 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 | 並行 + 無快取 | 202.5 ms | 198.1 | 215.1 |
 | 並行 + 有快取 | **11.5 ms** | 9.3 | 19.1 |
 
-拆開來看兩項優化各自的貢獻：
-
-- **query embedding 快取：省約 212 ms**（循序 236.5 → 24.6）。這是主要貢獻，
-  因為每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL。
-- **三段候選並行：無快取時省 34 ms，有快取時省 13 ms**。幅度小但穩定，
-  且並行組的最大值（215.1）比循序組（263.6）更集中，離散度較低。
-
-兩條路徑在真實資料上回傳的 chunk id 序列完全相同
-（`[4596, 3222, 3200, 3781, 3216, 3854, 3809]`），等價性另有 self-check 以故障注入驗證。
+貢獻幾乎全來自快取（循序 236.5 → 24.6，省約 212 ms）：每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL。並行的 13-34 ms 幅度小但穩定，且最大值較循序集中（215.1 對 263.6）。兩條路徑在真實資料上回傳的 chunk id 序列完全相同（`[4596, 3222, 3200, 3781, 3216, 3854, 3809]`）。
 
 ### 連線池：原本擔心的 PoolTimeout 不存在
 
 改動前單次檢索借 1 條連線，改動後三段並行各借 1 條，`vectorstore.py` 的 pool 是 `max_size=5`
 的模組級單例，因此**推導**上兩個並行檢索就會超額並在 `timeout=2` 後拋 `PoolTimeout`。
-實測推翻了這個推論：
+實測推翻了這個推論：4 個並行檢索在 `max_size` 為 5／8／12 時的批次中位數分別為 27.1／27.7／28.8 ms，零失敗，差距落在雜訊範圍內；進一步壓到 8、12、20 個並行檢索（理論上分別需要 24、36、60 條連線）在 `max_size=5` 下仍全部成功，累計等待分別為 517 / 828 / 1154 ms。前提不成立的原因是每段 `similarity_search` 持有連線的時間極短（單條 SQL 約數毫秒即歸還），連線快速輪轉而非同時被三段長期佔住，「3 × 並行數」這個推估因此不適用。
 
-| max_size | 4 個並行檢索的批次中位數 | 單筆 p95 | 失敗 |
-|---|---|---|---|
-| 5 | 27.1 ms | 44.0 ms | 0 |
-| 8 | 27.7 ms | 39.3 ms | 0 |
-| 12 | 28.8 ms | 37.9 ms | 0 |
-
-進一步壓到 8、12、20 個並行檢索（理論上分別需要 24、36、60 條連線），在 `max_size=5`
-下**全部成功、零失敗**，累計等待分別為 517 / 828 / 1154 ms。
-
-原因是每段 `similarity_search` 持有連線的時間極短（單條 SQL 約數毫秒即歸還），
-連線是快速輪轉而非同時被三段長期佔住，所以「3 × 並行數」這個推估的前提並不成立。
-`max_size` 敏感度也顯示 5／8／12 之間沒有有意義的差異（中位數落在 195-197 ms，
-差距在雜訊範圍內）。
-
-**結論：`max_size` 維持 5，不做調整。** 這是本次量測最有價值的產出——
-若照原本的推導直接改成 12，就是在沒有問題的地方加了一個看似合理、實則無依據的數字。
+**結論：`max_size` 維持 5，不做調整。** 若照原本的推導直接改成 12，就是在沒有問題的地方加了一個看似合理、實則無依據的數字。
 
 ### 保留循序路徑的理由
 
-並行的效益（13-34 ms）遠小於快取（212 ms），且端到端總延遲仍以本地模型生成為主
-（單題數十秒至數百秒），這 30 ms 對使用者體感沒有可觀察的影響。
-之所以仍保留並行為預設，是因為它確實不會更慢、離散度更低，且成本已經付掉了；
-保留 `RETRIEVE_PARALLEL=0` 的循序路徑則是為了日後能重新量測與回退——
-若未來 DB 端競爭情況改變（資料量成長、改用共享資料庫），這個開關可以直接驗證而不必改程式。
+端到端延遲仍以本地模型生成為主（單題數十秒至數百秒），省下的數十毫秒對體感沒有可觀察的影響；以並行為預設只是因為它不會更慢、離散度更低，成本也已付掉。保留 `RETRIEVE_PARALLEL=0` 是為了 DB 端競爭情況改變時（資料量成長、改用共享資料庫）能直接重測與回退而不必改程式。為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用，兩者只差在候選如何取得；等價性測試以故障注入驗證過有鑑別力（破壞其中一條的去重邏輯會被抓到）。
 
-為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用，
-`_retrieve_parallel()` 與 `_retrieve_sequential()` 只差在候選如何取得。
-`tests/test_retrieve_context.py` 的等價性測試以故障注入驗證過確實有鑑別力
-（破壞其中一條路徑的去重邏輯會被抓到）。
-
-### 評估後不採用（記錄理由，避免重複評估）
-
-- **Redis 取代程序內快取**——現在只有 `app` 與 `mcp-server` 兩個單一程序，
-  而快取收益集中在同一題的 agent tool loop 內，本來就在同一程序。跨程序共享收不到額外命中，
-  卻要付出一個 container、網路依賴、1024 維向量序列化（每筆約 8KB，往返可能比本機 dict 慢）
-  與一組「Redis 掛了怎麼辦」的降級路徑。**觸發條件**：MCP server 要跑多 worker／多副本，
-  或希望快取跨重啟存活。屆時 `_embed_query_cached()` 的介面不用改，只換內部儲存。
-- **單一 SQL 用 `UNION ALL` 取回三段**——可省下兩次往返與連線佔用，但要在 SQL 裡表達
-  「主結果有新聞就不要同公司新聞」這類條件邏輯，會把現在讀得懂的 Python 條件變成難維護的 SQL。
-  三段各自 `ORDER BY` 也是刻意設計（見上方「異質文檔重排」一節，避免跨來源混排）。
-- **改用 async DB driver 取代 ThreadPoolExecutor**——`retrieve_context` 是同步函式、
-  被 `asyncio.to_thread` 包著呼叫，改 async 要一路改到 graph 節點與 MCP tool，影響面遠大於收益。
+本次評估後不採用的三個方向（Redis 取代程序內快取、單一 SQL 用 `UNION ALL` 取回三段、改用 async DB driver），理由與重新評估的觸發條件見上方「保持現狀」區塊。
 
 ### 改動內容
 
-| 項目 | 位置 |
-|---|---|
-| logging 設定與 JSONL formatter | 新增 `src/logging_setup.py`（`setup_logging`／`log_duration`） |
-| AI 路徑 9 處 `print` 遷移、四個 LLM 呼叫點計時 | `src/graph.py`、`src/mcp_server.py`、`src/app.py` |
-| logging 設定項 | `config.LOG_LEVEL`／`LOG_DIR`／`LOG_BACKUP_DAYS` |
-| 檢索並行開關與路徑拆分 | `config.RETRIEVE_PARALLEL`；`graph.py` 的 `_retrieve_parallel`／`_retrieve_sequential`／`_relax_doc_type`／`_merge_market_news` |
-| 量測腳本 | 新增 `tests/bench_retrieve.py`（需在 container 內執行，DB 未對 host 開 port） |
-| 新增 self-check | `tests/test_logging_setup.py`；`tests/test_retrieve_context.py` 補等價性、快取關閉、embed 失敗不污染快取、並行分支例外傳遞 |
+| 項目 | 涉及檔案與函式 | commit |
+|---|---|---|
+| logging 設定與 JSONL formatter | 新增 `src/logging_setup.py`（`setup_logging`／`log_duration`） | `f6f5de8` |
+| AI 路徑 9 處 `print` 遷移、四個 LLM 呼叫點計時 | `src/graph.py`、`src/mcp_server.py`、`src/app.py` | `f6f5de8` |
+| logging 設定項 | `config.LOG_LEVEL`／`LOG_DIR`／`LOG_BACKUP_DAYS` | `f6f5de8` |
+| query embedding 快取 | `graph.py` 的 `_embed_query_cached`；`config.EMBEDDING_CACHE_MAX_ENTRIES`／`EMBEDDING_CACHE_TTL_SECONDS` | `f6f5de8` |
+| 容器外執行改寫 `-local` 檔名 | `logging_setup.py` 的 `_log_name()`，以 `/.dockerenv` 判斷執行環境 | `bb64c4f` |
+| 檢索並行開關與路徑拆分 | `config.RETRIEVE_PARALLEL`；`graph.py` 的 `_retrieve_parallel`／`_retrieve_sequential`／`_relax_doc_type`／`_merge_market_news` | `f4d398c` |
+| 量測腳本 | 新增 `tests/bench_retrieve.py`（需在 container 內執行，DB 未對 host 開 port） | `74789e9` |
+| 新增 self-check | `tests/test_logging_setup.py`；`tests/test_retrieve_context.py` 補等價性、快取關閉、embed 失敗不污染快取、並行分支例外傳遞 | `f6f5de8`／`f4d398c` |
 
 ## 待補紀錄
 
