@@ -8,21 +8,17 @@
 
 1. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:109-110`）
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
-2. **多標的查詢支援**（`src/graph.py` 的 `ExtractedFilters`/`extract_filters`）
-   目前偵測到多個公司會回 `status="error"` 並降級為不過濾（`company=None`），使用者問「AAPL 和 TSLA 比較」拿不到針對兩間公司的分別檢索結果。要支援需將 `company: str | None` 擴充成 `companies: list[str]`，並連帶調整 `retrieve_context`/`generate` 的 context 組裝（依公司分組）與 MCP tool 參數定義。影響面較大，刻意留待下一階段獨立處理。
-3. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
+2. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
    官方 OpenAPI 取得的結構化財報數字目前與 PDF 文字一樣進 `doc_chunks`，走同一條向量檢索路徑。「台積電最新一季 EPS 多少」這類純數字問題其實不需要 embedding 相似度比對——資料庫裡就有確定的那一格，繞過檢索可同時降低延遲與消除檢索誤差。要做需新增一個直查結構化數字的 MCP tool，並調整 `assemble`/`generate` 的 context 組裝與引用編號邏輯。**前置問題**：直答的數字若不進 `retrieved` 就沒有 `[來源N]` 編號，牴觸決策卡「不得編造資料中沒有的數字」的反幻覺規則（`src/i18n.py:70`），需先決定這類數字如何標註出處。影響面大，刻意獨立處理。
-4. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
+3. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
    目前台美雙掛牌（台積電＝2330／TSM）的對應關係是寫死的靜態 dict，四檔手動維護。台股 ADR 檔數少且極少變動，靜態表在現階段夠用且零延遲，但新增標的要改程式。預期做法是改為 API 查詢後落地快取（優先讀資料表、查不到才打 API）。**卡在資料來源**：既有的 yfinance 與兩個官方 OpenAPI 都沒有 ADR 對應欄位，靠公司名稱模糊比對不穩，須先找到可靠端點才值得動工。在那之前往靜態表加一行即可。
-5. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+4. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
-6. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
+5. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
    logfile 已逐節點記錄耗時（`rewrite_question`／`extract_filters`／`agent`／`generate`／`retrieve`），同一題以 `qid` 串連。需累積一段時間的真實使用資料後，分析各節點耗時分佈：已知瓶頸是本地模型生成，但**佔比多少尚未用數據確認**，這是決定下一輪優化該投在哪裡的依據（例如若 `agent` 的 tool loop 輪數才是主因，優化 `generate` 就是做白工）。分析方式：`data/logs/*.log` 是 JSON Lines，可直接用 pandas 或 jq 彙總。
 
-   **2026-09-13 首次嘗試分析：資料量不足，未能得出結論。** 當日 203 行紀錄中，八個 `log_duration` 觀測點只有 `retrieve_context` 觸發過 6 次，四個 LLM 節點（`rewrite_question`／`extract_filters`／`agent`／`generate`）**一次都沒有**——logging 落地後尚未有真人問過完整的題目，六筆全來自 smoke test。**要等實際使用累積後再分析，不要拿 smoke test 的數字當結論。** 判斷可以開始分析的門檻：`generate` 事件累積約 30 筆以上（涵蓋不同題型與是否命中快取）。
-
-   **2026-09-14 複查：仍為 0 筆，門檻未達。** `data/logs/` 累積 263 行，`generate` 事件依然一次都沒有。隔一天沒有進展不代表機制有問題——這段期間沒有真人完整問過題目而已。**再次複查前先確認期間內是否真有實際使用**，否則只是重複確認同一個空集合。
-7. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
+   **現況：`generate` 僅 1 筆，門檻未達。** 已有一次真人完整問答讓四個 LLM 節點全部觸發，串連機制確認可用，但一筆不足以推翻或證實任何佔比假設。**開始分析的門檻是 `generate` 累積約 30 筆以上**（涵蓋不同題型與是否命中快取）；在那之前不要拿零星樣本或 smoke test 的數字當結論。彙總時注意 log 欄位名為 `node` 而非 `event`（`select(.node=="generate")`）。
+6. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
    目前只記錄長度（`prompt_chars`／`answer_chars`）而非內容，故無個資疑慮。若未來為了回測要記錄 prompt／回應全文，需先決定保留天數與去識別化方式——專案已有 `NEWS_RETENTION_DAYS`／`THREAD_RETENTION_DAYS` 的保留期慣例可循（後者的註解明確指出「對話含提問內容，屬個資，留短一點」）。另需觀測 `LOG_BACKUP_DAYS=30` 是否合適：日檔大小取決於實際使用量，累積一段時間後回頭確認磁碟佔用與「回測要看多久以前」的實際需求是否匹配。
 
 ## 保持現狀（已評估，判斷暫不處理）
@@ -67,7 +63,7 @@
 | LLM retry/backoff | `llm` 定義加上 `.with_retry(stop_after_attempt=3)`；`RunnableRetry` 仍保有 `.invoke()`，三處呼叫端不用改。Ollama 冷啟動或短暫逾時時會重試，不再直接中斷整個 graph 節點。 | `b031f5c` |
 | 測試 fixture 落後於生產邏輯 | `route_after_retrieve` 已改用 `published_at` 判斷新聞是否過期，但測試 dict 沒帶該欄位，導致判斷恆為空、永遠落入補抓分支——屬測試未跟上邏輯演進，非程式本身有 bug。補上缺漏欄位、`published_at` 改用真實 `date` 物件（用字串比較日期會直接拋 `TypeError`），並補一筆「新聞過期需重抓」的案例。 | `87c989c` |
 | 無連線池 | `src/vectorstore.py` 的 `get_connection()` 改用 `psycopg_pool.ConnectionPool`，從共用池借連線而非每次新開 TCP + PG 認證；所有呼叫端用法不變（`pool.connection()` 一樣是 context manager）。過程中發現其預設 `timeout=30` 秒遠慢於原本 `psycopg.connect()` 的毫秒級失敗，改成 `timeout=2` 後測試從 32 秒降到 4-5 秒——正常連線本該是毫秒級，2 秒內連不上即代表 DB 已掛，續等無益。 | `c77ff4b` |
-| Ticker regex fallback 誤判 | 治本而非修 regex：`extract_filters` 從手寫 prompt + `json.loads` 改用 `with_structured_output(ExtractedFilters)`，代號由 Pydantic `field_validator` 呼叫新增的 `normalize_ticker()` 正規化（去除 `.TW`/`.PR.A` 等後綴並驗證格式）。原本的 regex fallback（純英文問題會誤抓一般單字當 ticker）直接移除；多標的問題改為回報錯誤而非硬猜一個代號。同時修正三處既有的 `isdigit() and len==4` 台股判斷——ETF 新制 6 碼、特別股與可轉債的字母尾碼會被誤判成美股，統一改用 `is_tw_ticker()`。 | `2a00991` |
+| Ticker regex fallback 誤判 | 治本而非修 regex：`extract_filters` 從手寫 prompt + `json.loads` 改用 `with_structured_output(ExtractedFilters)`，代號由 Pydantic `field_validator` 呼叫新增的 `normalize_ticker()` 正規化（去除 `.TW`/`.PR.A` 等後綴並驗證格式）。原本的 regex fallback（純英文問題會誤抓一般單字當 ticker）直接移除；多標的問題當時改為回報錯誤而非硬猜一個代號（該降級已於 2026-09-16 由多標的支援取代）。同時修正三處既有的 `isdigit() and len==4` 台股判斷——ETF 新制 6 碼、特別股與可轉債的字母尾碼會被誤判成美股，統一改用 `is_tw_ticker()`。 | `2a00991` |
 
 ---
 
@@ -321,7 +317,7 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間戳、只進 stdout，而 `docker logs` 有輪替上限、容器重啟即失去歷史——**無法回答「上週那一題為什麼跑了 400 秒」**，對一個以本地模型生成為瓶頸的專案等於放棄優化依據。
 
-改用標準庫 `logging` 輸出 JSON Lines 到已掛載的 `data/logs/`，四個 LLM 呼叫點與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid` 串連（設定細節見改動內容表）。**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦 7）。另因 `LOG_DIR` 在 bind mount 上，host 執行會寫進容器同一個檔並灌入連線失敗雜訊，被回測誤判成正式環境故障，故容器外執行時檔名加 `-local` 後綴。
+改用標準庫 `logging` 輸出 JSON Lines 到已掛載的 `data/logs/`，四個 LLM 呼叫點與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid` 串連（設定細節見改動內容表）。**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦 6）。
 
 ### 檢索平行化與 query embedding 快取
 
@@ -340,11 +336,11 @@ AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間�
 | 並行 + 無快取 | 202.5 ms | 198.1 | 215.1 |
 | 並行 + 有快取 | **11.5 ms** | 9.3 | 19.1 |
 
-貢獻幾乎全來自快取：每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL。並行的幅度小但離散度較低。兩條路徑回傳的 chunk id 序列完全相同。
+每次 `embed_query` 都要打一趟 Ollama，而檢索本身只是幾條 SQL，故貢獻幾乎全來自快取；並行的幅度小但離散度較低。兩條路徑回傳的 chunk id 序列完全相同。
 
 **連線池 `max_size` 維持 5。** 三段並行各借 1 條連線、pool 又是模組級單例，**推導**上兩個並行檢索就會超額並在 `timeout=2` 後拋 `PoolTimeout`。實測相反：壓到 8、12、20 個並行（理論上需 24、36、60 條連線）在 `max_size=5` 下仍零失敗。前提錯在每段 `similarity_search` 只持有連線數毫秒即歸還，連線快速輪轉而非被三段長期佔住，「3 × 並行數」的推估不適用。
 
-端到端延遲仍以生成為主，這數十毫秒對體感沒有可觀察的影響。保留 `RETRIEVE_PARALLEL=0` 是為了 DB 端競爭情況改變時能直接重測與回退而不必改程式；為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用。評估後不採用的三個方向見上方「保持現狀」區塊。
+端到端延遲仍以生成為主，這數十毫秒對體感沒有可觀察的影響。保留 `RETRIEVE_PARALLEL=0` 是為了 DB 端競爭情況改變時能直接重測與回退而不必改程式；為避免兩條路徑各自腐化，採用條件與順序抽成 `_relax_doc_type()` 與 `_merge_market_news()` 共用。
 
 ### 改動內容
 
@@ -359,33 +355,33 @@ AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間�
 | 量測腳本 | 新增 `tests/bench_retrieve.py`（需在 container 內執行，DB 未對 host 開 port） | `74789e9` |
 | 新增 self-check | `tests/test_logging_setup.py`；`tests/test_retrieve_context.py` 補等價性、快取關閉、embed 失敗不污染快取、並行分支例外傳遞。等價性測試以故障注入驗證過有鑑別力（破壞去重邏輯會被抓到） | `f6f5de8`／`f4d398c` |
 
+---
+
 ## 2026-09-14　抓取路徑紀錄修正與自架 Langfuse 追蹤
 
 同一條可觀測性線的兩段：先把剩下的抓取路徑儀器化並修掉一個讓紀錄失真的判準錯誤，再接上 Langfuse 補足 logfile 答不出的 prompt／token 層級。
 
 ### 抓取路徑可觀測性修正
 
-剩餘的 `print` 原被歸類為 CLI 進度輸出，但依呼叫端重新分類後，50 處中約 39 處其實會在服務請求中執行（`charts.py` 由 `app.py` 呼叫、`market.py` 由 `generate` 呼叫、`update.py` 的六個 fetcher 同時被 CLI 與 `fetch_missing_data`／`mcp_server.py` 呼叫）。這不是低優先的 CLI 清理，而是 09-13 儀器化未完成的另一半。
+剩餘的 `print` 原被歸類為 CLI 進度輸出，但依呼叫端重新分類後，50 處中約 39 處其實會在服務請求中執行——這不是低優先的 CLI 清理，而是 09-13 儀器化未完成的另一半。
 
-同時修掉一個更根本的缺陷：**`fetch_missing_data` 以「沒拋例外」為成功判準，但 fetcher 的失敗多半不拋例外。** 原本 `results.append(call().detail)` 丟掉了 `FetchResult.ok`，一律記 `ok=True`；而查無 CIK、官方 OpenAPI 查無公司、MOPS 版面改版都是正常返回 `FetchResult(False, msg)`。也就是說 logfile 裡「補抓成功」從未為真過，回測時分不出補抓究竟成功幾次。
+同時修掉一個更根本的缺陷：**`fetch_missing_data` 以「沒拋例外」為成功判準，但 fetcher 的失敗多半不拋例外。** 查無 CIK、官方 OpenAPI 查無公司、MOPS 版面改版都是正常返回 `FetchResult(False, msg)`，因此 logfile 裡「補抓成功」從未為真過，回測時分不出補抓究竟成功幾次。
 
-`reason` 一律用短代碼（`no_cik`／`no_filing`／`api_miss`／`mops_blocked` 等）而非自由文字，否則 `jq` 彙總不動——回測要問的是「哪一類失敗最多」。另有兩處是**降級**而非失敗：`cover_only`（6-K 讀不到申報目錄，退回封面頁主文）與 `no_chinese_doc`（MOPS 查無中文主文改抓替代檔）。後者仍回 `FetchResult(True, ...)`，`ok` 顯示成功而內容是替代檔，logfile 是唯一能保留這個區別的地方。
+`reason` 一律用短代碼（`no_cik`／`api_miss`／`mops_blocked` 等）而非自由文字，否則 `jq` 彙總不動——回測要問的是「哪一類失敗最多」。另有兩處是**降級**而非失敗：`cover_only`（6-K 退回封面頁）與 `no_chinese_doc`（MOPS 改抓替代檔）；後者仍回 `ok=True` 而內容是替代檔，logfile 是唯一能保留這個區別的地方。
 
-**已知限制**：只改紀錄的正確性，未改變任何抓取行為；補抓成功率要等實際使用累積後才答得出來（門檻見待辦 6）。純 CLI 進度輸出與 self-check 輸出不在遷移範圍內。
+**已知限制**：只改紀錄的正確性，未改變任何抓取行為；補抓成功率要等實際使用累積後才答得出來（門檻見待辦 5）。
 
 ### 接上自架 Langfuse 與節點層級追蹤
 
 logfile 已能回答「哪個節點花了多久」，但答不出「送進模型的 prompt 長什麼樣、模型回了什麼、花了多少 token」。Langfuse 是自架的 LLM 追蹤平台，這層內容留在自己機器上，不必把提問送進第三方服務。掛載點只有一處：`app.py` 的 `_stream_answer` 呼叫 `graph.astream` 時把官方 SDK 的 LangChain callback handler 放進 `config`。
 
-**追蹤失敗不得影響問答**：`tracing.py` 的三個進入點全部吞例外，初始化失敗只記一次 warning 後靜默跳過，`callbacks()` 退化成回傳 `{}`——空 config 對 LangGraph 無副作用，呼叫端不必寫任何判斷。未設 `LANGFUSE_PUBLIC_KEY` 即視為關閉，CI 與剛 clone 的專案不必有金鑰也能跑。
+**追蹤失敗不得影響問答**：`tracing.py` 的進入點全部吞例外，初始化失敗只記一次 warning 後靜默跳過，`callbacks()` 退化成回傳 `{}`。未設 `LANGFUSE_PUBLIC_KEY` 即視為關閉，CI 與剛 clone 的專案不必有金鑰也能跑。
 
-**兩個容器限制**：Langfuse 只綁 `127.0.0.1:18300`，容器內的 `localhost` 指向容器自己（實測 `Connection refused`），改用 `host.docker.internal` 則回 200；映像檔裡沒有 `.git`，`_release()` 的 git fallback 取不到版本會讓所有 trace 的 `release` 成為 `unknown`，改由 compose 以 `LANGFUSE_RELEASE` 帶入。
+**兩個容器限制**：Langfuse 只綁 `127.0.0.1:18300`，容器內的 `localhost` 指向容器自己（實測 `Connection refused`），改用 `host.docker.internal` 則回 200；映像檔裡沒有 `.git`，`_release()` 取不到版本會讓所有 trace 的 `release` 成為 `unknown`，改由 compose 以 `LANGFUSE_RELEASE` 帶入。
 
-**原假設被實測推翻**：原以為 handler 會跟著 graph 往下傳、四個 LLM 呼叫點自動成為同一 trace 的 observation。實際上 handler 記錄的是 LangChain runnable（模型呼叫）而非 LangGraph 節點——UI 上只看得到底層 ChatOllama 呼叫，而 `resolve_market`／`assemble`／`no_result` 這類不呼叫 LLM 的節點根本不會出現。`build_graph()` 因此改用 `node_span()` 逐一包住九個節點，LLM generation 靠 OTel context 掛在所屬節點底下，形成「一次問答一個 trace、每節點一個 span」。
+**原假設被實測推翻**：原以為 handler 會跟著 graph 往下傳、四個 LLM 呼叫點自動成為同一 trace 的 observation。實際上 handler 記錄的是 LangChain runnable（模型呼叫）而非 LangGraph 節點——UI 上只看得到底層 ChatOllama 呼叫，而 `resolve_market`／`assemble`／`no_result` 這類不呼叫 LLM 的節點根本不會出現。SDK 的 `@observe` 亦不可用：span 在函式回傳當下就結束，之後的寫入落到父層，成為「每個節點 output 都一樣」的成因。最後由 `build_graph()` 改用 `node_span()` 逐一包住九個節點，LLM generation 靠 OTel context 掛在所屬節點底下，形成「一次問答一個 trace、每節點一個 span」。
 
-**SDK 的 `@observe` 同樣不可用**：它會讓每個節點的 input/output 疊到 trace 根上互相覆蓋（正是「每個節點 output 都一樣」的成因），因為 span 在函式回傳當下就結束，之後寫入就落到父層。改為自行開 span、在 span 仍存活時寫入。包裝掛在 `add_node()` 註冊處而非裝飾函式，否則 `route_after_tools()` 內部呼叫 `assemble()` 時會多送一個不存在於流程上的 span。
-
-**取捨**：節點 input/output 送 `_brief()` 摘要而非完整 `GraphState`——長字串截至 500 字，`retrieved`／`messages` 只留筆數。代價是 UI 看不到 chunk 全文（要看全文回 logfile），換得單一節點 span 從 22,485 bytes 降到 605 bytes（七筆 chunk、1,200 字回答實測）。追蹤關閉時 `node_span()` 原樣回傳原函式。
+**取捨**：節點 input/output 送 `_brief()` 摘要而非完整 `GraphState`——長字串截至 500 字，`retrieved`／`messages` 只留筆數。代價是 UI 看不到 chunk 全文（要看全文回 logfile），換得單一節點 span 從 22,485 bytes 降到 605 bytes（七筆 chunk、1,200 字回答實測）。
 
 **驗收**：實跑一次 `qwen3.5:9b` 問答，trace 記錄到 input、output、`user_id`／`session_id`／`tags`／`environment`，延遲 23,871 ms，token input 21／output 33。**已知限制**：span 樹結構以 OTel in-memory exporter 驗證，未經 Langfuse UI 目視確認。
 
@@ -393,22 +389,63 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 | 項目 | 涉及檔案與函式 | commit |
 |---|---|---|
-| `auto_fetch` 成敗判準修正 | `graph.py` 的 `fetch_missing_data`：接住 `FetchResult` 再取 `.ok`，取代「沒拋例外即成功」 | `—` |
-| 六個 fetcher 的失敗訊息遷移 | `update.py` 的 `fetch_edgar`／`fetch_sec_financials`／`fetch_tw_financials`／`fetch_mops`／`fetch_news`／`fetch_market_news`，共 15 處 | `—` |
-| 降級路徑改為具名警示 | `update.py`：6-K 退回封面頁記 `cover_only`、MOPS 替代檔記 `no_chinese_doc`。兩者原為 `print`；後者回傳 `ok=True`，不記則無從得知內容是替代檔 | `—` |
-| 決策卡圖表與行情快照 | `charts.py`（5 處，`price_chart`／`eps_chart`／`report_pdf`）、`market.py`（4 處，`format_consensus`／`get_market_snapshot`）。`market.py` 帶 `symbol` 而非 `company`，因 `format_consensus` 收到的是 yfinance ticker 物件 | `—` |
-| 入庫警示與進度 | `ingest.py` 的 `ingest_text`：空內容與財報字數偏低改 `log.warning`，chunk 數與寫入筆數改 `log.info` | `—` |
-| self-check 改收 log record | `tests/test_ingest.py` 原以 `redirect_stdout` 攔截財報字數警示，改走 logging 後攔不到，改為掛 handler 收 `LogRecord`，並補驗 `source` 與 `reason` 欄位 | `—` |
-| 追蹤模組 | 新增 `src/tracing.py`（`callbacks`／`flush`／`_release`／`_get_client`）。用官方 SDK 的 `langfuse.langchain.CallbackHandler` 而非手刻 HTTP | `—` |
-| handler 掛載與 metadata | `src/app.py` 的 `_stream_answer`：`session_id` 取 chainlit 的 `thread_id`（同一串對話在 UI 才收得在一起）、`user_id` 取 OAuth `identifier`，未登入或拿不到仍能追蹤；model 與 lang 進 tags | `—` |
-| CLI 的 flush | `src/cli.py`：短生命週期程序結束前須 `flush()`，否則最後幾輪 trace 隨程序消失。長駐的 chainlit 靠 SDK 背景批次，不呼叫 | `—` |
-| 設定項 | `config.LANGFUSE_ENABLED`（總開關）／`LANGFUSE_RELEASE`；金鑰只進 `.env`（已在 `.gitignore`），`.env.example` 留空欄位與容器內外兩種 base_url 的說明 | `—` |
-| 容器版本歸因 | `docker-compose.yml` 的 `app` 服務加 `LANGFUSE_RELEASE`，補上映像檔內無 `.git` 導致的 `unknown` | `—` |
-| 相依套件 | `requirements.txt` 加 `langfuse>=4,<5` | `—` |
+| `auto_fetch` 成敗判準修正 | `graph.py` 的 `fetch_missing_data`：接住 `FetchResult` 再取 `.ok`，取代「沒拋例外即成功」 | `ddd40f5` |
+| 六個 fetcher 的失敗訊息遷移 | `update.py` 的 `fetch_edgar`／`fetch_sec_financials`／`fetch_tw_financials`／`fetch_mops`／`fetch_news`／`fetch_market_news`，共 15 處 | `6b194b3` |
+| 降級路徑改為具名警示 | `update.py`：6-K 退回封面頁記 `cover_only`、MOPS 替代檔記 `no_chinese_doc`。後者回傳 `ok=True`，不記則無從得知內容是替代檔 | `6b194b3` |
+| 決策卡圖表與行情快照 | `charts.py`（5 處，`price_chart`／`eps_chart`／`report_pdf`）、`market.py`（4 處，`format_consensus`／`get_market_snapshot`）。`market.py` 帶 `symbol` 而非 `company`，因 `format_consensus` 收到的是 yfinance ticker 物件 | `6b194b3` |
+| 入庫警示與進度 | `ingest.py` 的 `ingest_text`：空內容與財報字數偏低改 `log.warning`，chunk 數與寫入筆數改 `log.info` | `6b194b3` |
+| self-check 改收 log record | `tests/test_ingest.py` 原以 `redirect_stdout` 攔截財報字數警示，改走 logging 後攔不到，改為掛 handler 收 `LogRecord` | `6b194b3` |
+| 追蹤模組 | 新增 `src/tracing.py`（`callbacks`／`flush`／`_release`／`_get_client`）。用官方 SDK 的 `langfuse.langchain.CallbackHandler` 而非手刻 HTTP | `9911e3f` |
+| handler 掛載與 metadata | `src/app.py` 的 `_stream_answer`：`session_id` 取 chainlit 的 `thread_id`（同一串對話在 UI 才收得在一起）、`user_id` 取 OAuth `identifier`，未登入或拿不到仍能追蹤 | `9911e3f` |
+| CLI 的 flush | `src/cli.py`：短生命週期程序結束前須 `flush()`，否則最後幾輪 trace 隨程序消失。長駐的 chainlit 靠 SDK 背景批次，不呼叫 | `9911e3f` |
+| 設定項 | `config.LANGFUSE_ENABLED`（總開關）／`LANGFUSE_RELEASE`；金鑰只進 `.env`（已在 `.gitignore`），`.env.example` 留空欄位與容器內外兩種 base_url 的說明 | `9911e3f` |
+| 容器版本歸因 | `docker-compose.yml` 的 `app` 服務加 `LANGFUSE_RELEASE`，補上映像檔內無 `.git` 導致的 `unknown` | `9911e3f` |
+| 相依套件 | `requirements.txt` 加 `langfuse>=4,<5` | `9911e3f` |
 | 節點包裝 | `src/tracing.py` 新增 `node_span()`／`_brief()`／`_MAX_IO_CHARS`。不用 SDK 的 `@observe`（span 提早關閉，見上），改用 `client.start_as_current_observation()` 自行開關 | `822834f` |
 | 九個節點掛上 span | `src/graph.py` 的 `build_graph()`：包在 `add_node()` 而非裝飾函式，避免 `route_after_tools()` 內部呼叫 `assemble()` 時產生多餘 span | `822834f` |
-| self-check | 新增 `tests/test_tracing.py`：驗關閉時回空 config、初始化失敗時不拋例外、metadata 帶齊 session／user／release／tags 且 None 欄位被濾掉；並補驗截斷上限、`retrieved`／`messages` 只留筆數、關閉時原樣回傳、`functools.wraps` 保留節點名（名稱錯誤會讓 span 名變成 `wrapper`） | `—`／`822834f` |
+| self-check | 新增 `tests/test_tracing.py`：驗關閉時回空 config、初始化失敗時不拋例外、metadata 帶齊 session／user／release／tags 且 None 欄位被濾掉；並補驗截斷上限、`retrieved`／`messages` 只留筆數、關閉時原樣回傳、`functools.wraps` 保留節點名（名稱錯誤會讓 span 名變成 `wrapper`） | `9911e3f`／`822834f` |
 | CLI 無法啟動修復 | `src/cli.py`：`build_graph()` 於 `ef76670` 改為 async 後未同步更新，`python -m src.cli` 啟動即 `AttributeError`。僅 await 不足——`agent` 節點本身也是 async，同步 `.invoke()` 會拋 `No synchronous function provided`，故 `main()` 改 async 並改用 `ainvoke()` | `135c674` |
+
+---
+
+## 2026-09-16　多標的查詢支援
+
+原本問「AAPL 和 TSLA 比較」時，抽取器偵測到多間公司會回 `status="error"` 並降級為「不指定公司」檢索。實際追查發現情況比原紀錄更糟：`status` 全專案只有一行 `log.info` 消費，沒有任何分支、也沒有任何使用者可見訊息——降級後跨全庫檢索會拿別家公司的片段拼出一個看似合理的比較答案，使用者無從得知過濾已經失效。
+
+**做法是把既有機制推廣，而非新增一條路徑。** `market="both"`（台美雙掛牌「兩邊都要」）早就會引導 agent「分別以 X 與 Y 各檢索一次」，這正是多標的需要的行為。因此 `ExtractedFilters.company: str | None` 改為 `companies: list[str]`（附正規化與去重的 validator，認不得的代號直接丟掉），prompt 刪掉「多公司視為錯誤」那條規則，`status`／`error_message` 兩個欄位連同死碼一併移除；引導語則從雙掛牌專用改為通用的「同時指名多個標的時逐一各檢索一次」。
+
+**原紀錄設想的做法沒有採用。** 待辦原文預期要改 `retrieve_context` 依公司分組、並擴充 MCP tool 的參數定義，但多次檢索由 agent 在 tool loop 裡完成即可——SQL、三段檢索配額（主 5／補公司新聞 3／補市場新聞 2）與 `search_knowledge_base` 的對外簽名全部不動。對外 MCP 契約有外部 client 在用，不為內部需求改動；引用編號邏輯本來就是依出現順序去重，多家公司的來源自然接在後面編號，同樣不必改。
+
+**順帶修掉一個既有 bug**：`assemble` 原本是最後寫入覆蓋，分次檢索的前幾批 chunks 會被靜默丟掉——也就是雙掛牌「兩邊都要」的情境**在此之前一直只拿到一半資料**。改為累積並依 chunk `id` 去重（補抓後重查會拿到相同 id，不去重會讓同一段內容重複進 context）。
+
+**取捨**：多標的時直接略過雙掛牌的市場反問。兩家公司做比較還要先回答「要台股還美股」體感很差，而「雙掛牌 ∩ 多標的」是罕見交集。代價是問「2330 和 AAPL 比較」時台積電固定取其中一邊，不會逐家各問一次。同理，市場快照、走勢圖與 ADR 提醒都是單一公司概念，多標的時只涵蓋第一家或留空，程式碼中已標記。
+
+**驗收**（容器內 `qwen3.5:9b`，問「AAPL 和 MSFT 最近的營收表現比較」；TSLA 不在庫中，改用兩家都有新鮮資料的標的以免混入外部補抓）：
+
+| 項目 | 多標的 | 單一公司（對照） |
+|---|---|---|
+| `search_knowledge_base` 呼叫 | 2 次（同一輪並發） | 1 次 |
+| 累積 chunks | 13（AAPL 5／MSFT 6／全域市場新聞 2） | 7 |
+| 重複 id | 0 | 0 |
+| 超出範圍而被砍的引用編號 | 0 | 0 |
+
+13 筆大於單次檢索的 7 筆，是覆蓋 bug 已修好的直接證據；連跑兩次結構數字完全一致。回歸確認「台積電 EPS」仍走雙掛牌反問（`ask_market=True`、`peer_company=TSM`）。
+
+**已知限制**：多標的時本地模型不輸出 `[來源N]` 引用標記（連跑兩次皆為空，單一公司則正常引用 5 個編號）。已排除程式面成因——`generate` 的 prompt 在兩種情境下結構相同、無多標的分支，超出範圍的過濾也一個都沒砍；差別在 context 規模（11 個來源／7,523 字元 vs 7 個來源／4,175 字元），屬本地 9B 模型的能力上限而非本次改動引入。另一個限制是**延遲隨標的數線性增加**：每多一家就多一次檢索（本次實測每次 `retrieve_context` 約 2.7 秒），可由 logfile 的 `qid` + `elapsed_ms` 觀察。未預先調整 `_MAX_TOOL_ROUNDS` 或配額——效能參數要有實測數據才動。
+
+### 改動內容
+
+| 項目 | 涉及檔案與函式 | commit |
+|---|---|---|
+| 抽取結果改為多值 | `graph.py` 的 `ExtractedFilters`：`company` 改 `companies: list[str]`，新增正規化／去重 validator；移除 `status`／`error_message` 與其唯一消費點（只有一行 log，無任何分支） | `—` |
+| 抽取 prompt | `graph.py` 的 `extract_filters`：規則 1 改為輸出代號陣列，刪除「多公司回 error」一條，規則重新編號 | `—` |
+| 狀態欄位 | `graph.py` 的 `GraphState.company` 改 `companies`；新增 `_primary()` 供沿用單一公司語意的節點取第一家（`resolve_market`／`ask_market`／`no_result`／`generate` 的快照與 ADR 提醒） | `—` |
+| 多標的引導語 | `graph.py` 的 `_seed_prompt`：從雙掛牌專用推廣為通用。`_MAX_TOOL_ROUNDS` 是 agent 輪數上限而非 tool 呼叫數上限，LLM 可在同一輪發多個 `tool_calls`，故未調整（實測 2 家公司即為單輪並發兩次） | `—` |
+| 分次檢索結果累積 | `graph.py` 的 `assemble`：改為累積並依 `id` 去重，修正最後寫入覆蓋的既有 bug。JSON 解析失敗記 warning 後視為查無資料，不中斷 | `—` |
+| 多標的不卡市場反問 | `graph.py` 的 `resolve_market`：`len(companies) > 1` 時直接跳過雙掛牌流程 | `—` |
+| 追蹤欄位白名單 | `tracing.py` 的 `_brief`：`company` 改 `companies` | `—` |
+| UI 與 CLI 接線 | `app.py` 四處（初始 state、市場按鈕重跑、`_pick_market`、圖表只畫第一家）、`cli.py` 初始 state | `—` |
+| self-check | `tests/test_assemble.py` 增兩條（分次檢索須累積、重複 id 只留一份）、`tests/test_dual_market.py` 增一條（多標的不觸發市場反問）；另五個測試檔隨介面更名同步調整 | `—` |
 
 ## 待補紀錄
 
