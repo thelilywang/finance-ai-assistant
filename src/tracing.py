@@ -107,7 +107,7 @@ def _brief(state) -> dict:
     if not isinstance(state, dict):
         return {"value": str(state)[:_MAX_IO_CHARS]}
     brief = {}
-    for key in ("question", "company", "doc_type", "market", "lang", "model",
+    for key in ("question", "companies", "doc_type", "market", "lang", "model",
                 "news_since_days", "in_scope", "off_topic", "ask_market",
                 "fetched", "answer"):
         if (value := state.get(key)) is not None:

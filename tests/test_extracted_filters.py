@@ -25,7 +25,13 @@ assert ExtractedFilters(news_since_days=0).news_since_days == 1
 assert ExtractedFilters(news_since_days=-7).news_since_days == 1
 assert ExtractedFilters(news_since_days=9999).news_since_days == 365
 
-# company 的正規化不受影響（同一個 model 上兩個 validator）
-assert ExtractedFilters(company="台積電", news_since_days=7).news_since_days == 7
+# companies 的正規化不受影響（同一個 model 上兩個 validator）
+assert ExtractedFilters(companies=["台積電"], news_since_days=7).news_since_days == 7
+
+# 「台積電」不是合法代號格式，normalize_ticker 認不得就丟掉
+assert ExtractedFilters(companies=["台積電"]).companies == []
+
+# 多標的：逐項正規化並去重、保序；認不得的代號丟掉
+assert ExtractedFilters(companies=["aapl", "2330.TW", "AAPL", "台積電"]).companies == ["AAPL", "2330"]
 
 print("ExtractedFilters self-check OK")

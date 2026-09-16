@@ -51,9 +51,9 @@ assert tracing._release(), "_release 不可回空字串"
 
 # --- _brief：節點 I/O 摘要 ---
 # 長字串要截斷，否則整份 prompt / 回答會被送進 Langfuse 把 UI 塞爆
-brief = tracing._brief({"question": "x" * 900, "company": "2330", "lang": "zh"})
+brief = tracing._brief({"question": "x" * 900, "companies": ["2330"], "lang": "zh"})
 assert len(brief["question"]) == tracing._MAX_IO_CHARS, "長字串應截斷"
-assert brief["company"] == "2330"
+assert brief["companies"] == ["2330"]
 
 # 大宗欄位只留筆數，不送內容
 brief = tracing._brief({"retrieved": [{"id": 1}, {"id": 2}], "messages": [1, 2, 3]})
@@ -61,7 +61,7 @@ assert brief["retrieved_count"] == 2 and brief["messages_count"] == 3
 assert "retrieved" not in brief and "messages" not in brief, "chunk/訊息內容不可送出"
 
 # None 欄位濾掉；非 dict（理論上不該發生）也不能炸
-assert "company" not in tracing._brief({"company": None})
+assert "companies" not in tracing._brief({"companies": None})
 assert tracing._brief("abc") == {"value": "abc"}
 
 # fetch_results 每則各自截斷

@@ -49,7 +49,7 @@ out = assemble({"messages": [
 assert out["fetched"] is False
 assert out["fetch_results"] == []
 
-# 補抓後又檢索一次：取最後一次檢索結果（補抓前查無、補抓後查到）
+# 補抓後又檢索一次：結果要累積（補抓前查無、補抓後查到，兩次結果疊加）
 out = assemble({"messages": [
     _tool_call("search_knowledge_base", "1"),
     ToolMessage(content=json.dumps({"summary_for_llm": "查無", "chunks": []}),
@@ -83,6 +83,26 @@ assert out["retrieved"] == []
 # 完全沒呼叫過 tool
 out = assemble({"messages": [HumanMessage(content="seed"), AIMessage(content="不需要工具")]})
 assert out["retrieved"] == [] and out["fetched"] is False
+
+# 多標的／雙掛牌：分次檢索的結果要累積，不可被最後一次蓋掉
+a = [{"id": 1, "source": "s-aapl", "doc_type": "news", "company": "AAPL", "content": "a"}]
+b = [{"id": 2, "source": "s-tsla", "doc_type": "news", "company": "TSLA", "content": "b"}]
+out = assemble({"messages": [
+    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a}),
+                name="search_knowledge_base", tool_call_id="1"),
+    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": b}),
+                name="search_knowledge_base", tool_call_id="2"),
+]})
+assert out["retrieved"] == a + b
+
+# 重複 id（補抓後重查同一批）只留一份，否則 generate 的 context 會有整段重複
+out = assemble({"messages": [
+    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a}),
+                name="search_knowledge_base", tool_call_id="1"),
+    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a + b}),
+                name="search_knowledge_base", tool_call_id="2"),
+]})
+assert out["retrieved"] == a + b
 
 print("assemble self-check OK")
 

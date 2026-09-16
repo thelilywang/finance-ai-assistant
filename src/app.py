@@ -319,7 +319,9 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
 
     # 真資料圖表：同一份 figures 供互動顯示與 PDF 嵌入，生成失敗不影響文字回答
     figures = []
-    company = final_state.get("company")
+    companies = final_state.get("companies") or []
+    # ponytail: 多標的只畫第一家——逐家圖表要重排版面與 PDF 結構，等有人要再說
+    company = companies[0] if companies else None
     if company:
         for name, fn in (("price", price_chart), ("eps", eps_chart)):
             try:
@@ -357,7 +359,7 @@ async def _pick_market(final_state: dict, ui_lang: str) -> str | None:
     按鈕只是捷徑，使用者仍可直接打字回答——逾時或關掉視窗回 None，此時就把反問
     訊息留在畫面上，讓下一輪的文字回覆照原本的追問流程走。
     """
-    company, peer = final_state["company"], final_state["peer_company"]
+    company, peer = final_state["companies"][0], final_state["peer_company"]
     tw, us = (company, peer) if is_tw_ticker(company) else (peer, company)
     actions = [
         cl.Action(name="market", payload={"market": m},
@@ -385,7 +387,7 @@ async def on_message(message: cl.Message):
     content_lang = setting if setting != "auto" else (detect_question_lang(message.content) or browser)
     state = {
         "question": message.content, "history": history,
-        "company": None, "doc_type": None, "news_since_days": None,
+        "companies": [], "doc_type": None, "news_since_days": None,
         "retrieved": [], "answer": "", "fetched": False,
         "fetch_results": [], "messages": [], "lang": content_lang,
         "model": cl.user_session.get("model") or config.LLM_MODEL,
@@ -405,7 +407,7 @@ async def on_message(message: cl.Message):
             await tracker.start()
             msg = cl.Message(content="")
             final_state = await _stream_answer(
-                {**state, "market": picked, "company": final_state["company"],
+                {**state, "market": picked, "companies": final_state["companies"],
                  "ask_market": False, "messages": []},
                 msg, tracker,
             )

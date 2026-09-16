@@ -35,37 +35,37 @@ assert not (set(TW_US_DUAL_LISTED) & set(TW_US_OTC_ONLY))
 assert dual_listed_peer("2038") is None and otc_adr_of("2038") is None
 
 # --- 沒指明市場 → 反問，且不得先挑一邊 ---
-s = resolve_market({"company": "2330", "market": None})
+s = resolve_market({"companies": ["2330"], "market": None})
 assert s["ask_market"] is True and s["peer_company"] == "TSM"
-assert s["company"] == "2330"                 # 尚未決定，不動 company
+assert s["companies"] == ["2330"]             # 尚未決定，不動 company
 assert route_after_resolve_market(s) == "ask_market"
 
 # --- 使用者已明講市場 → 直接照辦，不打斷對話 ---
 # 講美股但抽到的是台股代號：要換成 ADR 代號，否則查到的是台股資料
-s = resolve_market({"company": "2330", "market": "us"})
-assert s["company"] == "TSM" and s["ask_market"] is False
+s = resolve_market({"companies": ["2330"], "market": "us"})
+assert s["companies"] == ["TSM"] and s["ask_market"] is False
 assert route_after_resolve_market(s) == "agent"
 
 # 講台股但抽到 ADR 代號：反向對齊
-s = resolve_market({"company": "TSM", "market": "tw"})
-assert s["company"] == "2330" and s["ask_market"] is False
+s = resolve_market({"companies": ["TSM"], "market": "tw"})
+assert s["companies"] == ["2330"] and s["ask_market"] is False
 
 # 講的市場與抽到的代號本來就一致：原樣通過
-assert resolve_market({"company": "2330", "market": "tw"})["company"] == "2330"
-assert resolve_market({"company": "TSM", "market": "us"})["company"] == "TSM"
+assert resolve_market({"companies": ["2330"], "market": "tw"})["companies"] == ["2330"]
+assert resolve_market({"companies": ["TSM"], "market": "us"})["companies"] == ["TSM"]
 
 # --- 兩邊都要：保留原代號並帶出對應代號，供 generate 併陳與提醒 ---
-s = resolve_market({"company": "2330", "market": "both"})
+s = resolve_market({"companies": ["2330"], "market": "both"})
 assert s["ask_market"] is False and s["peer_company"] == "TSM"
 assert route_after_resolve_market(s) == "agent"
 
 # --- 非雙掛牌公司完全不受影響，不會多問一句 ---
-s = resolve_market({"company": "AAPL", "market": None})
+s = resolve_market({"companies": ["AAPL"], "market": None})
 assert s["ask_market"] is False and route_after_resolve_market(s) == "agent"
-assert s["company"] == "AAPL"
+assert s["companies"] == ["AAPL"]
 
-# company 為 None（問法沒指名公司）也不得炸掉
-assert resolve_market({"company": None, "market": None})["ask_market"] is False
+# company 為空（問法沒指名公司）也不得炸掉
+assert resolve_market({"companies": [], "market": None})["ask_market"] is False
 
 # --- 追問情境：使用者回答上一輪的反問，答句本身不含公司名 ---
 # 改寫未必補得回公司，若不從歷史撿回代號會退化成「不限公司」的全庫檢索
@@ -78,21 +78,21 @@ assert _last_dual_listed([("蘋果的營收?", "...")]) is None   # 非雙掛牌
 assert _last_dual_listed([]) is None
 
 # 回答「美股」：company 由歷史撿回並對齊到 ADR 代號
-s = resolve_market({"company": None, "market": "us", "history": hist})
-assert s["company"] == "TSM" and s["ask_market"] is False
+s = resolve_market({"companies": [], "market": "us", "history": hist})
+assert s["companies"] == ["TSM"] and s["ask_market"] is False
 
 # 回答「台股」
-s = resolve_market({"company": None, "market": "tw", "history": hist})
-assert s["company"] == "2330" and s["ask_market"] is False
+s = resolve_market({"companies": [], "market": "tw", "history": hist})
+assert s["companies"] == ["2330"] and s["ask_market"] is False
 
 # 回答「都要」：兩個代號都要留著，且不可再問一次
-s = resolve_market({"company": None, "market": "both", "history": hist})
-assert s["company"] == "2330" and s["peer_company"] == "TSM"
+s = resolve_market({"companies": [], "market": "both", "history": hist})
+assert s["companies"] == ["2330"] and s["peer_company"] == "TSM"
 assert s["ask_market"] is False
 
 # 沒有歷史可撿又沒公司：走一般流程，不得誤認成雙掛牌
-s = resolve_market({"company": None, "market": "us", "history": []})
-assert s["company"] is None and s["ask_market"] is False
+s = resolve_market({"companies": [], "market": "us", "history": []})
+assert s["companies"] == [] and s["ask_market"] is False
 
 # --- UI 按鈕：呼叫端指定的 market 不得被 extract_filters 重抽的結果蓋掉 ---
 # 點按鈕後帶著 market 重跑，但問句本身沒有市場字樣，重抽必然回 None；
@@ -101,23 +101,27 @@ import src.graph as _g
 
 
 class _FakeParsed:
-    status, error_message = "ok", None
-    company = doc_type = news_since_days = market = None
+    companies = []
+    doc_type = news_since_days = market = None
     in_scope = True  # 與 ExtractedFilters 同步；漏了會在 extract_filters 取值時炸開
 
 
 _orig_llms = _g._llms
 try:
     _g._llms = lambda m: {"filters": type("F", (), {"invoke": lambda self, p: _FakeParsed()})()}
-    out = _g.extract_filters({"question": "台積電EPS?", "company": "2330", "market": "us",
+    out = _g.extract_filters({"question": "台積電EPS?", "companies": ["2330"], "market": "us",
                               "lang": "zh", "model": ""})
     assert out["market"] == "us"      # 按鈕選的市場保留
-    assert out["company"] == "2330"   # 公司也不能被抽成 None，否則變全庫檢索
+    assert out["companies"] == ["2330"]   # 公司也不能被抽成空陣列，否則變全庫檢索
 
     # 沒有呼叫端指定時，照常採用重抽結果（不影響一般問句）
     out = _g.extract_filters({"question": "隨便問問", "lang": "zh", "model": ""})
-    assert out["market"] is None and out["company"] is None
+    assert out["market"] is None and out["companies"] == []
 finally:
     _g._llms = _orig_llms
+
+# 多標的比較時不卡市場反問——即使其中一家是雙掛牌
+s = resolve_market({"companies": ["2330", "AAPL"], "market": None})
+assert s["ask_market"] is False and route_after_resolve_market(s) == "agent"
 
 print("dual market self-check OK")

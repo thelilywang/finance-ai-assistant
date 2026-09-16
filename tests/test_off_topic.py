@@ -13,16 +13,16 @@ from src import graph
 
 # --- _is_off_topic ---
 # in_scope=False 且沒指名公司 → 離題
-assert graph._is_off_topic({"question": "今天天氣如何", "company": None, "in_scope": False})
+assert graph._is_off_topic({"question": "今天天氣如何", "companies": [], "in_scope": False})
 
 # in_scope=True → 一律不判離題
 assert graph._is_off_topic(
-    {"question": "法說會通常看什麼", "company": None, "in_scope": True}) is False
+    {"question": "法說會通常看什麼", "companies": [], "in_scope": True}) is False
 
 # 有指名公司 → 不判離題。company 過濾本身最強，庫內沒這家會回空走補抓，
 # 不該在這裡攔下（模型把「台達電財報」誤判成 out of scope 時尤其要保住這條）
 assert graph._is_off_topic(
-    {"question": "台達電財報", "company": "2308", "in_scope": False}) is False
+    {"question": "台達電財報", "companies": ["2308"], "in_scope": False}) is False
 
 # 欄位缺漏（舊 state / 結構化輸出降級）→ 當成 in_scope，不拒答
 assert graph._is_off_topic({"question": "隨便問問"}) is False

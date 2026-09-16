@@ -32,7 +32,7 @@ async def main() -> None:
                 break
 
             result = await app.ainvoke(
-                {"question": question, "history": [], "company": None, "doc_type": None,
+                {"question": question, "history": [], "companies": [], "doc_type": None,
                  "news_since_days": None, "retrieved": [], "answer": "",
                  "fetched": False, "fetch_results": []},
                 config=tracing.callbacks(session_id=session_id, user_id="cli"),
