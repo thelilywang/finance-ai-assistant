@@ -64,6 +64,8 @@ class GraphState(TypedDict):
     in_scope: bool  # extract_filters 判定問題是否屬財經範疇
     off_topic: bool  # 問題不在財經範圍，本輪不檢索、直接請使用者改問
     peer_company: str | None  # 另一市場的對應代號，反問與併陳兩用
+    answer_shape: str  # extract_filters 判定的回答形式："news" 或 "full"，決定 generate 輸出哪些決策卡欄位
+    allowed_fields: list[str]  # generate 定案後實際輸出的決策卡欄位，供 tracing 區分「意圖如此」與「evidence 不足」
     messages: Annotated[list[BaseMessage], add_messages]  # agent <-> tools 的往返記錄
 
 
@@ -193,6 +195,11 @@ class ExtractedFilters(BaseModel):
     # 問題是否屬於財經範疇。預設 True：模型漏填時當成正常問題照走檢索，
     # 漏放只是多跑一輪，誤判成離題則是正常問題直接被拒答，代價高得多。
     in_scope: bool = True
+    # answer_shape 與 doc_type 刻意分開：doc_type 是「這筆資料是什麼類型」（DB 欄位、
+    # 檢索過濾、保留策略、MCP 協定都吃它）；answer_shape 是「使用者要什麼形式的回答」。
+    # 兩者常相關但不等價——「這則新聞對股價的影響」doc_type=news 卻需要估值欄位。
+    # 預設 "full"：漏判只是多輸出幾欄，誤判成 news 會讓投資題失去素材，代價不對稱。
+    answer_shape: Literal["news", "full"] = "full"
 
     @field_validator("companies")
     @classmethod
@@ -249,6 +256,12 @@ def extract_filters(state: GraphState) -> GraphState:
    「電動車供應鏈有哪些」，這類沒指名公司但仍是財經問題）→ true
    完全不屬於（天氣、食物、健康、旅遊、程式、閒聊）→ false
    拿不定主意就填 true——漏放只是多跑一輪檢索，誤判會讓正常問題直接被拒答
+7. answer_shape: 使用者想要的「回答形式」，與第 2 點的資料類型無關。
+   - "news"：只想知道發生了什麼事、有什麼影響（如「2330 最近有什麼新聞」
+     「NVDA 出了什麼事」），不要求估值、分析師共識或投資建議
+   - "full"：需要投資判斷素材（如「該不該買」「估值合理嗎」「最新財報表現」），
+     或問題同時涉及新聞與投資決策（如「這則新聞對股價的影響」）
+   拿不定主意就填 "full"——少給欄位會讓需要判斷的使用者拿不到素材
 
 使用者問題：{state['question']}
 """
@@ -260,7 +273,7 @@ def extract_filters(state: GraphState) -> GraphState:
         log_duration(log, "extract_filters 結構化輸出失敗", started, node="extract_filters",
                      model=_model_of(state), qid=qid, ok=False, error=str(e))
         return {**state, "companies": [], "doc_type": None, "news_since_days": None,
-                "market": None, "in_scope": True}
+                "market": None, "in_scope": True, "answer_shape": "full"}
     log_duration(log, "extract_filters", started, node="extract_filters",
                  model=_model_of(state), qid=qid, ok=True)
 
@@ -270,7 +283,7 @@ def extract_filters(state: GraphState) -> GraphState:
     companies = parsed.companies or (state.get("companies") if state.get("market") else []) or []
     return {**state, "companies": companies, "doc_type": parsed.doc_type,
             "news_since_days": parsed.news_since_days, "market": market,
-            "in_scope": parsed.in_scope}
+            "in_scope": parsed.in_scope, "answer_shape": parsed.answer_shape}
 
 
 def _last_dual_listed(history: list[tuple[str, str]]) -> str | None:
@@ -700,6 +713,58 @@ def _news_age_days(doc: dict) -> int | None:
     return (dt.date.today() - published).days
 
 
+# 決策卡欄位 id，任何 shape 都無條件輸出（決策 9「不整段棄權」的迴歸防線）
+_UNCONDITIONAL_FIELDS = ["conclusion", "facts", "inference", "upside", "risk"]
+# news shape 預設不生成的五欄（決策 6）
+_FULL_ONLY_FIELDS = ["valuation", "consensus", "scenario", "earnings_call", "recommendation"]
+# 現行全 15 欄，ANSWER_SHAPE_GATING=0 時原樣回傳
+_ALL_FIELDS = _UNCONDITIONAL_FIELDS + _FULL_ONLY_FIELDS + [
+    "trigger", "next_event", "tracking_indicators",
+]
+
+
+def allowed_fields(state: GraphState, has_market: bool | None = None) -> list[str]:
+    """依 answer_shape 與實際 evidence 決定本次允許輸出哪些欄位。
+
+    唯一的 output schema decision source，generate 與 market_block 共用。
+    純函式不碰網路，方便用 assert script 測試——這是本案唯一新增的抽象，
+    由測試需求驅動，不是預留彈性。
+
+    has_market=None 表示「行情尚未抓取」，此時依賴行情的欄位先留在候選集，
+    供呼叫端判斷要不要抓；抓完後再以 True/False 呼叫一次定案(見兩段式)。
+    """
+    if not config.ANSWER_SHAPE_GATING:
+        return list(_ALL_FIELDS)
+
+    shape = state.get("answer_shape") or "full"
+    retrieved = state.get("retrieved") or []
+    has_financial_report = any(d.get("doc_type") == "financial_report" for d in retrieved)
+    has_news = any(d.get("doc_type") == "news" for d in retrieved)
+    has_news_with_date = any(
+        d.get("doc_type") == "news" and _news_age_days(d) is not None for d in retrieved
+    )
+
+    fields = list(_UNCONDITIONAL_FIELDS)
+
+    if shape == "full":
+        # has_market=None（第一段候選）視同「可能有」，先留在候選集供 needs_market 判斷
+        market_ok = has_market is not False
+        if market_ok:
+            fields += ["valuation", "consensus", "scenario"]
+        if has_financial_report:
+            fields.append("earnings_call")
+        if has_financial_report and has_news and market_ok:
+            fields.append("recommendation")
+
+    if retrieved:
+        fields.append("trigger")
+        fields.append("tracking_indicators")
+    if has_news_with_date or has_market:
+        fields.append("next_event")
+
+    return fields
+
+
 def route_after_tools(state: GraphState) -> str:
     """檢索結果明顯夠用就直接收工，否則交還給 agent 決定下一步。
 
@@ -778,11 +843,20 @@ def generate(state: GraphState) -> GraphState:
 
     market_block = ""
     companies = state.get("companies") or []
+    # 第一段：行情尚未抓取，先算候選集
+    candidate = allowed_fields(state, has_market=None)
+    # 只要候選集裡有任一欄吃行情就抓——yfinance 是 blocking 且未快取的網路呼叫
+    # (實測 2.50-3.55s)，擋在 first token 前面，抓來沒人用純屬浪費。
+    needs_market = bool({"valuation", "consensus", "scenario"} & set(candidate))
+    snapshot = None
     # ponytail: 多標的時留空——逐家併陳要改 prompt 結構，等有人要再說
-    if len(companies) == 1:
+    if len(companies) == 1 and needs_market:
         snapshot = get_market_snapshot(companies[0])
         if snapshot:
             market_block = f"\n即時市場數據（Yahoo Finance，僅供估值/時機參考，非檢索來源，不參與來源編號）：\n{snapshot}\n"
+    # 第二段：行情結果已知，定案。抓失敗（None）時依賴行情的欄位自動被剔除，
+    # 不會留下一個沒有素材的空欄叫模型寫「資料不足」。
+    fields = allowed_fields(state, has_market=bool(snapshot))
 
     # 使用者要求併陳兩市場時，明講兩邊不可直接換算——幣別、期間、每股基準三者都不同，
     # 沒這句提醒模型很容易把台幣 EPS 與美元 EPS 相除當成「匯率」或「溢價」
@@ -802,6 +876,12 @@ def generate(state: GraphState) -> GraphState:
             us=otc, tw=companies[0],
         ) + "\n"
 
+    trend_block = "\n".join([
+        t(lang, "trend_header"),
+        *(t(lang, f"trend_field_{f}") for f in fields),
+        t(lang, "trend_rules_common"),
+    ])
+
     prompt = f"""你是專業的財經分析助理。請根據下方參考資料回答使用者問題。
 規則：
 - 只根據參考資料回答，不要編造資料中沒有的數字或事實
@@ -818,7 +898,7 @@ def generate(state: GraphState) -> GraphState:
 1. 先簡潔回答問題
 2. 然後固定追加以下一節：
 
-{t(lang, "trend_section")}
+{trend_block}
 
 {t(lang, "disclaimer")}
 
@@ -833,7 +913,7 @@ def generate(state: GraphState) -> GraphState:
     log_duration(log, "generate", started, node="generate", model=_model_of(state),
                  qid=_qid(state["question"]), prompt_chars=len(prompt),
                  answer_chars=len(resp.content or ""), retrieved=len(state.get("retrieved") or []))
-    return {**state, "answer": resp.content}
+    return {**state, "answer": resp.content, "allowed_fields": fields}
 
 
 def no_result(state: GraphState) -> GraphState:

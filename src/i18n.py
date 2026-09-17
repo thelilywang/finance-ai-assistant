@@ -50,24 +50,37 @@ STRINGS = {
             "或「NVDA 近期有什麼新聞」。"
         ),
         "answer_lang_rule": "- 全文以繁體中文回答",
-        "trend_section": (
+        "trend_header": (
             "## 📈 投資決策參考\n"
             "（以 buy-side 分析師的角色填寫下列欄位。格式硬性要求：每欄輸出成獨立的 markdown 條列項目"
-            "「- **欄名**：內容」，欄名粗體、內容務必簡潔；已知事實／推論／觸發條件的多個點用巢狀子條列，不得把多欄擠在同一行：\n"
-            "- **一句話結論**：\n"
-            "- **已知事實**：1-2 點子條列，每點必附 [來源N]\n"
-            "- **推論**：1-2 點子條列，明確標示為推論\n"
-            "- **利多**：\n"
-            "- **風險**：\n"
-            "- **估值觀察**：僅根據「即時市場數據」的數字；沒有該數據就寫「資料不足」\n"
-            "- **市場共識與門檻**：僅根據「即時市場數據」中的分析師共識數字，列出當季 EPS／營收共識區間與過去幾季 beat/miss；沒有該數據就寫「資料不足」\n"
-            "- **情境解讀**：三點子條列「若高於共識上緣」「若落在區間內」「若低於下緣」，各給一句市場可能如何解讀（條件式描述，不得給機率、不得給加碼／減碼指令）\n"
-            "- **法說會/財報關注清單**：2-3 點，優先引用檢索資料中與 guidance 相關的內容（附 [來源N]）；沒有就列通用關注項（營收指引、毛利率指引、資本支出）\n"
-            "- **建議傾向**：僅當財報＋新聞＋行情足以支持時，給「偏多／中性觀望／偏空」其一並附一句依據；不足時寫「資料不足以形成明確傾向，見觸發條件」\n"
-            "- **觸發條件**：「轉積極」「轉保守」兩點子條列（條件式描述，非指令）\n"
-            "- **下一個關鍵事件**：\n"
-            "- **建議追蹤指標**：2-3 個\n"
-            "硬規則：「資料不足」只准出現在已知事實／估值觀察／市場共識與門檻／建議傾向四欄；觸發條件、下一個關鍵事件、建議追蹤指標永遠必填；不得輸出信心百分比；情境解讀不得含機率數字；不得編造資料中沒有的數字。）"
+            "「- **欄名**：內容」，欄名粗體、內容務必簡潔；已知事實／推論／觸發條件的多個點用巢狀子條列，不得把多欄擠在同一行："
+        ),
+        "trend_field_conclusion": "- **一句話結論**：",
+        "trend_field_facts": "- **已知事實**：1-2 點子條列，每點必附 [來源N]",
+        "trend_field_inference": "- **推論**：1-2 點子條列，明確標示為推論",
+        "trend_field_upside": "- **利多**：",
+        "trend_field_risk": "- **風險**：",
+        "trend_field_valuation": "- **估值觀察**：僅根據「即時市場數據」的數字",
+        "trend_field_consensus": (
+            "- **市場共識與門檻**：僅根據「即時市場數據」中的分析師共識數字，"
+            "列出當季 EPS／營收共識區間與過去幾季 beat/miss"
+        ),
+        "trend_field_scenario": (
+            "- **情境解讀**：三點子條列「若高於共識上緣」「若落在區間內」「若低於下緣」，"
+            "各給一句市場可能如何解讀（條件式描述，不得給機率、不得給加碼／減碼指令）"
+        ),
+        "trend_field_earnings_call": (
+            "- **法說會/財報關注清單**：2-3 點，優先引用檢索資料中與 guidance 相關的內容（附 [來源N]）；"
+            "沒有就列通用關注項（營收指引、毛利率指引、資本支出）"
+        ),
+        "trend_field_recommendation": "- **建議傾向**：給「偏多／中性觀望／偏空」其一並附一句依據",
+        "trend_field_trigger": "- **觸發條件**：「轉積極」「轉保守」兩點子條列（條件式描述，非指令）",
+        "trend_field_next_event": "- **下一個關鍵事件**：",
+        "trend_field_tracking_indicators": "- **建議追蹤指標**：2-3 個",
+        "trend_rules_common": (
+            "只輸出上方列出的欄位。未列出的欄位完全不要輸出（不要輸出欄名、不要寫「資料不足」、"
+            "不要寫「無」、不要用任何佔位文字）。不得輸出信心百分比；情境解讀不得含機率數字；"
+            "不得編造資料中沒有的數字。）"
         ),
         "no_result_market": (
             "雖查無相關財報/新聞資料，以下為即時行情供參考：\n{snapshot}\n"
@@ -140,28 +153,44 @@ STRINGS = {
             "\"Any recent news on NVDA?\"."
         ),
         "answer_lang_rule": "- Answer entirely in English",
-        "trend_section": (
+        "trend_header": (
             "## 📈 Investment Decision Reference\n"
             "(As a buy-side analyst, fill in the fields below. Strict formatting: output each field as its own "
             "markdown list item \"- **Field**: content\" with the field name in bold, content concise; use nested "
-            "sub-bullets for multiple points under Known facts / Inference / Triggers; never cram fields onto one line:\n"
-            "- **One-line conclusion**:\n"
-            "- **Known facts**: 1-2 sub-bullets, each must cite [Source N]\n"
-            "- **Inference**: 1-2 sub-bullets, clearly labeled as inference\n"
-            "- **Positives**:\n"
-            "- **Risks**:\n"
-            "- **Valuation check**: based only on figures from the \"real-time market data\"; if absent, write \"insufficient data\"\n"
-            "- **Consensus & thresholds**: based only on analyst consensus figures from the \"real-time market data\"; list the current-quarter EPS/revenue consensus range and recent quarters' beat/miss; if absent, write \"insufficient data\"\n"
-            "- **Scenario read**: three sub-bullets \"if above the consensus high\" / \"if within the range\" / \"if below the low\", each with one sentence on how the market may interpret it (conditional description; no probabilities, no add/trim instructions)\n"
-            "- **Earnings call watch list**: 2-3 items, preferring guidance-related content from the retrieved material (with [Source N]); if none, list generic items (revenue guidance, margin guidance, capex)\n"
-            "- **Stance**: only give \"Bullish / Neutral-wait / Bearish\" with one supporting reason when filings + news + "
-            "market data support it; otherwise write \"insufficient data for a clear stance, see triggers\"\n"
-            "- **Triggers**: two sub-bullets \"turn positive\" / \"turn cautious\" (conditional description, not an instruction)\n"
-            "- **Next key event**:\n"
-            "- **Metrics to watch**: 2-3 items\n"
-            "Hard rules: \"insufficient data\" is only allowed in Known facts / Valuation check / Consensus & thresholds / Stance; "
-            "Triggers, Next key event, and Metrics to watch are always required; never output a confidence percentage; "
-            "the scenario read must not contain probability figures; "
+            "sub-bullets for multiple points under Known facts / Inference / Triggers; never cram fields onto one line:"
+        ),
+        "trend_field_conclusion": "- **One-line conclusion**:",
+        "trend_field_facts": "- **Known facts**: 1-2 sub-bullets, each must cite [Source N]",
+        "trend_field_inference": "- **Inference**: 1-2 sub-bullets, clearly labeled as inference",
+        "trend_field_upside": "- **Positives**:",
+        "trend_field_risk": "- **Risks**:",
+        "trend_field_valuation": "- **Valuation check**: based only on figures from the \"real-time market data\"",
+        "trend_field_consensus": (
+            "- **Consensus & thresholds**: based only on analyst consensus figures from the \"real-time market data\"; "
+            "list the current-quarter EPS/revenue consensus range and recent quarters' beat/miss"
+        ),
+        "trend_field_scenario": (
+            "- **Scenario read**: three sub-bullets \"if above the consensus high\" / \"if within the range\" / "
+            "\"if below the low\", each with one sentence on how the market may interpret it "
+            "(conditional description; no probabilities, no add/trim instructions)"
+        ),
+        "trend_field_earnings_call": (
+            "- **Earnings call watch list**: 2-3 items, preferring guidance-related content from the retrieved "
+            "material (with [Source N]); if none, list generic items (revenue guidance, margin guidance, capex)"
+        ),
+        "trend_field_recommendation": (
+            "- **Stance**: give \"Bullish / Neutral-wait / Bearish\" with one supporting reason"
+        ),
+        "trend_field_trigger": (
+            "- **Triggers**: two sub-bullets \"turn positive\" / \"turn cautious\" "
+            "(conditional description, not an instruction)"
+        ),
+        "trend_field_next_event": "- **Next key event**:",
+        "trend_field_tracking_indicators": "- **Metrics to watch**: 2-3 items",
+        "trend_rules_common": (
+            "Only output the fields listed above. Do not output any field not listed (no field name, no "
+            "\"insufficient data\", no \"N/A\", no placeholder text of any kind). Never output a confidence "
+            "percentage; the scenario read must not contain probability figures; "
             "never fabricate numbers not in the reference material.)"
         ),
         "no_result_market": (
