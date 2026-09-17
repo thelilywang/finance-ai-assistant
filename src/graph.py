@@ -758,6 +758,9 @@ def unique_sources(retrieved: list[dict]) -> list[str]:
 
 
 def generate(state: GraphState) -> GraphState:
+    # 計時起點在節點開頭而非 LLM 呼叫前：get_market_snapshot 是 blocking 網路呼叫且擋在
+    # first token 前（實測 2.50-3.55s），不納進 elapsed_ms 就量不到它的影響。
+    started = time.monotonic()
     lang = state.get("lang", "zh")
     src_label = t(lang, "citation_label")  # 引用標記跟隨回答語言（[來源1] / [Source 1]）
     ordered = unique_sources(state["retrieved"])
@@ -824,7 +827,6 @@ def generate(state: GraphState) -> GraphState:
 {market_block}{dual_block}{history_block}
 使用者問題：{state['question']}
 """
-    started = time.monotonic()
     resp = _llms(_model_of(state))["llm"].invoke(prompt)
     # 已知端到端瓶頸在本地模型生成，prompt/回應長度是判斷「慢在輸入還是輸出」的依據；
     # 只記長度不記內容，避免把提問寫進 log（保留策略未定前先不落地個資）
