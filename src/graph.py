@@ -717,7 +717,7 @@ def _news_age_days(doc: dict) -> int | None:
 _UNCONDITIONAL_FIELDS = ["conclusion", "facts", "inference", "upside", "risk"]
 # news shape 預設不生成的五欄（決策 6）
 _FULL_ONLY_FIELDS = ["valuation", "consensus", "scenario", "earnings_call", "recommendation"]
-# 現行全 15 欄，ANSWER_SHAPE_GATING=0 時原樣回傳
+# 現行全 13 欄，ANSWER_SHAPE_GATING=0 時原樣回傳
 _ALL_FIELDS = _UNCONDITIONAL_FIELDS + _FULL_ONLY_FIELDS + [
     "trigger", "next_event", "tracking_indicators",
 ]

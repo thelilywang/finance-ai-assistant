@@ -43,7 +43,7 @@ EMBEDDING_CACHE_TTL_SECONDS = max(0, int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS"
 # 保留循序路徑是為了能在同一份程式碼上跑 A/B，也是並行若不划算時的回退點。
 RETRIEVE_PARALLEL = os.getenv("RETRIEVE_PARALLEL", "1").lower() not in ("0", "false", "no")
 
-# generate 的決策卡是否依 answer_shape/evidence 裁剪欄位。關閉則回傳現行全 15 欄，
+# generate 的決策卡是否依 answer_shape/evidence 裁剪欄位。關閉則回傳現行全 13 欄，
 # 保留是為了能在同一份程式碼上跑 A/B。
 ANSWER_SHAPE_GATING = os.getenv("ANSWER_SHAPE_GATING", "1").lower() not in ("0", "false", "no")
 
