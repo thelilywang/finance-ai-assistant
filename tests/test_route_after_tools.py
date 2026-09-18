@@ -18,10 +18,10 @@ from src.graph import route_after_tools
 TODAY = dt.date.today()
 
 
-def _doc(doc_type, days_ago, doc_id=1):
+def _doc(doc_type, days_ago, doc_id=1, company=None):
     published = (TODAY - dt.timedelta(days=days_ago)).isoformat() if days_ago is not None else None
     return {"id": doc_id, "source": f"s{doc_id}", "doc_type": doc_type,
-            "published_at": published, "content": "內容"}
+            "company": company, "published_at": published, "content": "內容"}
 
 
 def _search(docs, cid="1"):
@@ -73,14 +73,28 @@ assert route_after_tools(_state([
     _search([_doc("news", 0)], "3"),
 ])) == "assemble"
 
-# 多標的：retrieved 是各家與全域新聞合併後的結果，min 會讓最新的那筆代表全部。
-# 同樣一組資料，單標的可收工，多標的必須交還 LLM——否則過期的那家永遠等不到補抓。
+# 多標的：retrieved 是各家與全域新聞合併後的結果，min 會讓最新的那筆代表全部，
+# 所以新鮮度必須逐家算。實測情境：全域新聞 0 天、台積電 1 天、ASML 65 天——
+# 合併取 min 是 0，看起來夠新，但 ASML 過期，必須交還 LLM 去補抓。
+mixed = [_doc("news", 0, 1), _doc("news", 1, 2, "2330"), _doc("news", 65, 3, "ASML")]
+assert route_after_tools(_state([_search(mixed)], companies=["2330", "ASML"])) == "agent"
+# 每家都夠新 → 不必為了讓模型說一句「夠了，停」再付一輪（實測 96 至 277 秒）
+both_fresh = [_doc("news", 0, 1), _doc("news", 1, 2, "2330"), _doc("news", 2, 3, "ASML")]
+assert route_after_tools(_state([_search(both_fresh)], companies=["2330", "ASML"])) == "assemble"
+# 有公司完全沒檢索到新聞（全域新聞再新也不算）→ 不替 LLM 決定
+only_one = [_doc("news", 0, 1), _doc("news", 1, 2, "2330")]
+assert route_after_tools(_state([_search(only_one)], companies=["2330", "ASML"])) == "agent"
+# 逐家判斷對時效窗一樣生效：窗 <= 7 天時門檻收緊到當天，ASML 的 2 天就不夠新
+assert route_after_tools(_state([_search(both_fresh)], 7, ["2330", "ASML"])) == "agent"
+# 補抓後的重查：新資料入庫，兩家都夠新就收工
+assert route_after_tools(_state([
+    _search(mixed, "1"),
+    ToolMessage(content="新聞更新完成", name="fetch_company_data", tool_call_id="2"),
+    _search([_doc("news", 0, 4, "ASML")], "3"),
+], companies=["2330", "ASML"])) == "assemble"
+# 單標的維持原行為：合併取 min，不受逐家邏輯影響
 fresh = [report, _doc("news", 0)]
 assert route_after_tools(_state([_search(fresh)], companies=["2330"])) == "assemble"
-assert route_after_tools(_state([_search(fresh)], companies=["2330", "ASML"])) == "agent"
-# 實測情境：全域新聞 0 天、台積電 1 天、ASML 65 天，min 是 0 卻不代表 ASML 夠新
-mixed = [_doc("news", 0, 1), _doc("news", 1, 2), _doc("news", 65, 3)]
-assert route_after_tools(_state([_search(mixed)], companies=["2330", "ASML"])) == "agent"
 
 # 完全沒有 tool 訊息（理論上不會走到）→ 交給 LLM
 assert route_after_tools(_state([HumanMessage(content="seed"), AIMessage(content="x")])) == "agent"

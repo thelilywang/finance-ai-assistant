@@ -713,6 +713,28 @@ def _news_age_days(doc: dict) -> int | None:
     return (dt.date.today() - published).days
 
 
+def _news_ages_by_company(state: GraphState) -> dict[str, list[int]]:
+    """把所有 search_knowledge_base 回傳的新聞按 company 分組，各自算距今天數。
+
+    多標的的新鮮度必須逐家判斷：合併後取 min 會讓最新的那家代表全部。
+    直接讀訊息串而非 assemble(state)["retrieved"]，因為後者已經合併過。
+    """
+    ages: dict[str, list[int]] = {}
+    for m in state["messages"]:
+        if not isinstance(m, ToolMessage) or m.name != "search_knowledge_base":
+            continue
+        try:
+            chunks = json.loads(m.content).get("chunks") or []
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            continue
+        for doc in chunks:
+            company = doc.get("company")
+            age = _news_age_days(doc)
+            if company and age is not None:
+                ages.setdefault(company, []).append(age)
+    return ages
+
+
 # 決策卡欄位 id，任何 shape 都無條件輸出（決策 9「不整段棄權」的迴歸防線）
 _UNCONDITIONAL_FIELDS = ["conclusion", "facts", "inference", "upside", "risk"]
 # news shape 預設不生成的五欄（決策 6）
@@ -774,12 +796,12 @@ def route_after_tools(state: GraphState) -> str:
     """檢索結果明顯夠用就直接收工，否則交還給 agent 決定下一步。
 
     只把「資料明顯夠用 → 停止呼叫工具」這一種判斷收回程式，判準與
-    src/mcp_server.py 的 search_knowledge_base docstring 一致**但只限單標的**：
-    那邊的新鮮度是逐家算的，這裡的 retrieved 是各家與全域新聞合併後的結果，
-    多標的取 min 會讓最新的那筆代表全部（實測 ASML 65 天被全域新聞 0 天蓋掉），
-    故多標的直接回 agent。資料不足、不夠新、沒有新聞、或剛跑完補抓 tool 時
-    一律回 agent，「要不要補抓、補抓完要不要再查」仍然全部由 LLM 決定，
-    09-07 改造的核心設計不變。
+    src/mcp_server.py 的 search_knowledge_base docstring 一致，但新鮮度必須
+    跟那邊一樣逐家算：這裡的 retrieved 是各家與全域新聞合併後的結果，
+    取 min 會讓最新的那筆代表全部（實測 ASML 65 天被全域新聞 0 天蓋掉），
+    故多標的改為每家各自取自己的新聞天數，全都夠新才收工。資料不足、
+    不夠新、有公司完全沒檢索到新聞、或剛跑完補抓 tool 時一律回 agent，
+    「要不要補抓、補抓完要不要再查」仍然全部由 LLM 決定，09-07 改造的核心設計不變。
 
     省下的是純粹重複的第二輪決策：模型讀完檢索結果後只為了說一句「夠了，停」，
     實測就要花約 106 秒，佔單題總耗時四成。
@@ -791,14 +813,25 @@ def route_after_tools(state: GraphState) -> str:
     if last is None or last.name != "search_knowledge_base":
         return "agent"
 
-    # 捷徑的前提是「一次檢索涵蓋全部所需資料」，多標的不成立：retrieved 是各家與全域
-    # 市場新聞合併後的結果，min 會讓最新的那筆代表全部，過期的那家永遠等不到補抓。
+    # 捷徑的前提是「一次檢索涵蓋全部所需資料」，多標的的 retrieved 是各家與全域市場
+    # 新聞合併後的結果，min 會讓最新的那筆代表全部，過期的那家永遠等不到補抓。
     # 實測題「台積電與ASML」：ASML 新聞距今 65 天，卻因全域新聞 0 天而跳過 agent。
+    # 但「回 agent」本身要價 96 至 277 秒，且模型常只回一句「夠了，停」，所以不是
+    # 多標的就回，而是逐家各自取自己那次檢索的新聞天數——全都夠新才收工。
+    # ponytail: 只認 chunks 上的 company 欄；沒有任何一家被檢索到時交還 LLM。
+    ages = _news_ages_by_company(state)
     if len(state.get("companies") or []) > 1:
-        return "agent"
-
-    ages = [age for doc in assemble(state)["retrieved"]
-            if (age := _news_age_days(doc)) is not None]
+        per_company = [
+            min(ages[c]) for c in state["companies"] if ages.get(c)
+        ]
+        if len(per_company) < len(state["companies"]):
+            return "agent"  # 有公司完全沒檢索到新聞，不替 LLM 決定
+        # 下面用 min(ages) 比門檻，所以這裡取各家最新新聞裡「最舊的那家」：
+        # 全部夠新才收工，任何一家過期都要回 agent 去補抓
+        ages = [max(per_company)]
+    else:
+        ages = [age for doc in assemble(state)["retrieved"]
+                if (age := _news_age_days(doc)) is not None]
     # 查無資料或結果中完全沒有新聞：交給 LLM 判斷要不要補抓
     if not ages:
         return "agent"
