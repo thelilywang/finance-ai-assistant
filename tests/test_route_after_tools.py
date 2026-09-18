@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.graph import route_after_tools
+from src.graph import _stale_companies, route_after_tools
 
 TODAY = dt.date.today()
 
@@ -27,6 +27,18 @@ def _doc(doc_type, days_ago, doc_id=1, company=None):
 def _search(docs, cid="1"):
     return ToolMessage(
         content=json.dumps({"summary_for_llm": "摘要", "chunks": docs}, ensure_ascii=False),
+        name="search_knowledge_base", tool_call_id=cid)
+
+
+def _search_blocks(docs, cid="1"):
+    """MCP tool 經 langchain-mcp-adapters 回來的真實形狀：content block 陣列而非字串。
+
+    實測方向二沒 fire 就是敗在這裡——直接 json.loads(m.content) 丟 TypeError
+    被 except 吞掉，靜默退化成「沒有新聞」，而測試全都用字串故測不出來。
+    """
+    return ToolMessage(
+        content=[{"type": "text", "text": json.dumps(
+            {"summary_for_llm": "摘要", "chunks": docs}, ensure_ascii=False)}],
         name="search_knowledge_base", tool_call_id=cid)
 
 
@@ -86,11 +98,12 @@ only_one = [_doc("news", 0, 1), _doc("news", 1, 2, "2330")]
 assert route_after_tools(_state([_search(only_one)], companies=["2330", "ASML"])) == "agent"
 # 逐家判斷對時效窗一樣生效：窗 <= 7 天時門檻收緊到當天，ASML 的 2 天就不夠新
 assert route_after_tools(_state([_search(both_fresh)], 7, ["2330", "ASML"])) == "agent"
-# 補抓後的重查：新資料入庫，兩家都夠新就收工
+# 補抓後的重查：新資料入庫，兩家都夠新就收工。
+# 重查是對整題重跑一次檢索，兩家的 chunk 都會回來，不是只回補抓的那家。
 assert route_after_tools(_state([
     _search(mixed, "1"),
     ToolMessage(content="新聞更新完成", name="fetch_company_data", tool_call_id="2"),
-    _search([_doc("news", 0, 4, "ASML")], "3"),
+    _search([_doc("news", 0, 4, "ASML"), _doc("news", 1, 5, "2330")], "3"),
 ], companies=["2330", "ASML"])) == "assemble"
 # 單標的維持原行為：合併取 min，不受逐家邏輯影響
 fresh = [report, _doc("news", 0)]
@@ -98,5 +111,83 @@ assert route_after_tools(_state([_search(fresh)], companies=["2330"])) == "assem
 
 # 完全沒有 tool 訊息（理論上不會走到）→ 交給 LLM
 assert route_after_tools(_state([HumanMessage(content="seed"), AIMessage(content="x")])) == "agent"
+
+# --- _stale_companies：route_after_tools 與 agent 共用的逐家判斷 ---
+# 兩處用同一個函式才不會漂移：條件邊決定「要不要回」，agent 決定「訊息裡指名誰」。
+stale, missing = _stale_companies(_state([_search(mixed)], companies=["2330", "ASML"]))
+assert stale == [("ASML", 65)], stale        # 只有過期的那家，且帶天數
+assert missing == [], missing
+# 兩家都夠新 → 都不列入
+assert _stale_companies(_state([_search(both_fresh)], companies=["2330", "ASML"])) == ([], [])
+# 完全沒檢索到的家歸 missing，不是 stale——兩者的處置不同（後者才要指名補抓）
+assert _stale_companies(
+    _state([_search(only_one)], companies=["2330", "ASML"])
+) == ([], ["ASML"])
+# 時效窗收緊（門檻 0 天）時，1 天的 2330 與 2 天的 ASML 都算過期，兩家都要指名
+assert _stale_companies(
+    _state([_search(both_fresh)], 7, ["2330", "ASML"])
+)[0] == [("2330", 1), ("ASML", 2)]
+# 補抓並重查後：只認補抓之後的那次檢索。原本以為新 chunk 會讓 min 自然下降，
+# 實測不成立——舊那次的 65 天留在訊息串裡，min 永遠是 65，同一家被重複指名到
+# 輪數上限。改以最後一次 fetch_company_data 為界，補抓前的結果一律不計入。
+assert _stale_companies(_state([
+    _search(mixed, "1"),
+    ToolMessage(content="新聞更新完成", name="fetch_company_data", tool_call_id="2"),
+    _search([_doc("news", 0, 4, "ASML"), _doc("news", 1, 5, "2330")], "3"),
+], companies=["2330", "ASML"])) == ([], [])
+
+# --- agent 節點把過期標的的代號寫進訊息 ---
+# 實測：模型讀到「該補抓」會照做卻補錯家（補了距今 1 天的 NVDA，漏了 18 天的 2454）。
+# 程式端已經知道是哪一家，直接指名。這裡只驗訊息內容與是否寫回 state，不呼叫 LLM。
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import src.graph as graph
+
+
+def _run_agent(state):
+    reply = AIMessage(content="ok")
+    fake = MagicMock()  # bind_tools 是同步的，用 AsyncMock 會回 coroutine
+    fake.bind_tools.return_value.ainvoke = AsyncMock(return_value=reply)
+    with patch.object(graph, "_mcp_client") as client, \
+         patch.object(graph, "_llms", return_value={"tool": fake}):
+        client.get_tools = AsyncMock(return_value=[])
+        out = asyncio.run(graph.agent(state))
+    return out, fake.bind_tools.return_value.ainvoke.call_args[0][0]
+
+
+st = _state([_search(mixed)], companies=["2330", "ASML"])
+out, sent = _run_agent(st)
+assert "ASML" in sent[-1].content and "65 天" in sent[-1].content, sent[-1].content
+assert "fetch_company_data" in sent[-1].content
+assert "2330" not in sent[-1].content, sent[-1].content  # 夠新的那家不該被指名
+# 指名訊息必須寫回 state：只塞給這次呼叫的話，下一輪歷史裡沒有它，模型又會補錯家
+assert len(out["messages"]) == 2 and out["messages"][0] is sent[-1]
+
+# 都夠新時不加任何訊息，也不改變 state 的形狀
+out, sent = _run_agent(_state([_search(both_fresh)], companies=["2330", "ASML"]))
+assert len(sent) == 1 and len(out["messages"]) == 1
+
+# content block 陣列（MCP 的真實形狀）要和字串走同一條路：兩處判斷都不能靜默退化
+blocks_st = _state([_search_blocks(mixed)], companies=["2330", "ASML"])
+assert route_after_tools(blocks_st) == "agent"
+out, sent = _run_agent(blocks_st)
+assert "ASML" in sent[-1].content and "2330" not in sent[-1].content, sent[-1].content
+
+# 補抓後重查到新的新聞 → 舊那次的過期天數不得再列入，否則會重複指名到輪數上限
+refetched = [
+    _search(mixed),
+    ToolMessage(content="新聞更新完成", name="fetch_company_data", tool_call_id="2"),
+    _search([_doc("news", 0, 20, "ASML"), _doc("news", 0, 21, "2330")], cid="3"),
+]
+out, sent = _run_agent(_state(refetched, companies=["2330", "ASML"]))
+assert len(sent) == 3 and len(out["messages"]) == 1, sent[-1].content
+assert route_after_tools(_state(refetched, companies=["2330", "ASML"])) == "assemble"
+
+# 剛補抓完、還沒重查 → 沒有檢索結果可判斷，交還 LLM 且不得憑舊結果指名
+just_fetched = refetched[:2]
+assert route_after_tools(_state(just_fetched, companies=["2330", "ASML"])) == "agent"
+out, sent = _run_agent(_state(just_fetched, companies=["2330", "ASML"]))
+assert len(sent) == 2 and len(out["messages"]) == 1, sent[-1].content
 
 print("route_after_tools self-check OK")
