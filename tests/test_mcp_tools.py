@@ -65,6 +65,26 @@ assert "最新的「新聞」距今 0 天" in any_summary, any_summary
 
 mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: chunks
 
+# 只給 N 讓模型自己比門檻不夠：實測報 N=17 仍直接收工，故把結論一起寫進 header。
+# 門檻與 docstring 的判準必須一致，否則等於給模型兩套互相矛盾的說明。
+def _fresh_line(days_ago, news_since_days=None):
+    mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: [
+        {"id": 1, "source": "s", "title": None, "doc_type": "news", "company": "AAPL",
+         "published_at": TODAY - dt.timedelta(days=days_ago), "content": "新聞"}]
+    s = json.loads(asyncio.run(
+        mcp_server.search_knowledge_base("x", "AAPL", None, news_since_days)
+    ))["summary_for_llm"]
+    return s.split("以下是檢索結果")[0]
+
+assert "不需補抓" in _fresh_line(3), _fresh_line(3)           # N=3，門檻 3 → 不補
+assert "請呼叫 fetch_company_data" in _fresh_line(4), _fresh_line(4)   # N=4 → 補
+assert "請呼叫 fetch_company_data" in _fresh_line(17), _fresh_line(17)  # 實測的 2454
+# 問題要求近期（時效窗 <= 7）時門檻收緊到當天
+assert "不需補抓" in _fresh_line(0, 7)
+assert "請呼叫 fetch_company_data" in _fresh_line(2, 7), _fresh_line(2, 7)
+# 時效窗 90 天不算要求當天，仍走 3 天門檻
+assert "不需補抓" in _fresh_line(2, 90)
+
 # 只有財報沒有新聞時要明講，否則模型會誤以為新聞夠新
 mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: [chunks[0]]
 only_report = json.loads(asyncio.run(mcp_server.search_knowledge_base("x")))

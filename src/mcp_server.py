@@ -117,7 +117,16 @@ async def search_knowledge_base(
     if blocks:
         if news_ages:
             scope = f" {company} 的" if company else ""
-            freshness = f"目前最新的{scope}「新聞」距今 {min(news_ages)} 天。"
+            # 只給 N 讓模型自己比門檻是不夠的：實測 2454 報 N=17、docstring 明寫
+            # 「N 大於 3 → 補抓」，模型仍直接收工（09-19 題 2，round 2 tool_calls 0）。
+            # 門檻的算式就在下面幾行，直接把結論算好寫進去，和「不要自己推算日期」同一手法。
+            limit = 0 if news_since_days is not None and news_since_days <= 7 else 3
+            verdict = (
+                f"依本工具說明，這超過 {limit} 天的門檻，請呼叫 fetch_company_data 補抓後再重新檢索。"
+                if min(news_ages) > limit else
+                f"依本工具說明，這在 {limit} 天的門檻內，不需補抓。"
+            )
+            freshness = f"目前最新的{scope}「新聞」距今 {min(news_ages)} 天。{verdict}"
         elif company:
             freshness = f"檢索結果中沒有任何 {company} 的新聞（其他公司或全域新聞不列入時效判斷）。"
         else:
