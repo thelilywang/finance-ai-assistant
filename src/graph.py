@@ -629,6 +629,18 @@ async def agent(state: GraphState) -> GraphState:
     """把 MCP tool 綁給 LLM，由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。"""
     tools = await _mcp_client.get_tools()
     messages = state.get("messages") or [HumanMessage(content=_seed_prompt(state))]
+    # 實測模型讀到「該補抓」會照做，卻補錯家：2454 距今 18 天該補、NVDA 距今 1 天
+    # 不用補，它去補了 NVDA。工具 header 是逐次回傳的，模型得自己記住哪次結果對應
+    # 哪一家——程式這邊早就知道了，直接指名，不要它自己對應。
+    directive = []
+    if stale := _stale_companies(state)[0]:
+        directive = [HumanMessage(content="；".join(
+            f"{c} 的新聞距今 {age} 天，已過期，請對 {c} 呼叫 fetch_company_data"
+            for c, age in stale
+        ) + "。補抓後請以同樣的代號重新檢索。")]
+        log.info("指名過期標的", extra={"fields": {
+            "node": "agent", "stale": [c for c, _ in stale]}})
+    messages = messages + directive
     started = time.monotonic()
     resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(
         _trim_for_llm(messages)
@@ -638,7 +650,10 @@ async def agent(state: GraphState) -> GraphState:
     log_duration(log, "agent", started, node="agent", model=_model_of(state),
                  qid=_qid(state["question"]), round=rounds + 1,
                  tool_calls=len(getattr(resp, "tool_calls", None) or []))
-    return {**state, "messages": [resp]}
+    # directive 一併寫回 state：只塞給這次呼叫的話，下一輪模型讀到的歷史裡沒有它，
+    # 又會回到「知道要補抓但不知道補哪家」。重複指名由 _news_ages_by_company 只讀
+    # 最後一次補抓之後的檢索擋掉，不是靠舊 directive 自然失效。
+    return {**state, "messages": directive + [resp]}
 
 
 def agent_route(state: GraphState) -> str:
@@ -718,13 +733,26 @@ def _news_ages_by_company(state: GraphState) -> dict[str, list[int]]:
 
     多標的的新鮮度必須逐家判斷：合併後取 min 會讓最新的那家代表全部。
     直接讀訊息串而非 assemble(state)["retrieved"]，因為後者已經合併過。
+    內容一律經 _tool_text：MCP tool 回來的是 content block 陣列而非字串，
+    直接 json.loads 會丟 TypeError 被下面的 except 吞掉，靜默退化成「沒有新聞」。
+
+    只看最後一次補抓之後的檢索。補抓前那次的結果描述的是補抓前的狀態，
+    留著會讓 min 永遠停在舊天數——實測 2454 在 round 2 就補抓成功、新聞已是 0 天，
+    卻因 round 1 的 16 天還在訊息串裡而被重複指名到輪數上限，白花 38.9 秒。
+    assemble 反過來要累積全部歷史，那是檢索涵蓋率，與「現在最新是幾天」不同問題。
     """
+    msgs = state["messages"]
+    last_fetch = max(
+        (i for i, m in enumerate(msgs)
+         if isinstance(m, ToolMessage) and m.name == "fetch_company_data"),
+        default=-1,
+    )
     ages: dict[str, list[int]] = {}
-    for m in state["messages"]:
+    for m in msgs[last_fetch + 1:]:
         if not isinstance(m, ToolMessage) or m.name != "search_knowledge_base":
             continue
         try:
-            chunks = json.loads(m.content).get("chunks") or []
+            chunks = json.loads(_tool_text(m.content)).get("chunks") or []
         except (json.JSONDecodeError, AttributeError, TypeError):
             continue
         for doc in chunks:
@@ -733,6 +761,36 @@ def _news_ages_by_company(state: GraphState) -> dict[str, list[int]]:
             if company and age is not None:
                 ages.setdefault(company, []).append(age)
     return ages
+
+
+def _fresh_limit(state: GraphState) -> int:
+    """新聞算「夠新」的天數上限，與 mcp_server.search_knowledge_base 的判準一致。
+
+    問題明確要求近期（時效窗 <= 7 天）就要求當天的新聞，否則 3 天內都算夠新。
+    時效窗由 extract_filters 抽出，與檢索過濾共用同一個判斷，不再各自比對問題字串；
+    窗是 90 天（「最近三個月」）時要求當天新聞太嚴，故以 7 天為界而非「有值就收緊」。
+    """
+    days = state.get("news_since_days")
+    return 0 if days is not None and days <= 7 else 3
+
+
+def _stale_companies(state: GraphState) -> tuple[list[tuple[str, int]], list[str]]:
+    """多標的時逐家判斷新鮮度，回傳（過期的家與其天數, 完全沒檢索到的家）。
+
+    新鮮度必須逐家算：合併後取 min 會讓最新的那家代表全部（實測 ASML 65 天被全域
+    新聞 0 天蓋掉）。route_after_tools 用它決定要不要回 agent，agent 用它把「哪一家
+    過期」寫進訊息——實測模型收到「該補抓」會照做，卻補錯家，因為 header 是逐次
+    回傳的，得自己記住哪次結果對應哪家。兩處共用這裡，判準才不會各自漂移。
+    """
+    ages = _news_ages_by_company(state)
+    limit = _fresh_limit(state)
+    stale, missing = [], []
+    for c in state.get("companies") or []:
+        if not ages.get(c):
+            missing.append(c)
+        elif min(ages[c]) > limit:
+            stale.append((c, min(ages[c])))
+    return stale, missing
 
 
 # 決策卡欄位 id，任何 shape 都無條件輸出（決策 9「不整段棄權」的迴歸防線）
@@ -819,27 +877,22 @@ def route_after_tools(state: GraphState) -> str:
     # 但「回 agent」本身要價 96 至 277 秒，且模型常只回一句「夠了，停」，所以不是
     # 多標的就回，而是逐家各自取自己那次檢索的新聞天數——全都夠新才收工。
     # ponytail: 只認 chunks 上的 company 欄；沒有任何一家被檢索到時交還 LLM。
-    ages = _news_ages_by_company(state)
     if len(state.get("companies") or []) > 1:
-        per_company = [
-            min(ages[c]) for c in state["companies"] if ages.get(c)
-        ]
-        if len(per_company) < len(state["companies"]):
-            return "agent"  # 有公司完全沒檢索到新聞，不替 LLM 決定
-        # 下面用 min(ages) 比門檻，所以這裡取各家最新新聞裡「最舊的那家」：
-        # 全部夠新才收工，任何一家過期都要回 agent 去補抓
-        ages = [max(per_company)]
-    else:
-        ages = [age for doc in assemble(state)["retrieved"]
-                if (age := _news_age_days(doc)) is not None]
+        stale, missing = _stale_companies(state)
+        if stale or missing:
+            # 過期或漏查都回 agent；「哪一家過期」由 agent 節點寫進訊息，
+            # 條件邊只能回字串、不能改 messages，故兩處共用 _stale_companies。
+            return "agent"
+        log.info("各家新聞都夠新，跳過 agent 決策", extra={"fields": {
+            "node": "tools", "companies": state["companies"]}})
+        return "assemble"
+
+    ages = [age for doc in assemble(state)["retrieved"]
+            if (age := _news_age_days(doc)) is not None]
     # 查無資料或結果中完全沒有新聞：交給 LLM 判斷要不要補抓
     if not ages:
         return "agent"
-    # 問題明確要求近期（時效窗 <= 7 天）就要求當天的新聞，否則 3 天內都算夠新。
-    # 時效窗由 extract_filters 抽出，與檢索過濾共用同一個判斷，不再各自比對問題字串；
-    # 窗是 90 天（「最近三個月」）時要求當天新聞太嚴，故以 7 天為界而非「有值就收緊」。
-    days = state.get("news_since_days")
-    limit = 0 if days is not None and days <= 7 else 3
+    limit = _fresh_limit(state)
     if min(ages) <= limit:
         log.info("新聞夠新，跳過 agent 決策", extra={"fields": {
             "node": "tools", "news_age_days": min(ages), "limit": limit}})
