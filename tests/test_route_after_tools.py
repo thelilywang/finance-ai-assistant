@@ -30,9 +30,9 @@ def _search(docs, cid="1"):
         name="search_knowledge_base", tool_call_id=cid)
 
 
-def _state(messages, news_since_days=None):
+def _state(messages, news_since_days=None, companies=None):
     return {"question": "AAPL 營收多少？", "messages": messages,
-            "news_since_days": news_since_days}
+            "news_since_days": news_since_days, "companies": companies or []}
 
 
 report = _doc("financial_report", 40, 9)
@@ -72,6 +72,15 @@ assert route_after_tools(_state([
     ToolMessage(content="已匯入", name="fetch_company_data", tool_call_id="2"),
     _search([_doc("news", 0)], "3"),
 ])) == "assemble"
+
+# 多標的：retrieved 是各家與全域新聞合併後的結果，min 會讓最新的那筆代表全部。
+# 同樣一組資料，單標的可收工，多標的必須交還 LLM——否則過期的那家永遠等不到補抓。
+fresh = [report, _doc("news", 0)]
+assert route_after_tools(_state([_search(fresh)], companies=["2330"])) == "assemble"
+assert route_after_tools(_state([_search(fresh)], companies=["2330", "ASML"])) == "agent"
+# 實測情境：全域新聞 0 天、台積電 1 天、ASML 65 天，min 是 0 卻不代表 ASML 夠新
+mixed = [_doc("news", 0, 1), _doc("news", 1, 2), _doc("news", 65, 3)]
+assert route_after_tools(_state([_search(mixed)], companies=["2330", "ASML"])) == "agent"
 
 # 完全沒有 tool 訊息（理論上不會走到）→ 交給 LLM
 assert route_after_tools(_state([HumanMessage(content="seed"), AIMessage(content="x")])) == "agent"

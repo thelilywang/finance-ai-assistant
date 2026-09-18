@@ -113,6 +113,33 @@ calls.clear()
 assert "無法辨識" in asyncio.run(mcp_server.fetch_company_data("這不是代號"))
 assert calls == {}
 
+# --- 觀測：記下的 N 必須與 header 報的 N 一致 ---
+# 這兩行 log 是用來判斷「該補沒補」的成因，記錯了比沒記更糟：會把稀釋問題誤判成
+# 模型不照 tool 說明做。故直接比對記下的 news_age_min 與 summary 裡的數字。
+import logging
+
+seen = []
+logging.getLogger("mcp_tools").addHandler(
+    type("H", (logging.Handler,), {"emit": lambda self, r: seen.append(r)})()
+)
+
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: mixed
+seen.clear()
+s = json.loads(asyncio.run(mcp_server.search_knowledge_base("AAPL 新聞", "AAPL")))["summary_for_llm"]
+kb = [r for r in seen if r.msg == "search_knowledge_base"]
+assert len(kb) == 1, kb
+f = kb[0].fields
+assert f["company"] == "AAPL", f          # LLM 實填的 company，稀釋與否全看它
+assert f["news_age_min"] == 1, f          # 與 header 的「距今 1 天」一致
+assert f"距今 {f['news_age_min']} 天" in s.split("以下是檢索結果")[0]
+assert 0 not in f["news_ages"], f         # 別家的 0 天不得混進這家的清單
+
+# 查無資料時不得炸掉，N 記為 None
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: []
+seen.clear()
+asyncio.run(mcp_server.search_knowledge_base("查無", "ZZZZ"))
+assert [r for r in seen if r.msg == "search_knowledge_base"][0].fields["news_age_min"] is None
+
 # --- fetch_market_overview：取 FetchResult.detail ---
 mcp_server.fetch_market_news = lambda limit: FetchResult(True, "市場新聞更新完成，共寫入 5 筆")
 assert asyncio.run(mcp_server.fetch_market_overview()) == "市場新聞更新完成，共寫入 5 筆"

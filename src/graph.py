@@ -774,9 +774,12 @@ def route_after_tools(state: GraphState) -> str:
     """檢索結果明顯夠用就直接收工，否則交還給 agent 決定下一步。
 
     只把「資料明顯夠用 → 停止呼叫工具」這一種判斷收回程式，判準與
-    src/mcp_server.py 的 search_knowledge_base docstring 完全一致；資料不足、
-    不夠新、沒有新聞、或剛跑完補抓 tool 時一律回 agent，「要不要補抓、補抓完
-    要不要再查」仍然全部由 LLM 決定，09-07 改造的核心設計不變。
+    src/mcp_server.py 的 search_knowledge_base docstring 一致**但只限單標的**：
+    那邊的新鮮度是逐家算的，這裡的 retrieved 是各家與全域新聞合併後的結果，
+    多標的取 min 會讓最新的那筆代表全部（實測 ASML 65 天被全域新聞 0 天蓋掉），
+    故多標的直接回 agent。資料不足、不夠新、沒有新聞、或剛跑完補抓 tool 時
+    一律回 agent，「要不要補抓、補抓完要不要再查」仍然全部由 LLM 決定，
+    09-07 改造的核心設計不變。
 
     省下的是純粹重複的第二輪決策：模型讀完檢索結果後只為了說一句「夠了，停」，
     實測就要花約 106 秒，佔單題總耗時四成。
@@ -786,6 +789,12 @@ def route_after_tools(state: GraphState) -> str:
     )
     # 剛跑完補抓 tool：要不要再查一次是 LLM 的決定，不能在這裡替它收工
     if last is None or last.name != "search_knowledge_base":
+        return "agent"
+
+    # 捷徑的前提是「一次檢索涵蓋全部所需資料」，多標的不成立：retrieved 是各家與全域
+    # 市場新聞合併後的結果，min 會讓最新的那筆代表全部，過期的那家永遠等不到補抓。
+    # 實測題「台積電與ASML」：ASML 新聞距今 65 天，卻因全域新聞 0 天而跳過 agent。
+    if len(state.get("companies") or []) > 1:
         return "agent"
 
     ages = [age for doc in assemble(state)["retrieved"]
