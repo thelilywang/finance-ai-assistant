@@ -30,6 +30,8 @@ from .logging_setup import setup_logging
 from .tickers import normalize_ticker
 from .update import fetch_market_news
 
+log = logging.getLogger("mcp_tools")
+
 # SDK 預設的 DNS rebinding 防護只認 localhost，會把 docker 內用 service 名稱的連線
 # （Host: mcp-server:8000）擋成 421；把實際會用到的 host 列進允許清單，不關掉防護本身。
 mcp = FastMCP(
@@ -125,6 +127,14 @@ async def search_knowledge_base(
     else:
         header = ""
     summary = header + "\n\n".join(blocks) if blocks else "查無相關資料。"
+    # 補抓門檻全靠這個 N，但它由 LLM 填的 company 決定範圍：記下實收參數與算出的 N，
+    # 「該補沒補」時才分得出是模型沒照 tool 說明做，還是 N 被其他公司的新聞稀釋
+    log.info("search_knowledge_base", extra={"fields": {
+        "node": "search_kb", "company": company, "doc_type": doc_type,
+        "news_since_days": news_since_days, "chunks": len(docs),
+        "news_age_min": min(news_ages) if news_ages else None,
+        "news_ages": sorted(news_ages),
+    }})
     return json.dumps(
         {"summary_for_llm": summary, "chunks": docs}, default=str, ensure_ascii=False
     )
@@ -153,6 +163,8 @@ async def fetch_company_data(ticker: str) -> str:
         retrieve_context, normalized, normalized, "financial_report"
     )
     has_report = any(d["doc_type"] == "financial_report" for d in docs)
+    log.info("fetch_company_data", extra={"fields": {
+        "node": "fetch_tool", "company": normalized, "has_report": has_report}})
     results = await asyncio.to_thread(fetch_missing_data, normalized, has_report)
     return "；".join(results)
 
