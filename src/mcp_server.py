@@ -32,6 +32,10 @@ from .update import fetch_market_news
 
 log = logging.getLogger("mcp_tools")
 
+# 財報按季發布，一季約 91 天；留一點空檔給發布延遲，超過就視為該重抓。
+# ponytail: 常數即可，真有市場差異（台股月營收、美股 10-K 年報）再拆。
+_REPORT_FRESH_DAYS = 120
+
 # SDK 預設的 DNS rebinding 防護只認 localhost，會把 docker 內用 service 名稱的連線
 # （Host: mcp-server:8000）擋成 421；把實際會用到的 host 列進允許清單，不關掉防護本身。
 mcp = FastMCP(
@@ -146,7 +150,8 @@ async def fetch_company_data(ticker: str) -> str:
 
     ticker: 台股代號（如 "2330"）或美股 ticker（如 "AAPL"）。
     台股自動抓 MOPS 財報、美股自動抓 SEC EDGAR 財報，兩者都會一併抓該公司新聞
-    （資料庫已有該公司財報時只補新聞，財報變動頻率低不重抓）。
+    （資料庫已有該公司財報且在一季內時只補新聞，財報變動頻率低不重抓；
+    超過一季或查不到發布日期則連財報一起重抓）。
 
     抓取會連外部網站，首次約需 1-3 分鐘。抓完後請呼叫 search_knowledge_base
     重新檢索才看得到新資料，本工具不會自動幫你查。
@@ -162,9 +167,17 @@ async def fetch_company_data(ticker: str) -> str:
     docs = await asyncio.to_thread(
         retrieve_context, normalized, normalized, "financial_report"
     )
-    has_report = any(d["doc_type"] == "financial_report" for d in docs)
+    # 「有財報」不等於「財報夠新」：原本只判存在與否，一份 2026-02-01 的財報會永遠
+    # 擋住重抓（實測 2454 已 229 天、NVDA 121 天）。財報按季發布，故以一季多一點為界，
+    # 沒有發布日期的一律視為過期——寧可多抓一次，也不要靠不知道多舊的資料回答。
+    newest = max((d.get("published_at") for d in docs
+                  if d["doc_type"] == "financial_report" and d.get("published_at")),
+                 default=None)
+    age = (dt.date.today() - newest).days if isinstance(newest, dt.date) else None
+    has_report = age is not None and age <= _REPORT_FRESH_DAYS
     log.info("fetch_company_data", extra={"fields": {
-        "node": "fetch_tool", "company": normalized, "has_report": has_report}})
+        "node": "fetch_tool", "company": normalized, "has_report": has_report,
+        "report_age_days": age}})
     results = await asyncio.to_thread(fetch_missing_data, normalized, has_report)
     return "；".join(results)
 

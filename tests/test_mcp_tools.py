@@ -108,6 +108,18 @@ mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: chunks  # 已有
 asyncio.run(mcp_server.fetch_company_data("aapl.us"))  # 順便驗證後綴會被正規化掉
 assert calls == {"company": "AAPL", "has_report": True}
 
+# 「有財報」不等於「財報夠新」：過期的財報必須重抓，否則一份舊財報會永遠擋住更新
+def _report(days_ago):
+    return [{"id": 1, "source": "s", "title": None, "doc_type": "financial_report",
+             "company": "AAPL",
+             "published_at": None if days_ago is None else TODAY - dt.timedelta(days=days_ago),
+             "content": "財報"}]
+
+for days, expected in [(89, True), (120, True), (121, False), (229, False), (None, False)]:
+    mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, _d=days: _report(_d)
+    asyncio.run(mcp_server.fetch_company_data("AAPL"))
+    assert calls["has_report"] is expected, (days, calls)
+
 # 代號格式不符時不應打外部來源
 calls.clear()
 assert "無法辨識" in asyncio.run(mcp_server.fetch_company_data("這不是代號"))
