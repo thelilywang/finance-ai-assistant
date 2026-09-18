@@ -11,6 +11,13 @@ log = logging.getLogger("market")
 
 def format_snapshot(info: dict) -> str:
     lines = []
+    name = info.get("longName") or info.get("shortName")
+    if name is not None:
+        lines.append(f"name: {name}")
+    # 幣別要隨數字進 prompt：多標的跨市場時模型無從由代號推斷，只能猜
+    currency = info.get("currency")
+    if currency is not None:
+        lines.append(f"currency: {currency}")
     price = info.get("currentPrice")
     prev = info.get("previousClose")
     if price is not None:
@@ -101,6 +108,23 @@ def get_market_snapshot(company: str) -> str | None:
         log.warning("行情取得失敗", extra={"fields": {
             "company": company, "reason": "market_failed", "error": str(e)}})
         return None
+
+
+def get_market_snapshots(companies: list[str]) -> dict[str, str]:
+    """多標的並行取行情，只回成功的家數（失敗的 key 不存在）。
+
+    形狀對齊 graph.py 的 _retrieve_parallel：抓 N 家的總耗時約等於最慢一家。
+    公司名隨快照文字帶出（format_snapshot 的 name: 欄），不需第二趟網路呼叫。
+    """
+    if not companies:
+        return {}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(len(companies), 3),
+                            thread_name_prefix="market") as executor:
+        texts = executor.map(get_market_snapshot, companies)
+        return {c: text for c, text in zip(companies, texts) if text}
 
 
 if __name__ == "__main__":

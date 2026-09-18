@@ -54,7 +54,7 @@ assert {"valuation", "consensus", "scenario"} <= fields, fields
 fields = set(allowed_fields({"retrieved": financial_and_news}, has_market=True))
 assert fields == UNCONDITIONAL | FULL_ONLY | {"trigger", "next_event", "tracking_indicators"}, fields
 
-# 9: 開關 off -> 回傳現行全欄，與 answer_shape/evidence 無關
+# 9: 開關 off -> 回傳現行全欄，與 answer_shape/evidence 無關（單一公司題仍不含 comparison）
 config.ANSWER_SHAPE_GATING = False
 try:
     fields = set(allowed_fields({"answer_shape": "news", "retrieved": []}, has_market=False))
@@ -77,5 +77,29 @@ for hm in (None, True, False):
 for hm in (None, True, False):
     for state in combos:
         assert "impact" not in allowed_fields(state, has_market=hm)
+
+# 12: comparison 閘門（多標的專屬欄）
+two = {"companies": ["2330", "2454"], "answer_shape": "full", "retrieved": financial_and_news}
+assert "comparison" in allowed_fields(two, has_market=True)
+
+# 12b: 多標的 + full + retrieved 為空 -> 不含（沒素材無法做定性對比）
+assert "comparison" not in allowed_fields(
+    {**two, "retrieved": []}, has_market=True)
+
+# 12c: 多標的 + news shape -> 不含
+assert "comparison" not in allowed_fields(
+    {**two, "answer_shape": "news"}, has_market=True)
+
+# 12d: 單一公司 + full + 有 retrieved -> 不含
+assert "comparison" not in allowed_fields(
+    {**two, "companies": ["2330"]}, has_market=True)
+
+# 12e: 回退路徑也要濾家數——開關 off 時單一公司題不得出現無對象的比較表
+config.ANSWER_SHAPE_GATING = False
+try:
+    assert "comparison" not in allowed_fields({**two, "companies": ["2330"]}, has_market=True)
+    assert "comparison" in allowed_fields(two, has_market=True)
+finally:
+    config.ANSWER_SHAPE_GATING = True
 
 print("allowed_fields self-check OK")

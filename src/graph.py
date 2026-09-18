@@ -38,7 +38,7 @@ from pydantic import BaseModel, field_validator
 from . import config
 from .i18n import t
 from .logging_setup import log_duration
-from .market import get_market_snapshot
+from .market import get_market_snapshot, get_market_snapshots
 from .tickers import (
     DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
     normalize_ticker, otc_adr_of,
@@ -718,7 +718,7 @@ _UNCONDITIONAL_FIELDS = ["conclusion", "facts", "inference", "upside", "risk"]
 # news shape 預設不生成的五欄（決策 6）
 _FULL_ONLY_FIELDS = ["valuation", "consensus", "scenario", "earnings_call", "recommendation"]
 # 現行全 13 欄，ANSWER_SHAPE_GATING=0 時原樣回傳
-_ALL_FIELDS = _UNCONDITIONAL_FIELDS + _FULL_ONLY_FIELDS + [
+_ALL_FIELDS = _UNCONDITIONAL_FIELDS + ["comparison"] + _FULL_ONLY_FIELDS + [
     "trigger", "next_event", "tracking_indicators",
 ]
 
@@ -733,8 +733,10 @@ def allowed_fields(state: GraphState, has_market: bool | None = None) -> list[st
     has_market=None 表示「行情尚未抓取」，此時依賴行情的欄位先留在候選集，
     供呼叫端判斷要不要抓；抓完後再以 True/False 呼叫一次定案(見兩段式)。
     """
+    multi = len(state.get("companies") or []) > 1
     if not config.ANSWER_SHAPE_GATING:
-        return list(_ALL_FIELDS)
+        # 回退路徑也要濾家數，否則單一公司題會出現一張沒有比較對象的表
+        return [f for f in _ALL_FIELDS if f != "comparison" or multi]
 
     shape = state.get("answer_shape") or "full"
     retrieved = state.get("retrieved") or []
@@ -747,6 +749,9 @@ def allowed_fields(state: GraphState, has_market: bool | None = None) -> list[st
     fields = list(_UNCONDITIONAL_FIELDS)
 
     if shape == "full":
+        # 沒有檢索素材就不可能做定性對比，強行要求會直接違反反幻覺原則
+        if multi and retrieved:
+            fields.append("comparison")
         # has_market=None（第一段候選）視同「可能有」，先留在候選集供 needs_market 判斷
         market_ok = has_market is not False
         if market_ok:
@@ -848,15 +853,28 @@ def generate(state: GraphState) -> GraphState:
     # 只要候選集裡有任一欄吃行情就抓——yfinance 是 blocking 且未快取的網路呼叫
     # (實測 2.50-3.55s)，擋在 first token 前面，抓來沒人用純屬浪費。
     needs_market = bool({"valuation", "consensus", "scenario"} & set(candidate))
-    snapshot = None
-    # ponytail: 多標的時留空——逐家併陳要改 prompt 結構，等有人要再說
-    if len(companies) == 1 and needs_market:
-        snapshot = get_market_snapshot(companies[0])
-        if snapshot:
-            market_block = f"\n即時市場數據（Yahoo Finance，僅供估值/時機參考，非檢索來源，不參與來源編號）：\n{snapshot}\n"
-    # 第二段：行情結果已知，定案。抓失敗（None）時依賴行情的欄位自動被剔除，
+    # 行情逐家併陳；抓失敗的家數在 prompt 中明講，不靜默留白
+    snapshots: dict[str, str] = {}
+    if needs_market and companies:
+        market_started = time.monotonic()
+        snapshots = get_market_snapshots(companies)
+        log_duration(log, "market_snapshots", market_started, node="generate",
+                     requested=len(companies), succeeded=len(snapshots),
+                     failed=len(companies) - len(snapshots))
+    if snapshots:
+        blocks = "\n\n".join(f"### {c}\n{text}" for c, text in snapshots.items())
+        note = ""
+        missing = [c for c in companies if c not in snapshots]
+        if missing:
+            note = t(lang, "market_partial_note",
+                     shown="、".join(snapshots), others="、".join(missing)) + "\n"
+        market_block = (
+            "\n即時市場數據（Yahoo Finance，僅供估值/時機參考，非檢索來源，不參與來源編號）：\n"
+            f"{note}{blocks}\n"
+        )
+    # 第二段：行情結果已知，定案。全部抓失敗時依賴行情的欄位自動被剔除，
     # 不會留下一個沒有素材的空欄叫模型寫「資料不足」。
-    fields = allowed_fields(state, has_market=bool(snapshot))
+    fields = allowed_fields(state, has_market=bool(snapshots))
 
     # 使用者要求併陳兩市場時，明講兩邊不可直接換算——幣別、期間、每股基準三者都不同，
     # 沒這句提醒模型很容易把台幣 EPS 與美元 EPS 相除當成「匯率」或「溢價」

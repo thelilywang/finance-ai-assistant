@@ -320,16 +320,16 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
     # 真資料圖表：同一份 figures 供互動顯示與 PDF 嵌入，生成失敗不影響文字回答
     figures = []
     companies = final_state.get("companies") or []
-    # ponytail: 多標的只畫第一家——逐家圖表要重排版面與 PDF 結構，等有人要再說
-    company = companies[0] if companies else None
-    if company:
+    for company in companies:
         for name, fn in (("price", price_chart), ("eps", eps_chart)):
             try:
                 fig = fn(company)
                 if fig is not None:
-                    figures.append((name, fig))
+                    # 代號進 name：互動版面多標的時才分得出哪張圖是哪家
+                    figures.append((f"{name}-{company}", fig))
             except Exception as e:  # noqa: BLE001
-                log.warning("圖表生成失敗", extra={"fields": {"chart": name, "error": str(e)}})
+                log.warning("圖表生成失敗", extra={"fields": {
+                    "chart": name, "company": company, "error": str(e)}})
 
     msg.elements = [
         cl.Plotly(name=name, figure=fig, display="inline") for name, fig in figures

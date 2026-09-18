@@ -60,14 +60,34 @@ STRINGS = {
         "trend_field_inference": "- **推論**：1-2 點子條列，明確標示為推論",
         "trend_field_upside": "- **利多**：",
         "trend_field_risk": "- **風險**：",
-        "trend_field_valuation": "- **估值觀察**：僅根據「即時市場數據」的數字",
+        "trend_field_comparison": (
+            "- **標的比較**：輸出一張 markdown 表格，第一欄是比較項目、其餘每欄一家標的"
+            "（表頭寫「公司名（代號）」，公司名取自「即時市場數據」的 name 欄，取不到就只寫代號）。"
+            "比較項目自行依題目決定 3-5 項，其中至少一半須為定性項目"
+            "（如市場定位、成長動能來源、風險來源），不得整張表都是行情數字——"
+            "純數字的比較與「估值觀察」欄重複。表格後接 2-3 句定性對比小結。"
+            "每個定性格子必附 [來源N]，推不出來就寫「檢索資料不足」，不得用產業常識填空。"
+            "金額類數字（股價、目標價、市值）必須標明幣別，幣別取自各標的「即時市場數據」的 "
+            "currency 欄，不得由代號推測；各標的幣別不同時不得相除、相減或換算成同一數字比較。"
+            "不得給資金配置比例、不得寫「若只能選一檔」、不得給加碼／減碼指令。"
+            "（本欄以 markdown 表格呈現，不套用單行條列格式；表格須含 |---| 分隔列。）"
+        ),
+        "trend_field_valuation": (
+            "- **估值觀察**：僅根據「即時市場數據」的數字。本題有多個標的時逐家分列，"
+            "每家以「公司名（代號）」標示（公司名取自「即時市場數據」的 name 欄，取不到就只寫代號，"
+            "不得自行補寫）；只寫「即時市場數據」中實際出現的標的，未取得行情的標的不得生成數字"
+        ),
         "trend_field_consensus": (
             "- **市場共識與門檻**：僅根據「即時市場數據」中的分析師共識數字，"
-            "列出當季 EPS／營收共識區間與過去幾季 beat/miss"
+            "列出當季 EPS／營收共識區間與過去幾季 beat/miss。本題有多個標的時逐家分列，"
+            "每家以「公司名（代號）」標示（公司名取自 name 欄，取不到就只寫代號，不得自行補寫）；"
+            "只寫「即時市場數據」中實際出現的標的，未取得行情的標的不得生成數字"
         ),
         "trend_field_scenario": (
             "- **情境解讀**：三點子條列「若高於共識上緣」「若落在區間內」「若低於下緣」，"
-            "各給一句市場可能如何解讀（條件式描述，不得給機率、不得給加碼／減碼指令）"
+            "各給一句市場可能如何解讀（條件式描述，不得給機率、不得給加碼／減碼指令）。"
+            "本題有多個標的時逐家分列，每家以「公司名（代號）」標示（公司名取自 name 欄，"
+            "取不到就只寫代號，不得自行補寫）；只寫「即時市場數據」中實際出現的標的"
         ),
         "trend_field_earnings_call": (
             "- **法說會/財報關注清單**：2-3 點，優先引用檢索資料中與 guidance 相關的內容（附 [來源N]）；"
@@ -77,6 +97,10 @@ STRINGS = {
         "trend_field_trigger": "- **觸發條件**：「轉積極」「轉保守」兩點子條列（條件式描述，非指令）",
         "trend_field_next_event": "- **下一個關鍵事件**：",
         "trend_field_tracking_indicators": "- **建議追蹤指標**：2-3 個",
+        "market_partial_note": (
+            "（注意：以下即時行情僅為 {shown} 一家，本題其他標的（{others}）未取得即時行情。"
+            "凡引用行情數字處必須標明是 {shown}，不得套用到其他標的。）"
+        ),
         "trend_rules_common": (
             "只輸出上方列出的欄位。未列出的欄位完全不要輸出（不要輸出欄名、不要寫「資料不足」、"
             "不要寫「無」、不要用任何佔位文字）。不得輸出信心百分比；情境解讀不得含機率數字；"
@@ -164,15 +188,42 @@ STRINGS = {
         "trend_field_inference": "- **Inference**: 1-2 sub-bullets, clearly labeled as inference",
         "trend_field_upside": "- **Positives**:",
         "trend_field_risk": "- **Risks**:",
-        "trend_field_valuation": "- **Valuation check**: based only on figures from the \"real-time market data\"",
+        "trend_field_comparison": (
+            "- **Ticker comparison**: output a markdown table whose first column is the comparison item and "
+            "each remaining column one ticker (header reads \"Company name (ticker)\", the name taken from the "
+            "`name` field of the \"real-time market data\"; ticker alone if unavailable). Choose 3-5 comparison "
+            "items yourself based on the question, at least half of which must be qualitative (e.g. market "
+            "positioning, growth drivers, sources of risk); the table must not consist solely of market figures, "
+            "which would duplicate the \"Valuation check\" field. Follow the table with a 2-3 sentence qualitative "
+            "summary. "
+            "Every qualitative cell must cite [Source N]; write \"insufficient retrieved data\" when it cannot be "
+            "derived, never fill it in from industry general knowledge. Monetary figures (price, target price, "
+            "market cap) must state their currency, taken from each ticker's `currency` field in the \"real-time "
+            "market data\", never inferred from the ticker symbol; when tickers differ in currency, never divide, "
+            "subtract or convert them into a single comparable number. No capital allocation percentages, no "
+            "\"if you could pick only one\", no add/trim instructions. "
+            "(This field is rendered as a markdown table and is exempt from the single-line bullet format; "
+            "the table must include the |---| separator row.)"
+        ),
+        "trend_field_valuation": (
+            "- **Valuation check**: based only on figures from the \"real-time market data\". When the question "
+            "covers multiple tickers, list each separately, labeled \"Company name (ticker)\" (name from the "
+            "`name` field; ticker alone if unavailable, never invent it); cover only tickers actually present in "
+            "the \"real-time market data\" and never generate figures for tickers without a quote"
+        ),
         "trend_field_consensus": (
             "- **Consensus & thresholds**: based only on analyst consensus figures from the \"real-time market data\"; "
-            "list the current-quarter EPS/revenue consensus range and recent quarters' beat/miss"
+            "list the current-quarter EPS/revenue consensus range and recent quarters' beat/miss. When the question "
+            "covers multiple tickers, list each separately, labeled \"Company name (ticker)\" (name from the `name` "
+            "field; ticker alone if unavailable, never invent it); cover only tickers actually present in the "
+            "\"real-time market data\" and never generate figures for tickers without a quote"
         ),
         "trend_field_scenario": (
             "- **Scenario read**: three sub-bullets \"if above the consensus high\" / \"if within the range\" / "
             "\"if below the low\", each with one sentence on how the market may interpret it "
-            "(conditional description; no probabilities, no add/trim instructions)"
+            "(conditional description; no probabilities, no add/trim instructions). When the question covers "
+            "multiple tickers, list each separately, labeled \"Company name (ticker)\" (name from the `name` field; "
+            "ticker alone if unavailable, never invent it); cover only tickers present in the market data"
         ),
         "trend_field_earnings_call": (
             "- **Earnings call watch list**: 2-3 items, preferring guidance-related content from the retrieved "
@@ -187,6 +238,11 @@ STRINGS = {
         ),
         "trend_field_next_event": "- **Next key event**:",
         "trend_field_tracking_indicators": "- **Metrics to watch**: 2-3 items",
+        "market_partial_note": (
+            "(Note: the market snapshot below covers {shown} only; no live quote was retrieved for the "
+            "other tickers in this question ({others}). Whenever you cite a market figure, state that it "
+            "is {shown}'s, and never apply it to the other tickers.)"
+        ),
         "trend_rules_common": (
             "Only output the fields listed above. Do not output any field not listed (no field name, no "
             "\"insufficient data\", no \"N/A\", no placeholder text of any kind). Never output a confidence "
