@@ -1133,6 +1133,21 @@ def unique_sources(retrieved: list[dict]) -> list[str]:
     return ordered
 
 
+def cross_market_split(state: GraphState) -> tuple[list[str], list[str]] | None:
+    """本題要並排的代號是否橫跨台美兩市場；是則回 (台股代號, 美股代號)，否則 None。
+
+    看的是最後要並排的那組代號，而非只看雙掛牌：多標的比較題（2330 vs NVDA）
+    才是最需要幣別提醒的場合，而它沒有 peer_company。雙掛牌併陳是其中一個特例，
+    peer_company 併進來一起判斷。
+    """
+    cross = list(state.get("companies") or [])
+    if state.get("peer_company") and state.get("market") == "both":
+        cross.append(state["peer_company"])
+    tw = [c for c in cross if is_tw_ticker(c)]
+    us = [c for c in cross if not is_tw_ticker(c)]
+    return (tw, us) if tw and us else None
+
+
 def generate(state: GraphState) -> GraphState:
     # 計時起點在節點開頭而非 LLM 呼叫前：get_market_snapshot 是 blocking 網路呼叫且擋在
     # first token 前（實測 2.50-3.55s），不納進 elapsed_ms 就量不到它的影響。
@@ -1184,14 +1199,17 @@ def generate(state: GraphState) -> GraphState:
     # 不會留下一個沒有素材的空欄叫模型寫「資料不足」。
     fields = allowed_fields(state, has_market=bool(snapshots))
 
-    # 使用者要求併陳兩市場時，明講兩邊不可直接換算——幣別、期間、每股基準三者都不同，
-    # 沒這句提醒模型很容易把台幣 EPS 與美元 EPS 相除當成「匯率」或「溢價」
+    # 本題橫跨台美兩市場時，明講兩邊不可直接換算——幣別、期間、每股基準三者都不同，
+    # 沒這句提醒模型很容易把台幣 EPS 與美元 EPS 相除當成「匯率」或「溢價」。
+    # 觸發看的是「最後要並排的那組代號」而非只看雙掛牌：多標的比較題（2330 vs NVDA）
+    # 才是最需要這句的場合，而它沒有 peer_company。雙掛牌併陳是其中一個特例，
+    # peer_company 併進來一起判斷。
     dual_block = ""
-    if len(companies) == 1 and state.get("peer_company") and state.get("market") == "both":
-        company = companies[0]
-        tw = company if is_tw_ticker(company) else state["peer_company"]
-        us = state["peer_company"] if is_tw_ticker(company) else company
-        dual_block = "\n" + t(lang, "dual_market_warning", tw=tw, us=us) + "\n"
+    split = cross_market_split(state)
+    if split:
+        tw, us = split
+        dual_block = "\n" + t(lang, "dual_market_warning",
+                              tw="、".join(tw), us="、".join(us)) + "\n"
 
     # 這些台股標的有 ADR 但取不到其財報，明講一句免得使用者以為系統漏了美股那邊
     otc = otc_adr_of(companies[0]) if len(companies) == 1 else None

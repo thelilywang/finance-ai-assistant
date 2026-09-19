@@ -131,4 +131,20 @@ finally:
 s = resolve_market({"companies": ["2330", "AAPL"], "market": None})
 assert s["ask_market"] is False and route_after_resolve_market(s) == "agent"
 
+# --- 幣別提醒的觸發：看最後要並排的代號橫不橫跨兩市場 ---
+from src.graph import cross_market_split
+
+# 多標的跨市場比較：最需要這句提醒的場合，沒有 peer_company 也要觸發
+assert cross_market_split({"companies": ["2330", "NVDA"]}) == (["2330"], ["NVDA"])
+# 雙掛牌併陳：peer_company 併進來判斷
+assert cross_market_split({"companies": ["2330"], "peer_company": "TSM",
+                            "market": "both"}) == (["2330"], ["TSM"])
+# 同市場多標的不觸發，兩邊都是同一幣別
+assert cross_market_split({"companies": ["2330", "2454"]}) is None
+assert cross_market_split({"companies": ["NVDA", "AAPL"]}) is None
+# 雙掛牌但只看一邊：市場已經確定，沒有並排也就沒有換算風險
+assert cross_market_split({"companies": ["TSM"], "peer_company": "2330", "market": "us"}) is None
+# 沒指名公司不得炸掉
+assert cross_market_split({}) is None
+
 print("dual market self-check OK")

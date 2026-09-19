@@ -35,9 +35,10 @@ STRINGS = {
             "本系統取不到其財務數字，以下僅為台股（{tw}）資料。）"
         ),
         "dual_market_warning": (
-            "本題同時涵蓋台股（{tw}，新台幣）與美股（{us}，美元 ADR）。"
-            "兩者幣別、公布期間與每股基準皆不同，請分開陳述、標明各自幣別與期間，"
-            "不得直接相除、相減或換算成同一數字比較。"
+            "本題同時涵蓋台股（{tw}）與美股（{us}）。兩市場的計價幣別、公布期間與每股基準皆不同"
+            "（同一家公司的台股本股與美股 ADR 另有股數換算比例），請分開陳述、標明各自幣別與期間，"
+            "不得直接相除、相減或換算成同一數字比較。幣別一律取自「即時市場數據」的 currency 欄，"
+            "不得由代號推測。"
         ),
         "no_result_plain": (
             "資料庫中找不到與這個問題相關的財報或新聞內容。"
@@ -160,9 +161,11 @@ STRINGS = {
             "The following covers the Taiwan listing ({tw}) only.)"
         ),
         "dual_market_warning": (
-            "This question covers both the Taiwan listing ({tw}, TWD) and the US listing ({us}, USD ADR). "
-            "Currency, reporting period and per-share basis all differ, so present them separately with explicit "
-            "currency and period; never divide, subtract or convert them into a single comparable number."
+            "This question covers both Taiwan-listed ({tw}) and US-listed ({us}) tickers. Quote currency, "
+            "reporting period and per-share basis all differ across the two markets (and a Taiwan listing and "
+            "its US ADR have a share-conversion ratio on top of that), so present them separately with explicit "
+            "currency and period; never divide, subtract or convert them into a single comparable number. "
+            "Take each currency from the `currency` field in the \"real-time market data\", never from the ticker symbol."
         ),
         "no_result_plain": (
             "No filings or news related to this question were found in the database. "
