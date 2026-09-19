@@ -80,12 +80,17 @@ try:
     market_1 = {"id": 3, "source": "market-1", "doc_type": "news", "company": None}
     market_2 = {"id": 4, "source": "market-2", "doc_type": "news", "company": "MSFT"}
 
+    latest = {"id": 6, "source": "latest-report", "doc_type": "financial_report",
+              "company": "AAPL"}
+
     def fake_search(_vector, **kwargs):
         with started_lock:
             started.append((time.monotonic(), kwargs))
-            if len(started) == 3:
+            if len(started) == 4:
                 all_started.set()
-        assert all_started.wait(0.5), "三段可獨立檢索沒有同時啟動"
+        assert all_started.wait(0.5), "四段可獨立檢索沒有同時啟動"
+        if kwargs.get("latest_source_only"):
+            return [latest]
         if kwargs.get("exclude_company"):
             return [duplicate, market_1, market_2]
         if kwargs.get("doc_type") == "news":
@@ -94,12 +99,16 @@ try:
 
     graph.similarity_search = fake_search
     out = graph.retrieve_context("AAPL 財報", company="AAPL", doc_type="financial_report")
-    assert len(started) == 3
+    assert len(started) == 4
     assert max(t for t, _ in started) - min(t for t, _ in started) < 0.2
-    assert [d["id"] for d in out] == [1, 2, 3, 4]
+    # 最新一期財報排在最前面，舊資料仍保留在後（比較去年同期還要用得到）
+    assert [d["id"] for d in out] == [6, 1, 2, 3, 4]
+    assert out[0]["latest_period"] is True
 
     # doc_type 主檢索為空時仍放寬，並維持 relaxed 標記及既有補充順序。
     def fallback_search(_vector, **kwargs):
+        if kwargs.get("latest_source_only"):
+            return [latest]
         if kwargs.get("exclude_company"):
             return [market_1]
         if kwargs.get("doc_type") == "news":
@@ -110,6 +119,7 @@ try:
 
     graph.similarity_search = fallback_search
     out = graph.retrieve_context("AAPL 財報（fallback）", company="AAPL", doc_type="financial_report")
+    # 放寬過 doc_type 代表財報撈不到，此時不得再插最新財報席位（id 6 不該出現）
     assert out[0]["id"] == 1 and out[0]["relaxed"] == "doc_type"
     assert [d["id"] for d in out] == [1, 2, 3]
 
@@ -119,6 +129,8 @@ try:
     existing_news = {"id": 5, "source": "existing-news", "doc_type": "news", "company": "AAPL"}
 
     def unused_candidate_search(_vector, **kwargs):
+        if kwargs.get("latest_source_only"):
+            return []
         if kwargs.get("exclude_company"):
             return []
         if kwargs.get("doc_type") == "news":
@@ -138,6 +150,8 @@ try:
 
     # --- 並行與循序必須產生相同結果：這是 RETRIEVE_PARALLEL 能當回退開關的前提 ---
     def stable_search(_vector, **kwargs):
+        if kwargs.get("latest_source_only"):
+            return [latest]
         if kwargs.get("exclude_company"):
             return [duplicate, market_1, market_2]
         if kwargs.get("doc_type") == "news":
@@ -168,6 +182,108 @@ try:
     assert [d["id"] for d in out] == [1, 2, 3]
     assert out[0]["relaxed"] == "doc_type"
     graph.config.RETRIEVE_PARALLEL = True
+
+    # --- 最新財報席位的觸發邊界：只在「指名公司 + 財報問題」成立 ---
+    # 這個席位存在的理由是顆粒度不對稱（結構化財報整季 2 塊 vs PDF 上百塊），
+    # 亂插會擠掉新聞席位，故觸發條件要有守門的斷言
+    # 上鎖是因為並行路徑的未採用預取會在 shutdown(wait=False) 後繼續跑完，
+    # 沒鎖的話那條背景查詢可能在下一個子案例 clear() 之後才記進來，算成別人的呼叫
+    latest_calls = []
+    latest_lock = threading.Lock()
+
+    def recording_search(_vector, **kwargs):
+        # 一律回新 dict：_relax_doc_type 會就地寫入 relaxed，共用同一個 fixture
+        # 會把前面案例的標記帶到後面，讓最新財報席位誤判成「已放寬」而不觸發
+        def fresh(d):
+            # 去掉 relaxed：前面的 fallback 案例經 _relax_doc_type 就地標記過共用
+            # fixture，殘留的標記會讓最新財報席位誤判成「已放寬」而不觸發
+            return {k: v for k, v in d.items() if k != "relaxed"}
+
+        if kwargs.get("latest_source_only"):
+            with latest_lock:
+                latest_calls.append(kwargs)
+            return [fresh(latest)]
+        if kwargs.get("exclude_company"):
+            return [fresh(market_1)]
+        if kwargs.get("doc_type") == "news":
+            return [fresh(company_news)]
+        return [fresh(report)]
+
+    graph.similarity_search = recording_search
+    for parallel in (True, False):
+        graph.config.RETRIEVE_PARALLEL = parallel
+        # 新聞問題不插財報席位
+        with latest_lock:
+            latest_calls.clear()
+        graph._clear_embedding_cache()
+        out = graph.retrieve_context("AAPL 新聞", company="AAPL", doc_type="news")
+        with latest_lock:
+            assert latest_calls == [], f"新聞問題不該查最新財報（parallel={parallel}）"
+        assert all(d["id"] != 6 for d in out)
+
+        # doc_type 為 None（意圖不明）同樣不插，否則會把財報硬塞進泛用查詢
+        with latest_lock:
+            latest_calls.clear()
+        graph._clear_embedding_cache()
+        graph.retrieve_context("AAPL 怎麼樣", company="AAPL", doc_type=None)
+        with latest_lock:
+            assert latest_calls == [], f"doc_type 未指定不該查最新財報（parallel={parallel}）"
+
+        # 沒有 company 就無從定義「最新一期」（SQL 子查詢依 company 取 max）
+        with latest_lock:
+            latest_calls.clear()
+        graph._clear_embedding_cache()
+        graph.retrieve_context("大盤財報", company=None, doc_type="financial_report")
+        with latest_lock:
+            assert latest_calls == [], f"無 company 不該查最新財報（parallel={parallel}）"
+
+        # 財報問題則必須查，且帶上同一個 company/doc_type
+        with latest_lock:
+            latest_calls.clear()
+        graph._clear_embedding_cache()
+        graph.retrieve_context("AAPL 最新財報", company="AAPL", doc_type="financial_report")
+        with latest_lock:
+            assert len(latest_calls) == 1, f"財報問題應查最新財報（parallel={parallel}）"
+            assert latest_calls[0]["company"] == "AAPL"
+            assert latest_calls[0]["doc_type"] == "financial_report"
+    graph.config.RETRIEVE_PARALLEL = True
+
+    # 最新一期的 chunk 已在主結果裡時不得重複（去重靠 id）
+    # 同樣要去掉前面案例殘留的 relaxed 標記（見 recording_search 的註解）
+    def _fresh(d):
+        return {k: v for k, v in d.items() if k != "relaxed"}
+
+    def overlapping_search(_vector, **kwargs):
+        if kwargs.get("latest_source_only"):
+            return [_fresh(report)]  # 與主檢索同一筆
+        if kwargs.get("exclude_company"):
+            return []
+        if kwargs.get("doc_type") == "news":
+            return [_fresh(company_news)]
+        return [_fresh(report)]
+
+    graph.similarity_search = overlapping_search
+    graph._clear_embedding_cache()
+    out = graph.retrieve_context("AAPL 重疊", company="AAPL", doc_type="financial_report")
+    assert [d["id"] for d in out].count(1) == 1, "最新財報與主結果重疊時不該重複列出"
+
+    # 席位上限為 _LATEST_REPORT_K：撈回一大批也只插前幾塊，不吃掉其他素材的名額
+    many = [dict(latest, id=100 + i) for i in range(6)]
+
+    def flooding_search(_vector, **kwargs):
+        if kwargs.get("latest_source_only"):
+            return [dict(d) for d in many]
+        if kwargs.get("exclude_company"):
+            return []
+        if kwargs.get("doc_type") == "news":
+            return [_fresh(company_news)]
+        return [_fresh(report)]
+
+    graph.similarity_search = flooding_search
+    graph._clear_embedding_cache()
+    out = graph.retrieve_context("AAPL 洪水", company="AAPL", doc_type="financial_report")
+    inserted = [d["id"] for d in out if d["id"] >= 100]
+    assert inserted == [100, 101], f"席位應上限 {graph._LATEST_REPORT_K} 塊，實得 {inserted}"
 
     # --- 快取關閉（EMBEDDING_CACHE_*=0）：.env.example 明文承諾的對外契約 ---
     graph.similarity_search = stable_search
@@ -207,6 +323,8 @@ try:
 
     # --- 並行分支中任一段檢索失敗，例外要傳出而非回傳半套結果 ---
     def exploding_search(_vector, **kwargs):
+        if kwargs.get("latest_source_only"):
+            return [latest]
         if kwargs.get("exclude_company"):
             raise RuntimeError("market news 查詢失敗")
         if kwargs.get("doc_type") == "news":
@@ -223,6 +341,8 @@ try:
 
     # 主檢索失敗同樣要傳出
     def primary_explodes(_vector, **kwargs):
+        if kwargs.get("latest_source_only"):
+            return []
         if kwargs.get("doc_type") == "financial_report":
             raise RuntimeError("主檢索失敗")
         return []

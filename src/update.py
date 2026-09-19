@@ -359,12 +359,22 @@ def _format_xbrl(facts: dict, taxonomy: str, accession: str, ticker: str, label:
     會被 LLM 讀成別的量級。SEC 的值是「元」而非仟元，EPS 是每股金額，兩者分開標；
     幣別非 USD 時（TSM 的 TWD）務必寫出幣別，否則 49.33 會被當成美元讀。
 
-    每條數字另標所屬期間，且整份資料若非該申報當期會在開頭加註說明：SEC 的結構化
-    資料對外國發行人常落後數期，不標期間會讓舊年報數字被當成最新一季。
+    非本次申報當期的數字「直接不寫入」，而不是寫出來再加警語。警語擋不住 LLM：
+    TSM 2026Q2 實測中，這一塊是全庫唯一「長得像財報摘要」的乾淨數字清單（同申報的
+    EDGAR 全文散成 371 塊會計附註碎片），相似度排序穩定把它排在最前面，模型照引了
+    裡面的 2024 年報數字——即使開頭就寫明非當期、每條都標了期間。
+
+    逐條濾而非整份丟：JPM 實測是混合期，13 條裡 11 條正好是當期，只有營業收入落後
+    一年、現金及約當現金落後八年（2018-12-31，即 _pick_fact docstring 警告的停用概念
+    型失分）。整份丟會讓 JPM 與 SPCX 完全沒有財報數字——這兩家的 EDGAR 全文塊數是 0，
+    沒有另一軌接得住。全部落後時回 None，由呼叫端走既有的「無可用數字」不入庫路徑。
+
+    每條留下的數字仍標所屬期間：同一份申報會同時含本期與比較期，不標期間會讓
+    比較期數字被當成最新一季。
     """
     taxonomy_facts = facts.get(taxonomy, {})
     lines = []
-    stale = False
+    dropped = []
     for name, concepts in SEC_CONCEPTS:
         # 先掃過整串概念找「正好屬於這份申報」的，找不到才退回第一個有值的舊數字。
         # 不能取第一個有值的就停：AAPL 的 Revenues 停用於 2018 年但仍排在清單首位，
@@ -385,22 +395,25 @@ def _format_xbrl(facts: dict, taxonomy: str, accession: str, ticker: str, label:
         if fallback is None:
             continue
         val, unit, exact, period = fallback
+        if not exact:
+            # 非本次申報當期就整條不寫。留著只會多一個陷阱，該指標本季的值由
+            # EDGAR 全文那軌（有的話）提供
+            dropped.append(name)
+            continue
         # 幣別一律照實寫出，不可簡化成「元」——TSM 以 TWD 與 USD 雙幣別申報，
         # 44.67 TWD/股寫成「元/股」會被 LLM 當成美元讀，量級差 30 倍以上
         unit_label = f"{unit.split('/')[0]}/股" if "每股盈餘" in name else unit
-        # 每個數字都標自己的期間：落後 fallback 取到的是舊期數字，與標題的申報日期
-        # 不同期，不逐條標會讓 LLM 把 2024 年報數字當成 2026 年第二季引用
+        # 每個數字仍標自己的期間：同一份申報含本期與比較期，_pick_fact 取的是期末
+        # 最晚那期，標出來才能讓 LLM 確認是否為它要的期間
         lines.append(f"{name}：{_fmt_amount(val)}（{unit_label}，期間 {period}）")
-        stale = stale or not exact
     if not lines:
         return None
     header = f"{ticker.upper()} {label}（資料來源：SEC XBRL API，申報編號 {accession}）"
-    if stale:
-        # 外國發行人（TSM/ASML）的 companyfacts 常落後數期，此時數字並非該申報當期。
-        # 寧可明講也不要讓 LLM 誤以為是最新一季——反幻覺優先於好看
+    if dropped:
+        # 明講少了哪些指標，免得 LLM 把「沒列出」讀成「該指標為零」
         header += (
-            "\n注意：SEC 結構化資料尚未涵蓋這份申報，以下為 XBRL 中最近一期可得的數字，"
-            "期間如各條所示，並非本次申報當期。"
+            f"\n注意：SEC 結構化資料尚未涵蓋本次申報的下列指標，已略去不列："
+            f"{'、'.join(dropped)}。"
         )
     return header + "\n" + "\n".join(lines)
 
@@ -459,11 +472,15 @@ def _fetch_sec_financials(ticker: str, headers: dict) -> FetchResult:
     # 外國發行人（TSM/ASML）整包走 ifrs-full，us-gaap 概念數為 0
     taxonomy = "us-gaap" if facts.get("us-gaap") else "ifrs-full"
 
+    # _format_xbrl 已逐條濾掉非本次申報當期的數字，全部落後時回 None 落在這裡
     text = _format_xbrl(facts, taxonomy, accession, ticker, f"{form}（{filing_date}）")
     if text is None:
-        msg = f"{ticker.upper()} 的 XBRL 無可用數字（{taxonomy} 概念皆缺漏或落後）。"
+        msg = (f"{ticker.upper()} 的 XBRL 無本次申報（{accession}）當期數字"
+               f"（{taxonomy} 概念皆缺漏或落後），略過不入庫；"
+               f"財報全文仍由 EDGAR 那軌提供。")
         log.warning(msg, extra={"fields": {
-            "company": ticker, "source": "sec_xbrl", "reason": "xbrl_empty"}})
+            "company": ticker, "source": "sec_xbrl", "reason": "xbrl_empty",
+            "accession": accession}})
         return FetchResult(False, msg)
 
     ingest_text(
