@@ -451,6 +451,25 @@ def resolve_market(state: GraphState) -> GraphState:
 # 補給決策卡當市場脈絡的新聞條數；候選要多撈幾倍，去重後才補得滿
 _MARKET_NEWS_K = 2
 
+# 保留給「最新一期財報」的名額。顆粒度不對稱讓最新財報在純相似度排序裡撈不到
+# （見 vectorstore.similarity_search 的 latest_source_only），故給它固定席位而非
+# 改動全局排序——後者會傷到「比較去年同期」這類本來就需要舊資料的問法。
+# 2 是因為台股結構化財報整季就壓成 2 塊（損益表 + 資產負債表）。
+_LATEST_REPORT_K = 2
+
+
+def _merge_latest_report(docs: list[dict], candidates: list[dict]) -> list[dict]:
+    """把最新一期財報的 chunk 併到結果「最前面」，已存在的不重複加。
+
+    放最前面是刻意的：assemble 依出現順序編引用編號，而 generate 的 context 也照序排，
+    最新一期該在舊資料之前被讀到。舊資料不移除——「比較去年同期」需要它們。
+    """
+    seen_ids = {d["id"] for d in docs}
+    extra = [d for d in candidates if d["id"] not in seen_ids][:_LATEST_REPORT_K]
+    for d in extra:
+        d["latest_period"] = True
+    return extra + docs
+
 
 def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None,
                      news_since_days: int | None = None) -> list[dict]:
@@ -508,6 +527,25 @@ def _merge_market_news(docs: list[dict], candidates: list[dict]) -> list[dict]:
     return docs + extra
 
 
+def _wants_latest_report(company, doc_type) -> bool:
+    """要不要保留最新財報的席位。
+
+    只在「指名公司的財報問題」成立：沒有 company 就無從定義「最新一期」（子查詢依
+    company 取 max），doc_type != financial_report 時硬塞財報會擠掉新聞席位。
+    刻意不看「最新」這類字眼——問「2330 財報如何」同樣不該拿到半年前的 PDF，
+    而真要比較去年同期的問法拿到的舊 chunk 仍在結果裡，只是排在後面。
+    """
+    return bool(company) and doc_type == "financial_report"
+
+
+def _latest_report_docs(query_vec, company, doc_type) -> list[dict]:
+    """撈最新一期財報裡最相似的幾塊；多撈一點讓 _merge_latest_report 去重後補得滿。"""
+    return similarity_search(
+        query_vec, top_k=_LATEST_REPORT_K * 2, company=company, doc_type=doc_type,
+        latest_source_only=True,
+    )
+
+
 def _retrieve_sequential(query_vec, company, doc_type, news_since_days) -> list[dict]:
     """循序版本：無 company 時的唯一路徑，也是 RETRIEVE_PARALLEL=0 的回退路徑。"""
     docs = similarity_search(
@@ -517,6 +555,10 @@ def _retrieve_sequential(query_vec, company, doc_type, news_since_days) -> list[
         docs = _relax_doc_type(query_vec, company, news_since_days)
     if not company:
         return docs
+
+    # 放寬過 doc_type 代表原本要的類型撈不到，此時的 docs 已不是財報，不該再插財報席位
+    if docs and _wants_latest_report(company, doc_type) and not docs[0].get("relaxed"):
+        docs = _merge_latest_report(docs, _latest_report_docs(query_vec, company, doc_type))
 
     if docs and not any(d["doc_type"] == "news" for d in docs):
         # 財報問題也補 3 條新聞給趨勢段當素材，沒有就交給 LLM 決定要不要補抓
@@ -538,12 +580,16 @@ def _retrieve_sequential(query_vec, company, doc_type, news_since_days) -> list[
 def _retrieve_parallel(query_vec, company, doc_type, news_since_days) -> list[dict]:
     """同公司新聞與市場脈絡最後是否採用要看主檢索結果，但 SQL 本身不依賴它；先並行取
     候選、後過濾即可省掉兩段等待。採用條件與順序和 _retrieve_sequential 完全相同。"""
-    executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="rag-retrieve")
+    want_latest = _wants_latest_report(company, doc_type)
+    executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag-retrieve")
     try:
         primary: Future = executor.submit(
             similarity_search, query_vec, company=company, doc_type=doc_type,
             news_since_days=news_since_days,
         )
+        latest_report: Future | None = executor.submit(
+            _latest_report_docs, query_vec, company, doc_type,
+        ) if want_latest else None
         company_news: Future = executor.submit(
             similarity_search, query_vec, top_k=3, company=company, doc_type="news",
             news_since_days=news_since_days,
@@ -555,8 +601,12 @@ def _retrieve_parallel(query_vec, company, doc_type, news_since_days) -> list[di
 
         docs = primary.result()
         if not docs and doc_type:
-            # doc_type 放寬是主結果為空才成立，無法預先決定；其餘兩個候選仍可平行等待。
+            # doc_type 放寬是主結果為空才成立，無法預先決定；其餘候選仍可平行等待。
             docs = _relax_doc_type(query_vec, company, news_since_days)
+
+        # 與循序版同一個條件與順序：放寬過就不插財報席位
+        if docs and latest_report is not None and not docs[0].get("relaxed"):
+            docs = _merge_latest_report(docs, latest_report.result())
 
         if docs and not any(d["doc_type"] == "news" for d in docs):
             docs = docs + company_news.result()

@@ -271,16 +271,30 @@ same_end = {"USD": [
 ]}
 assert _pick_fact(same_end, "acc1") == (109417000000, "USD", True, "2026-03-29~2026-06-27")
 
-# 落後 fallback 時整份加註警語，且每條標出實際期間，避免舊年報被當成最新一季
+# 落後期的數字整條不寫出，只剩它時回 None——警語擋不住 LLM，TSM 實測照引了 2024 年報數字
 stale_facts = {"ifrs-full": {"Revenue": {"units": {"USD": [
     {"accn": "old-acc", "start": "2024-01-01", "end": "2024-12-31", "val": 88268000000, "filed": "2025-04-17"},
 ]}}}}
-stale_text = _format_xbrl(stale_facts, "ifrs-full", "new-acc-not-in-facts", "tsm", "6-K（2026-08-14）")
-assert "並非本次申報當期" in stale_text
-assert "期間 2024-01-01~2024-12-31" in stale_text
+assert _format_xbrl(stale_facts, "ifrs-full", "new-acc-not-in-facts", "tsm", "6-K（2026-08-14）") is None
 
-# 命中當期則不得出現警語，否則每份都加註等於沒有警示作用
-assert "並非本次申報當期" not in _format_xbrl(
+# 混合期（JPM 實測形狀）：當期的留、落後的丟，不因為一條落後就丟掉整份——
+# JPM 與 SPCX 的 EDGAR 全文塊數是 0，整份丟等於這兩家完全沒有財報數字
+mixed = {"us-gaap": {
+    "Revenues": {"units": {"USD": [
+        {"accn": "old-acc", "start": "2025-01-01", "end": "2025-12-31", "val": 182447000000, "filed": "2026-02-01"},
+    ]}},
+    "NetIncomeLoss": {"units": {"USD": [
+        {"accn": "acc1", "start": "2026-04-01", "end": "2026-06-30", "val": 21155000000, "filed": "2026-08-01"},
+    ]}},
+}}
+mixed_text = _format_xbrl(mixed, "us-gaap", "acc1", "jpm", "10-Q")
+assert "21,155,000,000（USD，期間 2026-04-01~2026-06-30）" in mixed_text, mixed_text
+assert "182,447,000,000" not in mixed_text, mixed_text
+# 少列的指標要明講，免得 LLM 把「沒列出」讀成「該指標為零」
+assert "已略去不列" in mixed_text and "營業收入" in mixed_text, mixed_text
+
+# 全部命中當期則不得出現略去註記，否則每份都加註等於沒有警示作用
+assert "已略去不列" not in _format_xbrl(
     {"us-gaap": {"Revenues": {"units": {"USD": [
         {"accn": "acc1", "start": "2025-10-01", "end": "2025-12-31", "val": 1000000, "filed": "2026-01-30"},
     ]}}}}, "us-gaap", "acc1", "aapl", "10-Q")
@@ -304,3 +318,76 @@ finally:
     _u._company_tickers.cache_clear()
 
 print("fetch_sec_financials contract self-check OK")
+
+# --- 一條當期數字都沒有的 XBRL 不入庫 ---
+# TSM 2026Q2 實測：這塊是全庫唯一「長得像財報摘要」的乾淨數字清單（同申報的 EDGAR
+# 全文散成 371 塊會計附註碎片），相似度排序穩定排第一，LLM 照引了裡面的 2024 年報
+# 數字——即使開頭已寫明非當期、每條都標了期間。文案擋不住，故落後期逐條不寫出，
+# 全落後時 _format_xbrl 回 None 而不入庫（混合期的行為見上方 sec xbrl 那組）。
+
+_ingested = []
+_orig_ingest = _u.ingest_text
+_orig_tickers = _u._company_tickers
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _fake_get(url, **_kw):
+    if "submissions" in url:
+        return _Resp({"filings": {"recent": {
+            "form": ["6-K"], "accessionNumber": ["new-acc"],
+            "filingDate": ["2026-08-14"], "reportDate": ["2026-06-30"],
+            "primaryDocument": ["d.htm"], "items": [""],
+        }}})
+    # companyfacts 只有更早期的數字，對不到 new-acc → 整份 stale
+    return _Resp({"facts": {"ifrs-full": {"Revenue": {"units": {"USD": [
+        {"accn": "old-acc", "start": "2024-01-01", "end": "2024-12-31",
+         "val": 88268000000, "filed": "2025-04-17"},
+    ]}}}}})
+
+
+try:
+    _u.ingest_text = lambda *a, **k: _ingested.append(k.get("source"))
+    _u._company_tickers = lambda: {"0": {"ticker": "TSM", "cik_str": 1046179}}
+    _u.requests.get = _fake_get
+    with contextlib.redirect_stdout(io.StringIO()):
+        _r = _u.fetch_sec_financials("TSM")
+    assert _r.ok is False, f"整份落後期應回失敗，實得 {_r}"
+    assert "無本次申報" in _r.detail, _r.detail
+    assert _ingested == [], f"整份落後期不該入庫，實得 {_ingested}"
+
+    # 對照組：命中當期就要照常入庫，否則等於把正常的一起擋掉
+    _ingested.clear()
+
+    def _fresh_get(url, **_kw):
+        if "submissions" in url:
+            return _Resp({"filings": {"recent": {
+                "form": ["6-K"], "accessionNumber": ["new-acc"],
+                "filingDate": ["2026-08-14"], "reportDate": ["2026-06-30"],
+                "primaryDocument": ["d.htm"], "items": [""],
+            }}})
+        return _Resp({"facts": {"ifrs-full": {"Revenue": {"units": {"USD": [
+            {"accn": "new-acc", "start": "2026-04-01", "end": "2026-06-30",
+             "val": 1000000, "filed": "2026-08-14"},
+        ]}}}}})
+
+    _u.requests.get = _fresh_get
+    with contextlib.redirect_stdout(io.StringIO()):
+        _r = _u.fetch_sec_financials("TSM")
+    assert _r.ok is True, f"命中當期應入庫，實得 {_r}"
+    assert _ingested == ["SEC-XBRL:TSM:new-acc"], _ingested
+finally:
+    _u.requests.get = _orig_get
+    _u.ingest_text = _orig_ingest
+    _u._company_tickers = _orig_tickers
+
+print("xbrl stale skip self-check OK")

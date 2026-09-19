@@ -24,7 +24,9 @@ def _configure(conn: psycopg.Connection) -> None:
 # 正常連線本該在毫秒等級完成，2 秒內連不上代表 DB 真的掛了，拖久也救不回來）
 pool = ConnectionPool(
     config.DATABASE_URL,
-    min_size=1, max_size=5,
+    # max_size=6：並行檢索最多同時開 4 條（主檢索、同公司新聞、市場新聞、最新財報），
+    # 留餘裕給同時進來的另一題；不足時 retrieve_context 記的 pool_waiting 會現形
+    min_size=1, max_size=6,
     kwargs={"autocommit": True},
     configure=_configure,
     open=False,
@@ -103,6 +105,7 @@ def similarity_search(
     news_since_days: int | None = None,
     exclude_company: str | None = None,
     order_by_recency: bool = False,
+    latest_source_only: bool = False,
 ) -> list[dict]:
     """回傳最相似的 chunk，附上 source 供引用。
 
@@ -113,6 +116,12 @@ def similarity_search(
     因為市場新聞掃描認不出標題公司時就填 NULL，那些正是要補的市場脈絡）。
     order_by_recency=True 改以發布日期新到舊排序，供「補市場脈絡」這類要新不要準的用途；
     published_at 為 NULL 的排最後，避免無日期的舊文佔住補充名額。
+
+    latest_source_only=True 只在「該 company 最新 published_at 的那些來源」裡做相似度排序。
+    用途是財報檢索的期間維度：結構化來源把整季壓成 2 塊密集數字、PDF 來源散成上百塊
+    自然語言，問「最新財報」時舊 PDF 靠塊數多穩定勝出（2330 實測 Q2 那兩塊排在第 242
+    名，TOP_K=5 永遠撈不到）。限定在最新那批之內排序即繞過這個顆粒度偏差。
+    需與 company 併用；published_at 為 NULL 的來源不參與（無期間可比）。
     """
     filters = []
     params: dict = {"embedding": query_embedding, "top_k": top_k}
@@ -132,6 +141,16 @@ def similarity_search(
             "(doc_type != 'news' OR published_at >= CURRENT_DATE - %(news_since_days)s)"
         )
         params["news_since_days"] = news_since_days
+    if latest_source_only:
+        # 同一天可能有多個來源（2454 實測同日兩份 PDF、台股結構化與 PDF 亦可能同日），
+        # 故比對「最新日期」而非單一 source。子查詢吃既有的 (company, doc_type) 條件，
+        # 不另外放寬，否則會把新聞日期拿來當財報的最新期。
+        filters.append(
+            "published_at = (SELECT max(published_at) FROM doc_chunks s"
+            "  WHERE s.company = %(company)s"
+            "    AND (%(doc_type)s IS NULL OR s.doc_type = %(doc_type)s))"
+        )
+        params.setdefault("doc_type", doc_type)
 
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
