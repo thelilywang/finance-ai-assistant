@@ -20,6 +20,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -979,6 +980,67 @@ def allowed_fields(state: GraphState, has_market: bool | None = None) -> list[st
     return fields
 
 
+_FIELD_LINE_RE = re.compile(r"^- \*\*(.+?)\*\*[：:]", re.MULTILINE)
+
+
+def check_answer_format(answer: str, fields: list[str], ordered_count: int, lang: str) -> list[dict]:
+    """事後檢查決策卡是否符合 prompt 訂的格式，只寫 log、不擋輸出、不改寫輸出。
+
+    回傳結構化 dict 而非字串，是為了讓 log 之後能被彙總分析（例如數
+    unknown_citation_marker 出現幾次、都是哪些標記），不是預留彈性。
+    這裡只做 regex 與集合運算，不做任何會 raise 的操作，呼叫端不必包 try。
+    """
+    violations: list[dict] = []
+
+    # (a) 欄位集合比對。預期欄名一律經 t() 取回，不手寫第二份清單，
+    # 否則 i18n 改字會讓這裡的期望值悄悄與實際輸出脫鉤。
+    expected_names = set()
+    for f in fields:
+        raw = t(lang, f"trend_field_{f}")
+        m = _FIELD_LINE_RE.match(raw)
+        if not m:
+            # 抽不到就會讓該欄從預期集合消失，模型正確輸出它反而被誤報成
+            # unexpected_fields——驗證層自己產生假警報，比沒有驗證層更糟。
+            log.error("trend_field 不符 '- **欄名**：' 格式，欄位檢查將失準", extra={"fields": {
+                "node": "check_answer_format", "field_id": f, "lang": lang, "raw": raw}})
+            continue
+        expected_names.add(m.group(1))
+
+    actual_names = set(_FIELD_LINE_RE.findall(answer))
+    missing = expected_names - actual_names
+    unexpected = actual_names - expected_names
+    if missing:
+        violations.append({"rule": "missing_fields", "detail": sorted(missing)})
+    if unexpected:
+        violations.append({"rule": "unexpected_fields", "detail": sorted(unexpected)})
+
+    # (b) 免責聲明
+    if t(lang, "disclaimer") not in answer:
+        violations.append({"rule": "missing_disclaimer", "detail": t(lang, "disclaimer")})
+
+    # (c)(d) 引用標記：先分離「合法標記」與「其他中括號」，markdown 連結
+    # 的 [text](url) 排除在外（後面緊接 "("）。
+    # prompt 寫半形 []，但模型在中文語境實測輸出全形【】（含 [即時市場數據]），
+    # 所以兩種都要認——只認半形等於對真實輸出全盲。
+    label = t(lang, "citation_label").strip()
+    citation_re = re.compile(rf"[\[【]{re.escape(label)}\s*(\d+)[\]】]")
+    out_of_range = sorted({
+        int(n) for n in citation_re.findall(answer) if not (1 <= int(n) <= ordered_count)
+    })
+    if out_of_range:
+        violations.append({"rule": "citation_out_of_range", "detail": out_of_range})
+
+    bracket_re = re.compile(r"[\[【]([^\]】]+)[\]】](?!\()")
+    unknown = sorted({
+        m.group(1) for m in bracket_re.finditer(answer)
+        if not re.fullmatch(rf"{re.escape(label)}\s*\d+", m.group(1))
+    })
+    if unknown:
+        violations.append({"rule": "unknown_citation_marker", "detail": unknown})
+
+    return violations
+
+
 def route_after_tools(state: GraphState) -> str:
     """檢索結果明顯夠用就直接收工，否則交還給 agent 決定下一步。
 
@@ -1177,6 +1239,11 @@ def generate(state: GraphState) -> GraphState:
     log_duration(log, "generate", started, node="generate", model=_model_of(state),
                  qid=_qid(state["question"]), prompt_chars=len(prompt),
                  answer_chars=len(resp.content or ""), retrieved=len(state.get("retrieved") or []))
+    violations = check_answer_format(resp.content or "", fields, len(ordered), lang)
+    if violations:
+        log.warning("決策卡格式違規", extra={"fields": {
+            "node": "generate", "qid": _qid(state["question"]),
+            "violations": violations, "allowed_fields": fields}})
     return {**state, "answer": resp.content, "allowed_fields": fields}
 
 
