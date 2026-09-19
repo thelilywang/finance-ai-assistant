@@ -108,20 +108,24 @@ def _link_citations(body: str, label: str, lang: str, urls: list[str | None]) ->
     """把 [來源1]/[Source 1] 這類引用標記轉成 markdown 連結，容錯標籤與數字間的空格。
     urls 依編號順序（1-based）對應；為 None（無連結來源）保留為純文字，
     超出範圍（幻覺編號）則整段移除。
+
+    半形與全形括號都要認：prompt 寫的是 [來源N]，但模型在中文語境實測輸出
+    【來源N】，只認半形會讓整份決策卡一個連結都轉不出來（2026-09-19 實測
+    轉換數 0、殘留 3 個【來源1】）。替換後產生的連結一律用半形。
     """
     label = label.strip()
     sep = "" if lang == "zh" else " "
     for i, url in enumerate(urls, start=1):
         if not url:
             continue
-        pattern = rf"\[{re.escape(label)}\s*{i}\]"
+        pattern = rf"[\[【]{re.escape(label)}\s*{i}[\]】]"
         replacement = f"[[{label}{sep}{i}]]({url})"  # 外層是 markdown 連結、內層方括號留在顯示文字，相鄰引用才分得開
         body = re.sub(pattern, replacement, body)
 
     def _drop_out_of_range(m: re.Match) -> str:
         return "" if int(m.group(1)) > len(urls) else m.group(0)
 
-    body = re.sub(rf"\[{re.escape(label)}\s*(\d+)\]", _drop_out_of_range, body)
+    body = re.sub(rf"[\[【]{re.escape(label)}\s*(\d+)[\]】]", _drop_out_of_range, body)
     return body
 
 
