@@ -32,6 +32,13 @@ MCP_ALLOWED_HOSTS = os.getenv("MCP_ALLOWED_HOSTS", "mcp-server:8000,localhost:80
 # chunk 切割參數
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 120
+# 一次送進 embed_documents 的 chunk 數。整份一次送在長 filing 上會失敗，故分批送。
+# 400 取自 JPM 10-Q（982,991 字元／1533 塊）的實測：100／200／400 皆 2/2 成功且
+# 耗時相同（192-198 秒），600 是 1/2 成功（失敗那次 230 秒），不分批 0/2 成功。
+# 呼叫次數從 4 次增到 16 次總耗時不變，故成本在 token 數不在 per-call 開銷，
+# 批次取小沒有代價；選 400 而非更小是讓重試的粒度不要太細。
+# 0 代表不分批（整份一次送），供 A/B 量測用同一份程式碼切換。
+EMBED_BATCH_SIZE = max(0, int(os.getenv("EMBED_BATCH_SIZE", "400")))
 
 # 檢索參數
 TOP_K = 5

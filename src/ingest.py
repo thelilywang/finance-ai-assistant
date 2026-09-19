@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import time
 
 from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -41,6 +42,35 @@ def chunk_text(text: str) -> list[str]:
     return splitter.split_text(text)
 
 
+def _embed_in_batches(embeddings, chunks: list[str], source: str) -> list[list[float]]:
+    """分批呼叫 embed_documents，逐批重試一次。
+
+    整份一次送在長 filing 上會失敗（見 MAINTENANCE_LOG「大型 filing 的 embedding
+    整批失敗」），且失敗率隨批次大小升高、沒有可查表的門檻，故切小再送。
+    重試只做一次：實測失敗是資源／超時型，同一批重送常會過，但連兩次不過就
+    不是暫時性問題，繼續重試只是把等待時間拉長。逐批記錄耗時與重試，供回測。
+    """
+    batch_size = config.EMBED_BATCH_SIZE or len(chunks)
+    vectors: list[list[float]] = []
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start:start + batch_size]
+        started = time.monotonic()
+        for attempt in (1, 2):
+            try:
+                vectors.extend(embeddings.embed_documents(batch))
+                break
+            except Exception as e:  # noqa: BLE001  ollama 的錯誤型別不在 requests 體系內
+                if attempt == 2:
+                    raise
+                log.warning("embedding 批次失敗，重試一次", extra={"fields": {
+                    "source": source, "reason": "embed_batch_failed",
+                    "batch_start": start, "batch_size": len(batch), "error": str(e)}})
+        log.info("embedding 批次完成", extra={"fields": {
+            "source": source, "batch_start": start, "batch_size": len(batch),
+            "elapsed_sec": round(time.monotonic() - started, 1)}})
+    return vectors
+
+
 def ingest_text(
     text: str, source: str, company: str | None, doc_type: str, published_at: str | None,
     title: str | None = None,
@@ -66,7 +96,7 @@ def ingest_text(
     log.info("開始 embedding", extra={"fields": {
         "source": source, "company": company, "chunks": len(chunks)}})
 
-    vectors = embeddings.embed_documents(chunks)
+    vectors = _embed_in_batches(embeddings, chunks, source)
 
     rows = [
         {
