@@ -57,10 +57,14 @@ def price_chart(company: str):
             last = hist.index[-1].date()
             # ponytail: 只標「已過去～未來 45 天內」的財報日，太遠會把 x 軸拉爆
             if date and hist.index[0].date() <= date <= last + dt.timedelta(days=45):
-                fig.add_vline(
-                    x=date.isoformat(), line_dash="dash", line_color=INK_MUTED,
-                    annotation_text="下次財報", annotation_font_color=INK_MUTED,
-                )
+                # ponytail: 不用 add_vline 的 annotation_text——它會把線的 x 端點做平均來擺放
+                # 標註（shapeannotation._mean 的 sum() 從 0 起加），x 軸是 ISO 字串就炸
+                # TypeError。拆成 shape + annotation 手動指定位置，繞過那段平均。
+                x = date.isoformat()
+                fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
+                              line=dict(color=INK_MUTED, dash="dash"))
+                fig.add_annotation(x=x, y=1, yref="paper", text="下次財報", showarrow=False,
+                                   yanchor="bottom", font=dict(color=INK_MUTED))
         except Exception as e:  # noqa: BLE001
             log.warning("財報日標記略過", extra={"fields": {
                 "company": company, "reason": "chart_failed", "error": str(e)}})
