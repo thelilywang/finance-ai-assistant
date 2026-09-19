@@ -1042,6 +1042,26 @@ def route_after_resolve_market(state: GraphState) -> str:
     return "agent"
 
 
+# 會跑很久的 tool（補抓要打外部站台並做 embedding，中位 67.6s），對照組是
+# search_knowledge_base（中位 0.5s）。名稱與 mcp_server.py 的 @mcp.tool() 函式名綁定，
+# 那邊改名這邊要跟著改——比對不中只會少一句提示，不影響回答正確性。
+_FETCH_TOOLS = {"fetch_company_data", "fetch_market_overview"}
+
+
+def is_fetching(update: dict) -> bool:
+    """agent 這一輪選的 tool 裡有沒有補抓。update 是 agent 節點回傳的 state。
+
+    放在 graph.py 而非顯示層：app.py 與 cli.py 兩個介面都要判斷，而 app.py 在模組
+    層級 import chainlit，CLI 從那邊拿會把整個 chainlit 拖進來。
+    """
+    messages = (update or {}).get("messages") or []
+    if not messages:
+        return False
+    # agent 回傳 directive + [resp]，LLM 的回應固定在最後一則
+    calls = getattr(messages[-1], "tool_calls", None) or []
+    return any(c.get("name") in _FETCH_TOOLS for c in calls)
+
+
 def unique_sources(retrieved: list[dict]) -> list[str]:
     """依出現順序去重的來源列表，引用編號與來源列表共用這個順序。"""
     ordered = []
