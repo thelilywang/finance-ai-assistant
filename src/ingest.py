@@ -49,6 +49,14 @@ def _embed_in_batches(embeddings, chunks: list[str], source: str) -> list[list[f
     整批失敗」），且失敗率隨批次大小升高、沒有可查表的門檻，故切小再送。
     重試只做一次：實測失敗是資源／超時型，同一批重送常會過，但連兩次不過就
     不是暫時性問題，繼續重試只是把等待時間拉長。逐批記錄耗時與重試，供回測。
+
+    攔 `Exception` 而非指名 `ollama.ResponseError` 是刻意的：本函式的語意是「這批
+    送不過去就重試一次」，與失敗原因無關。會讓一批失敗的不只 Ollama 的 400，還有
+    連線逾時、容器 OOM 被殺、連線被 reset（`httpx.*`）；指名只接住其中一種，其餘
+    照舊拋穿——正是本次修掉的那個病。換 embedding provider（OpenAI／Bedrock／本地
+    模型）時例外型別整組會變，指名的話這裡要跟著改，**而忘記改不會報錯，只會靜默
+    退回不重試**。範圍已收到只包一次 `embed_documents()`、連兩次失敗必往上拋、且
+    失敗有帶 reason 的 log，不會吞掉錯誤。
     """
     batch_size = config.EMBED_BATCH_SIZE or len(chunks)
     vectors: list[list[float]] = []
@@ -59,7 +67,7 @@ def _embed_in_batches(embeddings, chunks: list[str], source: str) -> list[list[f
             try:
                 vectors.extend(embeddings.embed_documents(batch))
                 break
-            except Exception as e:  # noqa: BLE001  ollama 的錯誤型別不在 requests 體系內
+            except Exception as e:  # noqa: BLE001  刻意廣泛攔截，理由見 docstring
                 if attempt == 2:
                     raise
                 log.warning("embedding 批次失敗，重試一次", extra={"fields": {
