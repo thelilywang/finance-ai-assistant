@@ -38,6 +38,17 @@ services:
     command: ["python", "-m", "src.mcp_server"]
     # 不對 host 開 port：目前只有 app 需要連。要讓 Claude Desktop 等外部 client 連進來時，
     # 再單獨評估開放（屆時 MCP_AUTH_TOKEN 的 Bearer 驗證就是把關依據）
+    healthcheck:
+      # FastMCP 沒有 health endpoint，改探 /mcp 本身。不帶 token 會被 Bearer middleware
+      # 擋成 401，而 401 正是要的訊號：uvicorn 有在聽、middleware 有在跑。
+      # 不帶 token 是刻意的——healthcheck 不該碰密鑰，且 401 已足以判定存活。
+      # 連不上時 urlopen 拋 URLError（非 HTTPError），exit 1。
+      # 映像是 python:3.11-slim，沒有 curl/wget，故用 python。
+      test: ["CMD", "python", "-c", "import urllib.request as r, urllib.error as e, sys\ntry: r.urlopen('http://localhost:8000/mcp', timeout=5)\nexcept e.HTTPError: pass\nexcept Exception: sys.exit(1)"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
     volumes:
       - ./data:/app/data
 
@@ -49,9 +60,7 @@ services:
       db:
         condition: service_healthy
       mcp-server:
-        # FastMCP 沒有現成的 health endpoint，只能確認程序起來；真正的就緒檢查
-        # 在 app 端（on_chat_start 連不上會顯示錯誤訊息）
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
