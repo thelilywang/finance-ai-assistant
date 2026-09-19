@@ -47,6 +47,11 @@ RETRIEVE_PARALLEL = os.getenv("RETRIEVE_PARALLEL", "1").lower() not in ("0", "fa
 # 保留是為了能在同一份程式碼上跑 A/B。
 ANSWER_SHAPE_GATING = os.getenv("ANSWER_SHAPE_GATING", "1").lower() not in ("0", "false", "no")
 
+# tool 呼叫輪數上限。最後一輪常是模型只回一句「我查完了」（tool_calls 0），
+# 實測單輪可達 93 至 290 秒，佔單題三到六成。收緊到 3 能否在不損答案品質的
+# 前提下省下那一輪，須同程式碼同容器 A/B，故拉成可調參數而非改常數。
+MAX_TOOL_ROUNDS = max(1, int(os.getenv("MAX_TOOL_ROUNDS", "4")))
+
 # Logging：AI 執行耗時要能事後回測，故除了 stdout 另外落地成每日一檔的 JSON Lines。
 # 檔案落在 data/ 底下沿用既有的 volume 掛載（app 與 mcp-server 都掛了 ./data）。
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

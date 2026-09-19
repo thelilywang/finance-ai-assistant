@@ -191,3 +191,51 @@ out, sent = _run_agent(_state(just_fetched, companies=["2330", "ASML"]))
 assert len(sent) == 2 and len(out["messages"]) == 1, sent[-1].content
 
 print("route_after_tools self-check OK")
+
+# --- 輪數上限何時會被觸及：五題十樣本實測全部 ≤3 輪，這裡固定住原因 ---
+# 上限在 agent_route 執行（數 messages 裡帶 tool_calls 的 AIMessage），
+# route_after_tools 本身沒有輪數概念。能一路撞到上限的只有一種路徑：
+# 補抓後重查「仍然」過期，stale 不消失，agent → tools → agent 無限繞。
+# 864e7ad 指名過期標的之後，補抓一次就補對，重查變 0 天，循環當場斷掉——
+# 這就是實測摸不到上限 4 的原因，不是運氣。
+
+from src.graph import agent_route
+
+
+def _ai_call(name, cid):
+    return AIMessage(content="", tool_calls=[{"name": name, "args": {}, "id": cid}])
+
+
+# 補抓成功 → 重查夠新 → stale 清空 → route 收工，循環斷在第 2 輪
+fixed = [
+    _search(mixed, "1"),
+    _ai_call("fetch_company_data", "2"),
+    ToolMessage(content="新聞更新完成", name="fetch_company_data", tool_call_id="2"),
+    _search([_doc("news", 0, 30, "ASML"), _doc("news", 0, 31, "2330")], "3"),
+]
+assert _stale_companies(_state(fixed, companies=["2330", "ASML"])) == ([], [])
+assert route_after_tools(_state(fixed, companies=["2330", "ASML"])) == "assemble"
+
+# 補抓「補不新」→ 重查仍過期 → 每輪都重新指名，這才是會撞上限的情境。
+# 只讀最後一次 fetch 之後的檢索，所以舊天數不是主因，是重查真的還舊。
+still_stale = [
+    _search(mixed, "1"),
+    _ai_call("fetch_company_data", "2"),
+    ToolMessage(content="新聞更新完成", name="fetch_company_data", tool_call_id="2"),
+    _search([_doc("news", 65, 32, "ASML"), _doc("news", 1, 33, "2330")], "3"),
+]
+assert _stale_companies(_state(still_stale, companies=["2330", "ASML"]))[0] == [("ASML", 65)]
+assert route_after_tools(_state(still_stale, companies=["2330", "ASML"])) == "agent"
+# 且 agent 會再次指名同一家——循環就是這樣成立的
+out, sent = _run_agent(_state(still_stale, companies=["2330", "ASML"]))
+assert "ASML" in sent[-1].content and "65 天" in sent[-1].content
+
+# 上限是這個循環唯一的出口：湊滿 _MAX_TOOL_ROUNDS 輪就強制收工，
+# 不論最後一輪是不是還想呼叫工具（否則每輪都是真實外部請求）。
+at_limit = [_ai_call("fetch_company_data", str(i)) for i in range(graph._MAX_TOOL_ROUNDS)]
+assert agent_route({"messages": at_limit}) == "assemble"
+# 差一輪時不收工，確認上限值本身有生效而不是恆為 assemble
+under = at_limit[:-1] + [_ai_call("search_knowledge_base", "x")]
+assert agent_route({"messages": under[:graph._MAX_TOOL_ROUNDS - 1]}) == "tools"
+
+print("tool round limit self-check OK")
