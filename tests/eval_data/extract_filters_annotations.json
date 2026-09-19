@@ -86,6 +86,6 @@
    "companies": ["AAPL"], "market": null, "in_scope": true, "answer_shape": "news",
    "news_since_days": 90, "note": "「最近」→ 90"},
   {"id": "D3", "category": "時效窗", "question": "2330 的營收多少？",
-   "companies": ["2330"], "market": null, "in_scope": true, "answer_shape": "full",
-   "news_since_days": null, "note": "沒有時效意味 → null，不得自己填一個窗"}
+   "companies": ["2330"], "market": "tw", "in_scope": true, "answer_shape": "full",
+   "news_since_days": null, "note": "沒有時效意味 → news_since_days 為 null；market 為 tw 是因為直接給台股代號，與 M2／M5／N3 同規則"}
 ]

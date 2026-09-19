@@ -35,27 +35,33 @@ assert not (set(TW_US_DUAL_LISTED) & set(TW_US_OTC_ONLY))
 assert dual_listed_peer("2038") is None and otc_adr_of("2038") is None
 
 # --- 沒指明市場 → 反問，且不得先挑一邊 ---
-s = resolve_market({"companies": ["2330"], "market": None})
+# 市場判斷改以問句為準，問句沒有市場字樣（純代號題）就該反問，即使呼叫端給了 market
+s = resolve_market({"companies": ["2330"], "market": None, "question": "台積電的營收多少？"})
 assert s["ask_market"] is True and s["peer_company"] == "TSM"
 assert s["companies"] == ["2330"]             # 尚未決定，不動 company
 assert route_after_resolve_market(s) == "ask_market"
 
 # --- 使用者已明講市場 → 直接照辦，不打斷對話 ---
+# 市場判斷改以問句為準，呼叫端的 market 不再被無條件採信，故這裡要帶含市場字樣的問句
 # 講美股但抽到的是台股代號：要換成 ADR 代號，否則查到的是台股資料
-s = resolve_market({"companies": ["2330"], "market": "us"})
+s = resolve_market({"companies": ["2330"], "market": "us", "question": "台積電的美股表現如何？"})
 assert s["companies"] == ["TSM"] and s["ask_market"] is False
 assert route_after_resolve_market(s) == "agent"
 
 # 講台股但抽到 ADR 代號：反向對齊
-s = resolve_market({"companies": ["TSM"], "market": "tw"})
+s = resolve_market({"companies": ["TSM"], "market": "tw", "question": "台積電台股表現如何？"})
 assert s["companies"] == ["2330"] and s["ask_market"] is False
 
 # 講的市場與抽到的代號本來就一致：原樣通過
-assert resolve_market({"companies": ["2330"], "market": "tw"})["companies"] == ["2330"]
-assert resolve_market({"companies": ["TSM"], "market": "us"})["companies"] == ["TSM"]
+assert resolve_market({"companies": ["2330"], "market": "tw",
+                        "question": "台積電台股的營收？"})["companies"] == ["2330"]
+assert resolve_market({"companies": ["TSM"], "market": "us",
+                        "question": "TSM 的美股營收？"})["companies"] == ["TSM"]
 
 # --- 兩邊都要：保留原代號並帶出對應代號，供 generate 併陳與提醒 ---
-s = resolve_market({"companies": ["2330"], "market": "both"})
+# 問句要含「兩邊」語意，否則校正後 market 會變成 None（沒講）而非 both
+s = resolve_market({"companies": ["2330"], "market": "both",
+                     "question": "台積電台股美股兩邊比較一下"})
 assert s["ask_market"] is False and s["peer_company"] == "TSM"
 assert route_after_resolve_market(s) == "agent"
 
@@ -104,6 +110,7 @@ class _FakeParsed:
     companies = []
     doc_type = news_since_days = market = None
     in_scope = True  # 與 ExtractedFilters 同步；漏了會在 extract_filters 取值時炸開
+    answer_shape = "full"  # 同上，ExtractedFilters 的必要欄位，缺了會 AttributeError
 
 
 _orig_llms = _g._llms

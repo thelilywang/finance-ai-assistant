@@ -61,6 +61,7 @@ class GraphState(TypedDict):
     model: str  # 本輪使用的 Ollama 模型，由 UI 選單決定；空值則用 config.LLM_MODEL
     market: str | None  # 使用者明講的市場（tw/us/both），沒講則 None
     ask_market: bool  # 雙掛牌但沒指明市場，需先反問使用者
+    market_confirmed: bool  # 使用者已透過反問按鈕明確指定市場，不得再被重抽或問句校正覆蓋
     in_scope: bool  # extract_filters 判定問題是否屬財經範疇
     off_topic: bool  # 問題不在財經範圍，本輪不檢索、直接請使用者改問
     peer_company: str | None  # 另一市場的對應代號，反問與併陳兩用
@@ -162,8 +163,12 @@ def _format_history(history: list[tuple[str, str]]) -> str:
 
 
 def rewrite_question(state: GraphState) -> GraphState:
-    """有對話歷史時，把追問改寫成不依賴上下文的獨立問題；沒有就直接通過。"""
-    if not state.get("history"):
+    """有對話歷史時，把追問改寫成不依賴上下文的獨立問題；沒有就直接通過。
+
+    market_confirmed 代表這是反問按鈕選完後的重跑：問句還是原本那句完整問題，
+    市場另外帶在 state，改寫沒有任何可改的東西，故直接跳過省一次 LLM 呼叫。
+    """
+    if state.get("market_confirmed") or not state.get("history"):
         return state
 
     prompt = f"""以下是使用者與財經助理的對話紀錄，以及使用者的新問題。
@@ -231,8 +236,34 @@ def _known_codes_block() -> str:
     return "\n".join(lines)
 
 
+def _collapse_dual_listing(companies: list[str]) -> list[str]:
+    """同一家公司的兩個掛牌被抽成兩個元素時，收斂成台股那一邊。
+
+    「聯電台股美股兩邊比較一下」實測穩定抽出 ['2303', 'UMC']——prompt 要的是「所有
+    指名的代號」，而「兩邊」對模型就是兩個代號。但這語意是同一家公司的併陳，不是
+    多標的比較，留兩個元素會同時踩到三處 len(companies) > 1 的分支：繞過雙掛牌反問
+    與 both 併陳、決策卡開出 comparison 把同一家公司當兩家比、逐家重複抓同一家新聞。
+
+    在抽取端收斂而非在 resolve_market 擋，是因為那三處共用同一個 companies，改源頭
+    一次三處都對。判別式是查表比對（dual_listed_peer），順序無關，且不會誤傷真正的
+    多標的：['2330','2303'] 是兩家不同公司，['2330','UMC'] 亦然。
+
+    ponytail: 只處理「剛好兩個元素」。['2330','TSM','AAPL'] 這種一組雙掛牌加第三家
+    語意真的模糊（可能是台積電兩邊 vs 蘋果），題組裡沒有，不猜，維持現行多標的行為。
+    """
+    if len(companies) == 2 and dual_listed_peer(companies[0]) == companies[1]:
+        return [c for c in companies if is_tw_ticker(c)] or companies[:1]
+    return companies
+
+
 def extract_filters(state: GraphState) -> GraphState:
     """從問題中抽取公司代號 / 文件類型 / 新聞時效窗，抽不出來就設為 None（不過濾）。"""
+    # 反問按鈕選完後的重跑：companies 與 market 上一輪都已定案，重抽只會得到同樣的
+    # companies 與一個馬上被覆蓋的 market，白花一次 LLM 呼叫。其餘抽取欄位由呼叫端
+    # 從上一輪帶過來（見 app.py 的重跑 state）。
+    if state.get("market_confirmed") and state.get("companies"):
+        return state
+
     prompt = f"""你是財經助理的前處理模組。請從使用者問題中判斷：
 1. companies: 問題指名的所有公司代號組成的陣列，元素是台股代號（4-6 碼數字，如 "2330"）
    或美股 ticker（1-5 個大寫英文字母，如 "AAPL"）；沒有指名就給空陣列 []，只有一家就給
@@ -284,6 +315,7 @@ def extract_filters(state: GraphState) -> GraphState:
     # 重抽必然回 None，等於把使用者剛按下的選擇丟掉又問一次
     market = state.get("market") or parsed.market
     companies = parsed.companies or (state.get("companies") if state.get("market") else []) or []
+    companies = _collapse_dual_listing(companies)
     return {**state, "companies": companies, "doc_type": parsed.doc_type,
             "news_since_days": parsed.news_since_days, "market": market,
             "in_scope": parsed.in_scope, "answer_shape": parsed.answer_shape}
@@ -333,18 +365,49 @@ def _is_off_topic(state: GraphState) -> bool:
     return not state.get("companies") and not state.get("in_scope", True)
 
 
+# 問句裡「使用者確實講了市場」的字樣。這裡不重做市場判斷，只回答一個更窄的問題：
+# 使用者到底有沒有提。extract_filters 抽出的 market 只有 resolve_market 一個消費者，
+# 而它唯一要的就是「該不該反問」，故把判斷放在消費端，不動 prompt——09-17／09-18
+# 已有兩次「加 prompt 約束反而擠掉同一欄原本職責」的前例。
+_TW_WORDS = ("台股", "臺股", "台灣", "臺灣", "上市", "櫃買")
+_US_WORDS = ("美股", "美國", "ADR", "adr", "NYSE", "NASDAQ", "那斯達克", "紐約")
+_BOTH_WORDS = ("兩邊", "雙邊", "都要", "兩地", "台美", "臺美")
+
+
+def _market_in_question(question: str) -> str | None:
+    """使用者自己講了哪個市場：回 "tw"/"us"/"both"，None 表示他根本沒講。
+
+    只認問句裡明白講出的市場字樣。**打了代號不算表態**：使用者可能只是記得公司的代號
+    （「2330 最新財報重點？」），不代表他選了台股那一邊；雙掛牌標的兩邊的幣別、期間、
+    每股基準都不同，猜錯的代價大於多問一句。代號與中文公司名一律視為沒講，交給反問。
+    """
+    tw = any(w in question for w in _TW_WORDS)
+    us = any(w in question for w in _US_WORDS)
+    if (tw and us) or (any(w in question for w in _BOTH_WORDS) and (tw or us)):
+        return "both"
+    if tw:
+        return "tw"
+    if us:
+        return "us"
+    return None
+
+
 def resolve_market(state: GraphState) -> GraphState:
     """雙掛牌標的且使用者沒指明市場時，把 company 換成使用者確認過的那一邊。
 
-    只在「使用者自己沒講」時才介入：說了 TSM、說了「美股」都直接照辦，不打斷對話。
+    只認問句裡明講的市場字樣（「美股」「台股美股兩邊」）才直接照辦；只給代號不算表態
+    （打 2330／TSM 可能只是記得代號），一律反問。雙掛牌兩邊的幣別、期間與每股基準都
+    不同，猜錯的代價大於多問一句。
     market="both" 則保留原代號並標記，由 generate 併陳兩市場並提醒不可直接相除。
     """
     company = _primary(state)
     market = state.get("market")
+    answering_reask = False
     if company is None and market and state.get("history"):
         # 使用者是在回答上一輪的「要台股還是美股」，答句本身（「美股」）不含公司名，
         # 改寫也未必補得回來，故從上一輪問句把雙掛牌代號撿回來，否則會變成不限公司檢索
         company = _last_dual_listed(state["history"])
+        answering_reask = True
 
     # ponytail: 多標的比較時不卡市場反問——兩家公司比較還要先選市場體感很差，
     # 且雙掛牌 + 多標的是罕見交集。要逐家各問一次市場再說。
@@ -356,6 +419,18 @@ def resolve_market(state: GraphState) -> GraphState:
     if peer is None:
         return {**state, "companies": [company] if company else [], "ask_market": False,
                 "off_topic": _is_off_topic({**state, "companies": [company] if company else []})}
+
+    # ponytail: 不信任 LLM 抽出的 market 值，只信任問句本身。模型會違反 prompt 第 5 點
+    # 自己猜一邊（實測「2330 的營收多少？」抽出 tw），猜了就跳過反問＝替使用者選邊；
+    # 也會把明講的「台股美股兩邊」抽成單邊。問句字樣是確定性的，故以它為準。
+    # 兩種「市場已經是使用者親口確認過」的情形要跳過校正，否則問句沒有市場字樣就會被
+    # 打回 None，變成問了又問的無限反問：market_confirmed 是按下按鈕那條路，
+    # answering_reask 是使用者打字回答上一輪反問那條路（答句「美股」裡沒有公司名）。
+    if not state.get("market_confirmed") and not answering_reask:
+        market = _market_in_question(state.get("question", ""))
+        # 校正結果要寫回 state：下游的 assemble 與 generate 讀的是 state["market"]，
+        # 只改區域變數的話 both 會在這裡被判對、到下游卻仍讀到舊的單邊值。
+        state = {**state, "market": market}
 
     if market is None:
         # 沒講市場：停下來問，不要替使用者猜一邊

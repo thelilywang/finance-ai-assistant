@@ -356,8 +356,12 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
 async def _pick_market(final_state: dict, ui_lang: str) -> str | None:
     """雙掛牌反問時給出可點選的選項，回傳使用者選的市場（tw/us/both）。
 
-    按鈕只是捷徑，使用者仍可直接打字回答——逾時或關掉視窗回 None，此時就把反問
-    訊息留在畫面上，讓下一輪的文字回覆照原本的追問流程走。
+    只收按鈕選擇，拿到的必定是乾淨的 tw/us/both，不必再繞一次 LLM 改寫去猜文字回覆
+    的意思。timeout 等的是人類點按鈕（非 LLM），故放寬到一小時——逾時就落回文字
+    路徑，正是這裡要避免的不確定輸入。
+    使用者直接關掉視窗時回 None，此時把反問訊息留在畫面上，讓下一輪的文字回覆照
+    原本的追問流程走（rewrite_question 有專門處理「台股／美股／都要」的規則）。
+    這條後路不可移除，否則關掉視窗就卡死。
     """
     company, peer = final_state["companies"][0], final_state["peer_company"]
     tw, us = (company, peer) if is_tw_ticker(company) else (peer, company)
@@ -368,7 +372,7 @@ async def _pick_market(final_state: dict, ui_lang: str) -> str | None:
         for m in ("tw", "us", "both")
     ]
     res = await cl.AskActionMessage(
-        content=final_state["answer"], actions=actions, timeout=300
+        content=final_state["answer"], actions=actions, timeout=3600
     ).send()
     return res.get("payload", {}).get("market") if res else None
 
@@ -407,8 +411,14 @@ async def on_message(message: cl.Message):
             await tracker.start()
             msg = cl.Message(content="")
             final_state = await _stream_answer(
+                # market_confirmed 讓 rewrite_question 與 extract_filters 早退：問句沒變、
+                # 市場已定，兩次 LLM 呼叫都是白跑。其餘抽取欄位沿用上一輪的結果。
                 {**state, "market": picked, "companies": final_state["companies"],
-                 "ask_market": False, "messages": []},
+                 "ask_market": False, "messages": [], "market_confirmed": True,
+                 "doc_type": final_state.get("doc_type"),
+                 "news_since_days": final_state.get("news_since_days"),
+                 "answer_shape": final_state.get("answer_shape", "full"),
+                 "in_scope": final_state.get("in_scope", True)},
                 msg, tracker,
             )
 
