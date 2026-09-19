@@ -554,7 +554,8 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
 
 # ponytail: tool 呼叫輪數上限，取代原本 fetched 布林的「只重試一次」保護。
 # LLM 補抓失敗時可能反覆重試，每次都是真實的外部網路請求，必須有硬上限。
-_MAX_TOOL_ROUNDS = 4
+# 值由 config 讀環境變數，供 A/B 在同一份程式碼上切換（見 config.MAX_TOOL_ROUNDS）。
+_MAX_TOOL_ROUNDS = config.MAX_TOOL_ROUNDS
 
 _mcp_client = MultiServerMCPClient({
     "finance": {
