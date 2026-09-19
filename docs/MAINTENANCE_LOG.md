@@ -27,14 +27,12 @@
    官方 OpenAPI 取得的結構化財報數字目前與 PDF 文字一樣進 `doc_chunks`，走同一條向量檢索路徑。「台積電最新一季 EPS 多少」這類純數字問題其實不需要 embedding 相似度比對——資料庫裡就有確定的那一格，繞過檢索可同時降低延遲與消除檢索誤差。要做需新增一個直查結構化數字的 MCP tool，並調整 `assemble`/`generate` 的 context 組裝與引用編號邏輯。**前置問題**：直答的數字若不進 `retrieved` 就沒有 `[來源N]` 編號，牴觸決策卡「不得編造資料中沒有的數字」的反幻覺規則（`src/i18n.py` 的 `trend_rules_common`），需先決定這類數字如何標註出處。影響面大，刻意獨立處理。
 6. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
    目前台美雙掛牌（台積電＝2330／TSM）的對應關係是寫死的靜態 dict，四檔手動維護。台股 ADR 檔數少且極少變動，靜態表在現階段夠用且零延遲，但新增標的要改程式。預期做法是改為 API 查詢後落地快取（優先讀資料表、查不到才打 API）。**卡在資料來源**：既有的 yfinance 與兩個官方 OpenAPI 都沒有 ADR 對應欄位，靠公司名稱模糊比對不穩，須先找到可靠端點才值得動工。在那之前往靜態表加一行即可。
-7. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
-   `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
-8. **單一公司內的來源補抓改為並行**（`src/graph.py` 的 `fetch_missing_data`）— **2026-09-19 重估後結論不變，有觸發條件才動**
+7. **單一公司內的來源補抓改為並行**（`src/graph.py` 的 `fetch_missing_data`）— **2026-09-19 重估後結論不變，有觸發條件才動**
    `for call in calls` 是序列沒錯，但並行省不到多少：2026-09-19 實測 n=5，補抓耗時中位 **69%** 花在 embedding（`ingest_text` 打本地 Ollama，範圍 59-80%；最慢的一律是 `fetch_mops`／`fetch_edgar` 那一筆，5/5，如 GOOGL 57.8s 裡 53.7s、NVDA 41.7s 裡 39.1s 都在 embedding），而並行四個來源不會讓 embedding 並行，只會在同一個 Ollama 前排隊——序列中位 67.6s，把排隊算進去的並行是 53.4s，**實得 14.2s（21%）**。`EMBED_BATCH_SIZE` 於同日定案為 400 時另測到分批不會讓 embedding 變快（100／200／400 耗時相同，成本在 token 數不在呼叫次數），故 embedding 是主因這點預期不變。
    **卡在收益太小，不是卡在做法。** 做法很清楚：改用 `ThreadPoolExecutor`（前例 `src/market.py:113` 的 `get_market_snapshots`），同時把 `has_report` 的 `calls[-1:]`（`graph.py:661`）改成顯式條件——並行後 `calls` 沒有順序語意。另外補抓期間已有「約 1-3 分鐘」的預期提示（詳見 2026-09-19 章節第四節），乾等的難受解掉大半，14.2s 更不值得換順序語意的改動風險。
    **觸發條件**：使用者實際反映補抓仍然難等，或 embedding 佔比顯著下降（屆時要拿新的 n=5 數據，不能靠推導）。
    **原標題的「多標的」是假問題**：跨公司早已並行（`fetch_company_data` 以單公司為單位呼叫，`src/mcp_server.py:190`；`ToolNode` 以 `asyncio.gather` 併發同輪 tool call）。舊文依據的「09-18 約 45 秒」是單一樣本且未分辨層級。
-9. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
+8. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
    logfile 已逐節點記錄耗時（`rewrite_question`／`extract_filters`／`agent`／`generate`／`retrieve`），同一題以 `qid` 串連。需累積一段時間的真實使用資料後，分析各節點耗時分佈：已知瓶頸是本地模型生成，但**佔比多少尚未用數據確認**，這是決定下一輪優化該投在哪裡的依據（例如若 `agent` 的 tool loop 輪數才是主因，優化 `generate` 就是做白工）。分析方式：`data/logs/*.log` 是 JSON Lines，可直接用 pandas 或 jq 彙總。
 
    **現況（2026-09-19 重數）：`generate` 16 筆，門檻未達。**
@@ -52,18 +50,14 @@
    **「瓶頸是 generate」開始動搖，但還不能下結論。** `agent` 累計佔比反而略高，原因是一題跑多輪（輪數中位數 3、最多 12，每題累計中位數 137.8 秒）。改算「每題內佔比」則 `generate` 46.6%／`agent` 34.2%，兩種算法排序相反——這本身就代表樣本不足。
 
    **門檻維持約 30 筆，並需補題型。** 16 筆裡 4 筆是同一 `qid` 重跑，獨立題目僅 10 題且集中在補抓路徑驗收。下次一併看 agent 輪數：那題 12 輪、總耗時 2168.9 秒的離群若能複現，比 `generate` 更該先查。
-10. **`answer_shape` 誤判率的量測**（`src/graph.py` 的 `extract_filters`）
+9. **`answer_shape` 誤判率的量測**（`src/graph.py` 的 `extract_filters`）
    目前 `answer_shape` 預設 `"full"` 是靠「誤判成 news 會讓投資題失去素材，代價不對稱」的風險論證選的，不是靠實測錯誤率。2026-09-17 的 A/B 中 5 題 20 次分類全部正確，但 5 題不構成誤判率估計。要驗證這個預設是否過於保守（若實際上大多數新聞題都被判成 `full`，欄位裁剪的節省就吃不到），需要一份人工標註的問題集——這也是目前唯一還會讓那次改動效益歸零的未知數。難度：小，但要先花時間標題目。
    2026-09-19 更新：這項要的人工標註問題集已隨 2026-09-19 章節的抽取模型 A/B 建好（`tests/eval_data/extract_filters_annotations.json`，28 題，其中 26 題標了 `answer_shape`，範疇外的兩題不計分）。9b 與 4b 兩臂都是 26/26 全對，**沒有量到任何誤判**，預設值保守與否的疑慮到此解除。但題組是照抽取欄位的覆蓋面設計的，不是照「news 與 full 的邊界」設計，真正貼著邊界的問法（如「這則新聞會不會影響股價」）只有 S3 一題，故本項不關閉，改為**降級為低優先**：要再往下驗，補的是邊界題而非題數。
-11. **決策卡的 `## 📈` 結構邊界改用非 emoji 標記**（`src/i18n.py` 的 `trend_*` 系列、`src/graph.py` 的 `assemble`）
-   決策卡各欄位目前以 emoji 標題（`## 📈` 等）當結構邊界，下游若要解析欄位就得依賴 emoji 字面值。2026-09-17 改為逐欄組裝 prompt 時刻意**沒有**一併處理，以免把「換欄位邊界」的風險混進效能改動裡。本項的前置條件是「先確認有沒有下游真的在解析這些標題」。2026-09-19 確認：`check_answer_format()` 現在用 `- **欄名**：` 這個行內格式解析欄位（而非 emoji 標題），這是「下游真的在解析欄位」的第一個實例，但解析的是欄位行而非 `## 📈` 標題；標題本身仍只是顯示用。條件改寫為：要不要動取決於 post-check 日後是否需要擴大到標題層級（例如多文件時區分章節），現階段改行內格式即足夠。
-12. **跨市場比較題的檢索素材落差**（`src/graph.py` 的 `retrieve_context`）
-    語料以台股為主，問「NVDA 與聯發科比較」時美股標的往往只有 yfinance 行情數字、沒有任何敘事文件，比較表中該標的的定性欄位只能誠實寫「檢索資料不足」。誠實留白優於編造（反幻覺原則優先），但比較表半邊空白的體驗不好。這是**檢索面的資料覆蓋問題，不是生成面的 bug**，要解得從語料來源下手（增加美股新聞／財報來源），不是改 prompt。難度：中至大，視新增來源而定。
-13. **`dual_market_warning` 措辭不精確且觸發條件過窄**（`src/i18n.py` 的 `dual_market_warning`、`src/graph.py` 的 `generate`）
-    措辭把台美雙掛牌的 ADR 一律當成美元計價來提醒，實際上 ADR 的計價與換算關係比這句話複雜。另外觸發條件是「單一公司且為雙掛牌且 `market == "both"`」，多標的比較題不會觸發——但跨市場比較正是最需要提醒幣別的場合。2026-09-18 在 `market.py` 的快照加入 `currency` 欄後，幣別資訊已直接進 prompt，此條的急迫性下降，但措辭錯誤本身還在。難度：小。
-14. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
+10. **跨市場比較題的檢索素材落差**（`src/graph.py` 的 `retrieve_context`）
+   語料以台股為主，問「NVDA 與聯發科比較」時美股標的往往只有 yfinance 行情數字、沒有任何敘事文件，比較表中該標的的定性欄位只能誠實寫「檢索資料不足」。誠實留白優於編造（反幻覺原則優先），但比較表半邊空白的體驗不好。這是**檢索面的資料覆蓋問題，不是生成面的 bug**，要解得從語料來源下手（增加美股新聞／財報來源），不是改 prompt。難度：中至大，視新增來源而定。
+11. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
    目前只記錄長度（`prompt_chars`／`answer_chars`）而非內容，故無個資疑慮。若未來為了回測要記錄 prompt／回應全文，需先決定保留天數與去識別化方式——專案已有 `NEWS_RETENTION_DAYS`／`THREAD_RETENTION_DAYS` 的保留期慣例可循（後者的註解明確指出「對話含提問內容，屬個資，留短一點」）。另需觀測 `LOG_BACKUP_DAYS=30` 是否合適：日檔大小取決於實際使用量，累積一段時間後回頭確認磁碟佔用與「回測要看多久以前」的實際需求是否匹配。
-15. **生成的首字延遲（TTFT）沒有量測數字**（`src/graph.py` 的 `generate`、`src/logging_setup.py` 的 `log_duration`）
+12. **生成的首字延遲（TTFT）沒有量測數字**（`src/graph.py` 的 `generate`、`src/logging_setup.py` 的 `log_duration`）
    `generate` 目前只記錄整段生成的 `elapsed_ms` 與 `answer_chars`，**首字延遲一個數字都沒有**。這是唯一一個「非得在節點內部拿到 token 才量得到」的需求——`app.py` 那端量到的首字含 graph 前段所有節點，切不出生成本身的等待；而專案慣例要求效能判斷須有實測數據、不接受純推導（`.stream()` 的其他用途已判定不採用，詳見「保持現狀」同名項目）。
    **為何還沒做**：現有的延遲討論（見「保持現狀」的「回應延遲過長」一項）把生成當成單一區塊處理，結論「剩下的槓桿是輸出量」隱含「每秒約 10 字是均勻的」這個未驗證的假設。若首字其實佔掉可觀的固定成本，該結論就得改寫——但在沒有數字之前無從判斷值不值得動。
    **卡在哪**：卡在改法與收益不對稱。要量到就得把 `generate` 改成消費 chunk（首個 chunk 抵達時記一筆），而那正是「保持現狀」列出代價的那個改動；為了一個觀測指標付整個節點的重構成本，除非延遲重回議程否則不划算。**門檻**：下次要動生成延遲時先做這項，別再憑推導估首字。難度：小（改動集中在 `generate` 一個函式），但需併同 `log_duration` 的欄位一起設計。
@@ -101,6 +95,10 @@
 - **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前覆蓋純函式與資料轉換層（`assemble`、`agent_route`、MCP tool 的回傳格式、`fetch_missing_data`、格式化函式等），`generate` 因直接耦合本地 LLM 未做 mock、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測生成節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
 - **LLM 選用 tool 的正確性無自動化測試**（`src/mcp_server.py` 的 tool 說明、`src/graph.py` 的 `_tool_llm`）— 「資料過期時會不會主動補抓」取決於模型行為，需真實 Ollama 呼叫且結果不保證重現，不適合寫成自動化斷言。目前靠端到端手動驗證，且需連續執行多次確認一致性（09-08 有過單次成功、重複執行皆失敗的實例）。模型換版、調整 tool 說明或改動 `_tool_llm` 的參數時都需重跑。
 - **MOPS 爬蟲改用 Playwright——評估後不採用**（`src/update.py`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會失效，屬結構性限制。此判斷本身仍成立，但影響範圍已於 09-09 縮小：財報數字改由官方 OpenAPI 提供，爬蟲只剩文字敘述一項職責，掛掉不再等於該公司完全沒有台股財報資料。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04、09-09 章節。
+
+- **決策卡的 `## 📈` 結構邊界改用非 emoji 標記——評估後不處理**（`src/i18n.py` 的 `trend_*` 系列、`src/graph.py` 的 `assemble`）— `check_answer_format()` 解析的是 `- **欄名**：` 行內格式而非 emoji 標題，欄位層級的解析穩定性問題不存在；全庫唯一還依賴該 emoji 的是 `app.py:134` 的 `answer.split("## 📈", 1)[0]`，且只用到區段標題、不碰欄位層級。**觸發條件**：post-check 日後若要擴大到標題層級（例如多文件時區分章節），屆時再評估。
+
+- **mcp-server 未映射 port 到 host——維持現狀，不對外開放**（`docker-compose.yml` 的 `mcp-server`）— 外部 client（如 Claude Desktop）目前無法連入，但不是卡在驗證：Bearer token（`MCP_AUTH_TOKEN`）已就緒。目前只有 `app` 需要連 `mcp-server`，走 docker 內部網路即可，開 port 只會憑空多一個對外攻擊面。**觸發條件**：真的需要外部 client 連入時再評估開放。
 
 ---
 
@@ -702,9 +700,9 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 ---
 
-## 2026-09-19　補抓路徑收斂、財報期間維度、embedding 分批與進度回饋
+## 2026-09-19　補抓路徑收斂、財報期間維度、embedding 分批與進度回饋、待辦收尾
 
-四件各自獨立的工作，共通脈絡是**補抓與檢索這條路徑上累積的待辦一次清掉**。先回頭驗掉兩筆因補抓收斂而起的參數疑慮（tool 輪數上限、抽取模型換小），並修掉同型的雙掛牌反問繞過；接著處理財報檢索只看相似度、不看期間的問題；查證期間問題時發現 JPM 的財報全文從未入庫，追出 embedding 整批失敗這個獨立 bug；最後補上補抓期間的進度回饋，那是前述 67.6s 等待唯一還沒解決的部分。
+六件各自獨立的工作，共通脈絡是**補抓與檢索這條路徑上累積的待辦一次清掉**。先回頭驗掉兩筆因補抓收斂而起的參數疑慮（tool 輪數上限、抽取模型換小），並修掉同型的雙掛牌反問繞過；接著處理財報檢索只看相似度、不看期間的問題；查證期間問題時發現 JPM 的財報全文從未入庫，追出 embedding 整批失敗這個獨立 bug；接著補上補抓期間的進度回饋，那是前述 67.6s 等待唯一還沒解決的部分；最後收尾兩項既有待辦——`dual_market_warning` 的措辭與觸發條件、mcp-server 的 healthcheck。
 
 ### 一、補抓路徑的收斂與雙掛牌反問的繞過修復
 
@@ -933,6 +931,26 @@ JPM 以新邏輯重抓後留下 8 條當期數字（淨利 21,155,000,000、稀�
 
 只記 log 不阻擋，格式違規仍會送到使用者眼前；`unknown_citation_marker` 可能誤報內文正常使用的中括號（但 log 彙總時能分辨出「現在是哪些標記被誤報」），需等 log 累積後看誤報率；欄位比對依賴 `- **欄名**：` 這個字面格式，i18n 改排版需同步（已有測試釘住格式，改版會爆）。
 
+### 六、`dual_market_warning` 措辭與觸發條件修復
+
+**結論：措辭不再寫死幣別，觸發條件從「雙掛牌併陳」放寬為「並排代號橫跨台美兩市場」。**
+
+原措辭把 `peer_company` 一律當 ADR、寫死「新台幣」「美元 ADR」，但這牴觸本專案在 `trend_field_comparison` 早訂下的規則——幣別須取自即時市場數據的 `currency` 欄、不得由代號推測；放寬觸發條件後 `{us}` 可能是任何美股標的（如 NVDA），並非 ADR。新措辭改為指向 `currency` 欄，ADR 的股數換算比例降為括號補充，只在同一家公司雙掛牌時才適用。
+
+觸發條件的盲點與待辦「`dual_market_warning` 措辭不精確且觸發條件過窄」記載的一致：`len(companies) == 1 and peer_company and market == "both"` 只認雙掛牌併陳，多標的比較題（如 2330 vs NVDA）沒有 `peer_company`、不會觸發，但那正是最需要幣別提醒的場合。改為 `cross_market_split(state)`：看最後要並排的那組代號是否橫跨兩市場，雙掛牌併陳併入 `peer_company` 一起判斷，成為其中一個特例。抽成獨立純函式而非留在 `generate` 節點內，理由與「LLM 選用 tool 的正確性無自動化測試」同——`generate` 直接耦合本地 LLM、無自動化覆蓋，邏輯留在節點內測不到，抽成純函式才測得到。
+
+`tests/test_dual_market.py` 補 6 條斷言：多標的跨市場觸發、雙掛牌併陳觸發、同市場多標的不觸發（台股與美股各一）、雙掛牌但只看單邊不觸發、空 `companies` 不炸。
+
+### 七、mcp-server healthcheck
+
+**結論：原待辦記載的限制（FastMCP 無 health endpoint、`depends_on` 只能用 `service_started`）不成立，不需要專用 endpoint。**
+
+直接探 `/mcp` 本身：不帶 token 會被既有的 Bearer middleware 擋成 401，401 正是要的存活訊號（uvicorn 有在聽、middleware 有在跑）；連不上時 `urlopen` 拋的是 `URLError` 而非 `HTTPError`，據此 exit 1。不帶 token 是刻意的——healthcheck 不該碰密鑰，401 已足以判定存活。用 python 而非 curl/wget，因映像是 `python:3.11-slim`，未安裝這兩個工具。
+
+實測起容器約 20 秒由 `starting` 轉 `healthy`（`start_period: 15s`、`interval: 10s`），health log 的 `ExitCode` 為 0，容器內實探回應為 `HTTP 401 {"error":"unauthorized"}`；`app` 的 `depends_on` 隨之改為 `service_healthy`，`docker compose config` 解析後為 `app -> {db: service_healthy, mcp-server: service_healthy}`。
+
+**已知限制**：port 未映射到 host、外部 client 仍無法連入，維持現狀不變，理由與觸發條件詳見「保持現狀」同名項目。
+
 ### 改動內容
 
 | 項目 | 涉及檔案與函式 | commit |
@@ -966,3 +984,6 @@ JPM 以新邏輯重抓後留下 8 條當期數字（淨利 21,155,000,000、稀�
 | CLI 漸進回饋 | `cli.py` 新增 `_ask()`，以與 `app.py` 相同的三種 stream_mode 取代原本的 `app.ainvoke()`；逐 token 用 `print` 避開 `rich` 把 token 裡的 `[]` 當標記，最後再用 `Markdown` 重印補排版 | `f45173a` |
 | 判斷放在 graph 層 | `is_fetching` 未留在顯示層：`app.py` 模組層級 import chainlit，CLI 從那邊拿會把整個 Chainlit 拖進一支命令列工具；判斷讀的是 agent 節點的 state，本就屬 graph 語意（`unique_sources` 為同樣先例） | `f45173a` |
 | self-check（進度回饋） | `tests/test_is_fetching.py`：補抓／純檢索／混合呼叫／無 tool_calls／directive 在前／空值與缺 key 共九組斷言，import 改指 `graph.is_fetching` | `f45173a` |
+| 幣別提醒措辭與觸發條件 | `i18n.py` 的 `dual_market_warning`（中英）改為指向 `currency` 欄，不寫死幣別；`graph.py` 新增 `cross_market_split`，`generate` 改依此函式產生 `dual_block` | `1357883` |
+| self-check（幣別提醒） | `tests/test_dual_market.py` 補 6 條 `cross_market_split` 斷言 | `1357883` |
+| mcp-server healthcheck | `docker-compose.yml`：`mcp-server` 新增 `healthcheck`（探 `/mcp`，401 視為存活）；`app` 的 `depends_on.mcp-server` 由 `service_started` 改 `service_healthy` | `1320669` |
