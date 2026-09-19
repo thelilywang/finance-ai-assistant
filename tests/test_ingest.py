@@ -70,4 +70,57 @@ with captured_logs() as records:
                         doc_type="financial_report", published_at=None)
 assert not warned(records)
 
+# --- _embed_in_batches：分批、重試、失敗才拋 ---
+# 實測（JPM 10-Q／1533 塊）：400 以下 2/2 成功、600 是 1/2、不分批 0/2，故預設 400。
+# 這裡只驗分批邏輯本身，不連 Ollama。
+
+class _RecordingEmbeddings:
+    """記下每批大小；fail_first_n 指定前幾次呼叫要拋錯（模擬資源型失敗）。"""
+
+    def __init__(self, fail_first_n: int = 0):
+        self.batches = []
+        self.calls = 0
+        self.fail_first_n = fail_first_n
+
+    def embed_documents(self, chunks):
+        self.calls += 1
+        if self.calls <= self.fail_first_n:
+            raise RuntimeError("Post \".../tokenize\": EOF")
+        self.batches.append(len(chunks))
+        return [[0.0] for _ in chunks]
+
+
+chunks = [f"c{i}" for i in range(1000)]
+
+# 依 EMBED_BATCH_SIZE 切批，且回傳的向量數與輸入塊數一致（錯位會讓 content 配到別人的向量）
+ingest.config.EMBED_BATCH_SIZE = 400
+emb = _RecordingEmbeddings()
+vectors = ingest._embed_in_batches(emb, chunks, "s")
+assert emb.batches == [400, 400, 200], emb.batches
+assert len(vectors) == len(chunks)
+
+# 0 代表不分批：整份一次送（A/B 對照組用）
+ingest.config.EMBED_BATCH_SIZE = 0
+emb = _RecordingEmbeddings()
+ingest._embed_in_batches(emb, chunks, "s")
+assert emb.batches == [1000], emb.batches
+
+# 單批失敗一次會重試並成功，總向量數不受影響（實測 400 那次就是靠重試過關）
+ingest.config.EMBED_BATCH_SIZE = 400
+emb = _RecordingEmbeddings(fail_first_n=1)
+with captured_logs() as records:
+    vectors = ingest._embed_in_batches(emb, chunks, "s")
+assert len(vectors) == len(chunks)
+assert any(r.fields.get("reason") == "embed_batch_failed" for r in records)
+
+# 連兩次失敗才往上拋：不是暫時性問題，繼續重試只是把等待時間拉長
+emb = _RecordingEmbeddings(fail_first_n=2)
+try:
+    ingest._embed_in_batches(emb, chunks, "s")
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("連續失敗應往上拋")
+
+ingest.config.EMBED_BATCH_SIZE = 400  # 還原，避免影響後續
 print("ingest self-check OK")
