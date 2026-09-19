@@ -266,16 +266,19 @@ def extract_filters(state: GraphState) -> GraphState:
 使用者問題：{state['question']}
 """
     qid = _qid(state["question"])
+    # ponytail: 抽取模型可與主模型不同（config.FILTERS_MODEL），空值即沿用主模型。
+    # _llms 以模型名為 key，換模型只是多一個快取項，不必另建實例管理。
+    model = config.FILTERS_MODEL or _model_of(state)
     started = time.monotonic()
     try:
-        parsed = _llms(_model_of(state))["filters"].invoke(prompt)
+        parsed = _llms(model)["filters"].invoke(prompt)
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
         log_duration(log, "extract_filters 結構化輸出失敗", started, node="extract_filters",
-                     model=_model_of(state), qid=qid, ok=False, error=str(e))
+                     model=model, qid=qid, ok=False, error=str(e))
         return {**state, "companies": [], "doc_type": None, "news_since_days": None,
                 "market": None, "in_scope": True, "answer_shape": "full"}
     log_duration(log, "extract_filters", started, node="extract_filters",
-                 model=_model_of(state), qid=qid, ok=True)
+                 model=model, qid=qid, ok=True)
 
     # 呼叫端已指定市場（UI 按鈕點選）時不得被重抽的結果蓋掉——問句本身沒有市場字樣，
     # 重抽必然回 None，等於把使用者剛按下的選擇丟掉又問一次
