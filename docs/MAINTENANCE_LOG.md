@@ -11,24 +11,34 @@
    **預期做法**：`generate` 產出後掃一遍，比對實際欄名與 `allowed_fields` 的預期集合、檢查免責聲明存在、檢查 `[來源N]` 的 N 落在 `retrieved` 範圍內，違規只寫 log 不擋輸出（品質問題不該讓使用者拿不到答案）。這比繼續疊文案有長期價值——文案改動的效果無法回歸測試，log 可以。難度：小至中。
 2. **`[即時市場數據]` 被當成引用標記**（`src/i18n.py` 的 `trend_rules_common`、`src/app.py` 的 `_link_citations` 與來源列組裝）
    引用規則只允許 `[來源1]`～`[來源N]`，且 prompt 明文說行情快照不參與來源編號，但模型自創了 `[即時市場數據]` 這個標記。**這不是幻覺**——被標注的數字都真實來自快照，問題是它違反格式契約：`app.py` 依編號組出的來源清單對不上這個標記。2026-09-18 比對本次改動前後的輸出確認為**既有行為**，非本次引入。屬格式契約問題，該由上一項的 post-check 處理，不是再加一句文案。難度：小（併入上一項）。
-3. **新聞來源的視窗限制與本地留存**（`src/update.py` 的 `fetch_news`、`MARKET_SOURCES`）
+3. **chunk 策略：切法、大小與表格處理（需 golden set 才動得了）**（`src/ingest.py` 的 `chunk_text`、`config.CHUNK_SIZE`）
+   現在是單層 `RecursiveCharacterTextSplitter`，全部來源共用一組參數，表格與敘事不分流。下面三件事綁在同一輪做，因為**它們共用同一組 golden set 與同一次重灌全庫**，分開做等於把最貴的部分做兩次：
+   **(a) `CHUNK_SIZE` A/B**：候選 384／600／900 配 overlap 50／75／100。**但單位要先決定**：候選值是 token，現行 `CHUNK_SIZE=800` 是字元。中文約 1 字 1 token、英文約 4 字元 1 token——**同一個數字對中英文差三到四倍**，而本專案同時吃台股中文 PDF 與 SEC 英文 filing，照抄會得到一組對其中一邊沒意義的實驗。要嘛換 token-based splitter，要嘛中英文分別定值。
+   **(b) parent-child**：child（400-700 token）進 embedding 供檢索，parent（1500-3000 token，一個完整小節）在組 context 時補回，讓 LLM 不只看到孤立的一句數字；child 的 embedding 文字前綴章節路徑與期間可提高召回。**最大的一塊是 parser**：章節路徑需要 layout-aware parsing，現行 `pypdf.extract_text()` 拿不到標題層級，等於換 parser；`doc_chunks` 也要加 parent 關聯與章節欄位。
+   **(c) 表格獨立處理**：row-group 切分（每 10-30 列一塊，每塊重複表頭與欄名，保留單位、期間、註腳，不在 row 中間切斷）。**收益集中在台股 MOPS PDF 那一軌**——美股的精準數字已由 `fetch_sec_financials` 的 XBRL 那一軌解掉，且 09-19 的結論正是讓 XBRL 塊排第 1，對美股做表格 chunking 是重複投資。
+   **前置條件，缺一不可**：golden set 50-100 題，至少涵蓋單一數值、年增率計算、跨年度比較、表格問答、註腳問答、管理層歸因、風險因素、同詞多章節歧義八類；量 Recall@5／@10、context precision、citation 正確率、表格數值正確率、token 成本與延遲。可擴充 `tests/eval_data/rag_annotations.json` 與 `tests/eval_rag_retrieval.py` 的既有標注集模式，不必另建框架。
+   **改參數要重灌全庫**：新舊塊混在同一張表裡相似度不可比，檢索結果無法解讀；重灌會丟掉現有資料狀態（含 JPM 1533 塊、SPCX 434 塊）。
+   **與 `EMBED_BATCH_SIZE` 有交互作用**：塊變大則總塊數下降，而 600 批次已實測會抖——調完 `CHUNK_SIZE` 後批次值要重驗，不能沿用 400。
+   **不要只靠 dense**：財報同時有語意與精確字詞／數字查詢，可加 BM25（Postgres 的 `tsvector`，但中文分詞要另外處理）以 RRF 合併，再接 reranker 留 top 5-8。**但 reranker 要先過延遲預算**——單題已 186-470 秒，多一個模型多一段延遲。這條可獨立於 (a)(b)(c) 之後再評估。
+   難度：大（唯一一項需要換 parser 並改 schema 的）。
+4. **新聞來源的視窗限制與本地留存**（`src/update.py` 的 `fetch_news`、`MARKET_SOURCES`）
    新聞只有 Yahoo Finance RSS 一個來源，而該 feed 只回傳最近數篇：2026-09-18 補抓 ASML 時一次寫入 67 筆 chunk 把 65 天的缺口補平，但使用者指名的 09-08 那則（台積電與 ASML 的 High NA 光罩合作）已被更新的新聞擠出視窗，補抓機制正常運作仍取不到。**缺口補得回來，錯過的視窗補不回來**，且單一來源意味著該來源改版或擋爬就完全沒有新聞。
    **預期做法**依序為：抓到的每則新聞落地保存（標題、發布時間、url、來源、摘要），查詢優先走自己的庫；新增來源並行（Google News RSS 可關鍵字過濾，yfinance `get_news`、Finnhub 有免費額度），Yahoo 不再是唯一來源；時間分層——最近 7 天走即時 API、7 天以上讀本地留存，不必每次都打外部；跨來源以「標題相似度 + 發布時間 ±2 小時」去重；熱門標的每 1-2 小時抓一次並加上 retry 與隨機延遲。難度：中至大，可按上述順序分批做，第一項單獨做就有價值。
-4. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:124-125`）
+5. **README Demo / Screenshot 補齊**（`README.md:12-13`, `:124-125`）
    目前為 TODO，先跳過晚點再補。難度：小（0.5-1 天）。
-5. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
+6. **數字類查詢的直答通道**（`src/graph.py` 的 `assemble`/`generate`、`src/mcp_server.py`）
    官方 OpenAPI 取得的結構化財報數字目前與 PDF 文字一樣進 `doc_chunks`，走同一條向量檢索路徑。「台積電最新一季 EPS 多少」這類純數字問題其實不需要 embedding 相似度比對——資料庫裡就有確定的那一格，繞過檢索可同時降低延遲與消除檢索誤差。要做需新增一個直查結構化數字的 MCP tool，並調整 `assemble`/`generate` 的 context 組裝與引用編號邏輯。**前置問題**：直答的數字若不進 `retrieved` 就沒有 `[來源N]` 編號，牴觸決策卡「不得編造資料中沒有的數字」的反幻覺規則（`src/i18n.py` 的 `trend_rules_common`），需先決定這類數字如何標註出處。影響面大，刻意獨立處理。
-6. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
+7. **雙掛牌對照表改為 API 查詢 + 落地快取**（`src/tickers.py` 的 `TW_US_DUAL_LISTED`）
    目前台美雙掛牌（台積電＝2330／TSM）的對應關係是寫死的靜態 dict，四檔手動維護。台股 ADR 檔數少且極少變動，靜態表在現階段夠用且零延遲，但新增標的要改程式。預期做法是改為 API 查詢後落地快取（優先讀資料表、查不到才打 API）。**卡在資料來源**：既有的 yfinance 與兩個官方 OpenAPI 都沒有 ADR 對應欄位，靠公司名稱模糊比對不穩，須先找到可靠端點才值得動工。在那之前往靜態表加一行即可。
-7. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
+8. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
-8. **單一公司內的來源補抓改為並行**（`src/graph.py` 的 `fetch_missing_data`）— **擱置，等待辦 11**
-   **先別做**：`for call in calls` 是序列沒錯，但 2026-09-19 實測 n=5（已排除 2 次 embedding 整批失敗），補抓耗時中位 69% 花在 embedding（`ingest_text` 打本地 Ollama，範圍 59-80%）。並行四個來源不會讓 embedding 並行，只會在同一個 Ollama 前排隊：序列中位 67.6s，假設來源彼此獨立的理想並行是 42.7s，但把 embedding 排隊算進去只到 53.4s——實得 14.2s（21%），相對 `generate` 中位 202.7s（待辦 11）不值得動。
+9. **單一公司內的來源補抓改為並行**（`src/graph.py` 的 `fetch_missing_data`）— **擱置，等待辦 12**
+   **先別做**：`for call in calls` 是序列沒錯，但 2026-09-19 實測 n=5（已排除 2 次 embedding 整批失敗），補抓耗時中位 69% 花在 embedding（`ingest_text` 打本地 Ollama，範圍 59-80%）。並行四個來源不會讓 embedding 並行，只會在同一個 Ollama 前排隊：序列中位 67.6s，假設來源彼此獨立的理想並行是 42.7s，但把 embedding 排隊算進去只到 53.4s——實得 14.2s（21%），相對 `generate` 中位 202.7s（待辦 12）不值得動。
    **該重量了**：最慢的一律是 `calls[1]`（`fetch_mops`／`fetch_edgar`，5/5），而它慢在 embedding——GOOGL 57.8s 裡 53.7s、NVDA 41.7s 裡 39.1s。`EMBED_BATCH_SIZE` 已於 2026-09-19 定案為 400，**但實測顯示分批不會讓 embedding 變快**（100／200／400 耗時相同，成本在 token 數不在呼叫次數），所以 embedding 仍是主因、本項的結論預期不變。要推翻得拿新的 n=5 數據，不能靠推導。
-   **先做待辦 11**：這 67.6s 難受的是全程無回饋，不是長度本身。待辦 11 把補抓的逐來源完成事件送到顯示層後再回頭看——有進度可看時，14.2s 大概永遠不值得換 `calls` 順序語意的改動風險。
+   **先做待辦 12**：這 67.6s 難受的是全程無回饋，不是長度本身。待辦 12 把補抓的逐來源完成事件送到顯示層後再回頭看——有進度可看時，14.2s 大概永遠不值得換 `calls` 順序語意的改動風險。
    **屆時要改的**：`ThreadPoolExecutor`（前例 `src/market.py:113` 的 `get_market_snapshots`），且 `has_report` 的 `calls[-1:]`（`graph.py:661`）要同時改顯式條件——並行後 `calls` 沒有順序語意。
    **原標題的「多標的」是假問題**：跨公司早已並行（`fetch_company_data` 以單公司為單位呼叫，`src/mcp_server.py:190`；`ToolNode` 以 `asyncio.gather` 併發同輪 tool call）。舊文依據的「09-18 約 45 秒」是單一樣本且未分辨層級。
-9. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
+10. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
    logfile 已逐節點記錄耗時（`rewrite_question`／`extract_filters`／`agent`／`generate`／`retrieve`），同一題以 `qid` 串連。需累積一段時間的真實使用資料後，分析各節點耗時分佈：已知瓶頸是本地模型生成，但**佔比多少尚未用數據確認**，這是決定下一輪優化該投在哪裡的依據（例如若 `agent` 的 tool loop 輪數才是主因，優化 `generate` 就是做白工）。分析方式：`data/logs/*.log` 是 JSON Lines，可直接用 pandas 或 jq 彙總。
 
    **現況（2026-09-19 重數）：`generate` 16 筆，門檻未達。**
@@ -46,21 +56,21 @@
    **「瓶頸是 generate」開始動搖，但還不能下結論。** `agent` 累計佔比反而略高，原因是一題跑多輪（輪數中位數 3、最多 12，每題累計中位數 137.8 秒）。改算「每題內佔比」則 `generate` 46.6%／`agent` 34.2%，兩種算法排序相反——這本身就代表樣本不足。
 
    **門檻維持約 30 筆，並需補題型。** 16 筆裡 4 筆是同一 `qid` 重跑，獨立題目僅 10 題且集中在補抓路徑驗收。下次一併看 agent 輪數：那題 12 輪、總耗時 2168.9 秒的離群若能複現，比 `generate` 更該先查。
-10. **`answer_shape` 誤判率的量測**（`src/graph.py` 的 `extract_filters`）
+11. **`answer_shape` 誤判率的量測**（`src/graph.py` 的 `extract_filters`）
    目前 `answer_shape` 預設 `"full"` 是靠「誤判成 news 會讓投資題失去素材，代價不對稱」的風險論證選的，不是靠實測錯誤率。2026-09-17 的 A/B 中 5 題 20 次分類全部正確，但 5 題不構成誤判率估計。要驗證這個預設是否過於保守（若實際上大多數新聞題都被判成 `full`，欄位裁剪的節省就吃不到），需要一份人工標註的問題集——這也是目前唯一還會讓那次改動效益歸零的未知數。難度：小，但要先花時間標題目。
    2026-09-19 更新：這項要的人工標註問題集已隨 2026-09-19 章節的抽取模型 A/B 建好（`tests/eval_data/extract_filters_annotations.json`，28 題，其中 26 題標了 `answer_shape`，範疇外的兩題不計分）。9b 與 4b 兩臂都是 26/26 全對，**沒有量到任何誤判**，預設值保守與否的疑慮到此解除。但題組是照抽取欄位的覆蓋面設計的，不是照「news 與 full 的邊界」設計，真正貼著邊界的問法（如「這則新聞會不會影響股價」）只有 S3 一題，故本項不關閉，改為**降級為低優先**：要再往下驗，補的是邊界題而非題數。
-11. **執行過程改為漸進回饋**（`src/graph.py` 的 `generate` 與 `fetch_missing_data`、`src/app.py`／`src/cli.py` 顯示層）
+12. **執行過程改為漸進回饋**（`src/graph.py` 的 `generate` 與 `fetch_missing_data`、`src/app.py`／`src/cli.py` 顯示層）
    使用者現在從送出問題到看到第一個字，全程空畫面。兩段都要改，兩段都只改「什麼時候給回饋」，不減總耗時：
    **生成**：`generate` 用 `.invoke()` 等完整回應才回傳（中位 202.7s）。改 `.stream()` 後首字時間降到首個 token。這與 09-17 的欄位裁剪正交——一個減總量、一個改感受，可疊加。
    **補抓**：`fetch_missing_data` 的四個來源逐一完成時已各發一筆 `auto_fetch 單一來源完成`（`graph.py:673`），但只進 logfile。把它送到顯示層，補抓那段中位 67.6s 就從乾等變成看得到進度。成本低於生成那段，事件本身不用新寫。
    兩段合併做是因為改動面重疊：都動 `generate` 的回傳介面與同一套顯示層（Chainlit 有現成的 token streaming 支援），拆開等於同一處改兩遍。另需確認 Langfuse 的 span 在 streaming 下仍能正確收尾。難度：中（1-2 天）。
-12. **決策卡的 `## 📈` 結構邊界改用非 emoji 標記**（`src/i18n.py` 的 `trend_*` 系列、`src/graph.py` 的 `assemble`）
+13. **決策卡的 `## 📈` 結構邊界改用非 emoji 標記**（`src/i18n.py` 的 `trend_*` 系列、`src/graph.py` 的 `assemble`）
    決策卡各欄位目前以 emoji 標題（`## 📈` 等）當結構邊界，下游若要解析欄位就得依賴 emoji 字面值。2026-09-17 改為逐欄組裝 prompt 時刻意**沒有**一併處理，以免把「換欄位邊界」的風險混進效能改動裡。單獨做的前置條件是先確認有沒有下游真的在解析這些標題——若只是給人看的顯示，就屬於「不必做」而非「待辦」。
-13. **跨市場比較題的檢索素材落差**（`src/graph.py` 的 `retrieve_context`）
+14. **跨市場比較題的檢索素材落差**（`src/graph.py` 的 `retrieve_context`）
     語料以台股為主，問「NVDA 與聯發科比較」時美股標的往往只有 yfinance 行情數字、沒有任何敘事文件，比較表中該標的的定性欄位只能誠實寫「檢索資料不足」。誠實留白優於編造（反幻覺原則優先），但比較表半邊空白的體驗不好。這是**檢索面的資料覆蓋問題，不是生成面的 bug**，要解得從語料來源下手（增加美股新聞／財報來源），不是改 prompt。難度：中至大，視新增來源而定。
-14. **`dual_market_warning` 措辭不精確且觸發條件過窄**（`src/i18n.py` 的 `dual_market_warning`、`src/graph.py` 的 `generate`）
+15. **`dual_market_warning` 措辭不精確且觸發條件過窄**（`src/i18n.py` 的 `dual_market_warning`、`src/graph.py` 的 `generate`）
     措辭把台美雙掛牌的 ADR 一律當成美元計價來提醒，實際上 ADR 的計價與換算關係比這句話複雜。另外觸發條件是「單一公司且為雙掛牌且 `market == "both"`」，多標的比較題不會觸發——但跨市場比較正是最需要提醒幣別的場合。2026-09-18 在 `market.py` 的快照加入 `currency` 欄後，幣別資訊已直接進 prompt，此條的急迫性下降，但措辭錯誤本身還在。難度：小。
-15. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
+16. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
    目前只記錄長度（`prompt_chars`／`answer_chars`）而非內容，故無個資疑慮。若未來為了回測要記錄 prompt／回應全文，需先決定保留天數與去識別化方式——專案已有 `NEWS_RETENTION_DAYS`／`THREAD_RETENTION_DAYS` 的保留期慣例可循（後者的註解明確指出「對話含提問內容，屬個資，留短一點」）。另需觀測 `LOG_BACKUP_DAYS=30` 是否合適：日檔大小取決於實際使用量，累積一段時間後回頭確認磁碟佔用與「回測要看多久以前」的實際需求是否匹配。
 
 ## 保持現狀（已評估，判斷暫不處理）
@@ -895,6 +905,8 @@ JPM 以新邏輯重抓後留下 8 條當期數字（淨利 21,155,000,000、稀�
 | 檢索未退化 | 「JPM 最新財報重點？」與「SPCX 最新財報重點？」皆由 XBRL 塊排第 1（sim 0.647／0.645），EDGAR 全文補 2-5 名。上一章節的保留席位機制在 1533 塊新增競爭者之下仍然成立 |
 | 分批 self-check | `tests/test_ingest.py` 新增 4 組斷言：依 `EMBED_BATCH_SIZE` 切批且向量數與塊數一致（錯位會讓 content 配到別人的向量）、`0` 不分批、單批失敗重試後成功、連兩次失敗往上拋 |
 | 全套測試 | 容器內 28/28 通過 |
+
+**一併開出的待辦**：`CHUNK_SIZE` 的 A/B（384／600／900）本次刻意不做，因為它與分批的驗收會互相汙染——塊變大則總塊數下降，JPM 成功就分不清是分批修好的還是剛好避開失敗區，而 600 批次已實測會抖。它連同 parent-child 與表格切分合為待辦第 3 項，三者共用同一組 golden set 與同一次重灌全庫。
 
 **環境注意事項**：`finance_ai_assistant_pg` 沒有對外 port mapping，DB 只在 compose 網路內連得到，本機直接跑 `fetch_edgar` 會 `PoolTimeout`；且 `src/` 是烤進 image 的（只有 `data/` 是 bind mount），故驗證未提交的改動需先 `docker cp` 進容器。本機跑測試會有 18/28 因缺套件（`langchain_mcp_adapters`、`langfuse`）而失敗，與改動無關——**測試基準是容器內的 28/28**。
 
