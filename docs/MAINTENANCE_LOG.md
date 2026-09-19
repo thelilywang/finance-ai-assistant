@@ -32,11 +32,10 @@
    目前台美雙掛牌（台積電＝2330／TSM）的對應關係是寫死的靜態 dict，四檔手動維護。台股 ADR 檔數少且極少變動，靜態表在現階段夠用且零延遲，但新增標的要改程式。預期做法是改為 API 查詢後落地快取（優先讀資料表、查不到才打 API）。**卡在資料來源**：既有的 yfinance 與兩個官方 OpenAPI 都沒有 ADR 對應欄位，靠公司名稱模糊比對不穩，須先找到可靠端點才值得動工。在那之前往靜態表加一行即可。
 8. **MCP server 未對外開放與 healthcheck**（`docker-compose.yml`）
    `mcp-server` 目前只在 docker 內部網路提供服務，未映射 port 到 host，Claude Desktop 等外部 client 尚無法連入（Bearer 驗證已就緒，開放時即可把關）。另外 FastMCP 沒有現成的 health endpoint，`depends_on` 只能用 `service_started`，實際就緒檢查靠 app 端每次開對話時連線（失敗會顯示錯誤訊息）。等真的需要外部存取或遇到啟動競態時再處理。
-9. **單一公司內的來源補抓改為並行**（`src/graph.py` 的 `fetch_missing_data`）— **擱置，等待辦 12**
-   **先別做**：`for call in calls` 是序列沒錯，但 2026-09-19 實測 n=5（已排除 2 次 embedding 整批失敗），補抓耗時中位 69% 花在 embedding（`ingest_text` 打本地 Ollama，範圍 59-80%）。並行四個來源不會讓 embedding 並行，只會在同一個 Ollama 前排隊：序列中位 67.6s，假設來源彼此獨立的理想並行是 42.7s，但把 embedding 排隊算進去只到 53.4s——實得 14.2s（21%），相對 `generate` 中位 202.7s（待辦 12）不值得動。
-   **該重量了**：最慢的一律是 `calls[1]`（`fetch_mops`／`fetch_edgar`，5/5），而它慢在 embedding——GOOGL 57.8s 裡 53.7s、NVDA 41.7s 裡 39.1s。`EMBED_BATCH_SIZE` 已於 2026-09-19 定案為 400，**但實測顯示分批不會讓 embedding 變快**（100／200／400 耗時相同，成本在 token 數不在呼叫次數），所以 embedding 仍是主因、本項的結論預期不變。要推翻得拿新的 n=5 數據，不能靠推導。
-   **先做待辦 12**：這 67.6s 難受的是全程無回饋，不是長度本身。待辦 12 把補抓的逐來源完成事件送到顯示層後再回頭看——有進度可看時，14.2s 大概永遠不值得換 `calls` 順序語意的改動風險。
-   **屆時要改的**：`ThreadPoolExecutor`（前例 `src/market.py:113` 的 `get_market_snapshots`），且 `has_report` 的 `calls[-1:]`（`graph.py:661`）要同時改顯式條件——並行後 `calls` 沒有順序語意。
+9. **單一公司內的來源補抓改為並行**（`src/graph.py` 的 `fetch_missing_data`）— **2026-09-19 重估後結論不變，有觸發條件才動**
+   `for call in calls` 是序列沒錯，但並行省不到多少：2026-09-19 實測 n=5，補抓耗時中位 **69%** 花在 embedding（`ingest_text` 打本地 Ollama，範圍 59-80%；最慢的一律是 `fetch_mops`／`fetch_edgar` 那一筆，5/5，如 GOOGL 57.8s 裡 53.7s、NVDA 41.7s 裡 39.1s 都在 embedding），而並行四個來源不會讓 embedding 並行，只會在同一個 Ollama 前排隊——序列中位 67.6s，把排隊算進去的並行是 53.4s，**實得 14.2s（21%）**。`EMBED_BATCH_SIZE` 於同日定案為 400 時另測到分批不會讓 embedding 變快（100／200／400 耗時相同，成本在 token 數不在呼叫次數），故 embedding 是主因這點預期不變。
+   **卡在收益太小，不是卡在做法。** 做法很清楚：改用 `ThreadPoolExecutor`（前例 `src/market.py:113` 的 `get_market_snapshots`），同時把 `has_report` 的 `calls[-1:]`（`graph.py:661`）改成顯式條件——並行後 `calls` 沒有順序語意。另外補抓期間已有「約 1-3 分鐘」的預期提示（詳見 2026-09-19 章節第四節），乾等的難受解掉大半，14.2s 更不值得換順序語意的改動風險。
+   **觸發條件**：使用者實際反映補抓仍然難等，或 embedding 佔比顯著下降（屆時要拿新的 n=5 數據，不能靠推導）。
    **原標題的「多標的」是假問題**：跨公司早已並行（`fetch_company_data` 以單公司為單位呼叫，`src/mcp_server.py:190`；`ToolNode` 以 `asyncio.gather` 併發同輪 tool call）。舊文依據的「09-18 約 45 秒」是單一樣本且未分辨層級。
 10. **AI 執行時間的持續觀測與回測**（`data/logs/`、`src/logging_setup.py`）— **持續性項目，不是做完就關掉**
    logfile 已逐節點記錄耗時（`rewrite_question`／`extract_filters`／`agent`／`generate`／`retrieve`），同一題以 `qid` 串連。需累積一段時間的真實使用資料後，分析各節點耗時分佈：已知瓶頸是本地模型生成，但**佔比多少尚未用數據確認**，這是決定下一輪優化該投在哪裡的依據（例如若 `agent` 的 tool loop 輪數才是主因，優化 `generate` 就是做白工）。分析方式：`data/logs/*.log` 是 JSON Lines，可直接用 pandas 或 jq 彙總。
@@ -59,19 +58,18 @@
 11. **`answer_shape` 誤判率的量測**（`src/graph.py` 的 `extract_filters`）
    目前 `answer_shape` 預設 `"full"` 是靠「誤判成 news 會讓投資題失去素材，代價不對稱」的風險論證選的，不是靠實測錯誤率。2026-09-17 的 A/B 中 5 題 20 次分類全部正確，但 5 題不構成誤判率估計。要驗證這個預設是否過於保守（若實際上大多數新聞題都被判成 `full`，欄位裁剪的節省就吃不到），需要一份人工標註的問題集——這也是目前唯一還會讓那次改動效益歸零的未知數。難度：小，但要先花時間標題目。
    2026-09-19 更新：這項要的人工標註問題集已隨 2026-09-19 章節的抽取模型 A/B 建好（`tests/eval_data/extract_filters_annotations.json`，28 題，其中 26 題標了 `answer_shape`，範疇外的兩題不計分）。9b 與 4b 兩臂都是 26/26 全對，**沒有量到任何誤判**，預設值保守與否的疑慮到此解除。但題組是照抽取欄位的覆蓋面設計的，不是照「news 與 full 的邊界」設計，真正貼著邊界的問法（如「這則新聞會不會影響股價」）只有 S3 一題，故本項不關閉，改為**降級為低優先**：要再往下驗，補的是邊界題而非題數。
-12. **執行過程改為漸進回饋**（`src/graph.py` 的 `generate` 與 `fetch_missing_data`、`src/app.py`／`src/cli.py` 顯示層）
-   使用者現在從送出問題到看到第一個字，全程空畫面。兩段都要改，兩段都只改「什麼時候給回饋」，不減總耗時：
-   **生成**：`generate` 用 `.invoke()` 等完整回應才回傳（中位 202.7s）。改 `.stream()` 後首字時間降到首個 token。這與 09-17 的欄位裁剪正交——一個減總量、一個改感受，可疊加。
-   **補抓**：`fetch_missing_data` 的四個來源逐一完成時已各發一筆 `auto_fetch 單一來源完成`（`graph.py:673`），但只進 logfile。把它送到顯示層，補抓那段中位 67.6s 就從乾等變成看得到進度。成本低於生成那段，事件本身不用新寫。
-   兩段合併做是因為改動面重疊：都動 `generate` 的回傳介面與同一套顯示層（Chainlit 有現成的 token streaming 支援），拆開等於同一處改兩遍。另需確認 Langfuse 的 span 在 streaming 下仍能正確收尾。難度：中（1-2 天）。
-13. **決策卡的 `## 📈` 結構邊界改用非 emoji 標記**（`src/i18n.py` 的 `trend_*` 系列、`src/graph.py` 的 `assemble`）
+12. **決策卡的 `## 📈` 結構邊界改用非 emoji 標記**（`src/i18n.py` 的 `trend_*` 系列、`src/graph.py` 的 `assemble`）
    決策卡各欄位目前以 emoji 標題（`## 📈` 等）當結構邊界，下游若要解析欄位就得依賴 emoji 字面值。2026-09-17 改為逐欄組裝 prompt 時刻意**沒有**一併處理，以免把「換欄位邊界」的風險混進效能改動裡。單獨做的前置條件是先確認有沒有下游真的在解析這些標題——若只是給人看的顯示，就屬於「不必做」而非「待辦」。
-14. **跨市場比較題的檢索素材落差**（`src/graph.py` 的 `retrieve_context`）
+13. **跨市場比較題的檢索素材落差**（`src/graph.py` 的 `retrieve_context`）
     語料以台股為主，問「NVDA 與聯發科比較」時美股標的往往只有 yfinance 行情數字、沒有任何敘事文件，比較表中該標的的定性欄位只能誠實寫「檢索資料不足」。誠實留白優於編造（反幻覺原則優先），但比較表半邊空白的體驗不好。這是**檢索面的資料覆蓋問題，不是生成面的 bug**，要解得從語料來源下手（增加美股新聞／財報來源），不是改 prompt。難度：中至大，視新增來源而定。
-15. **`dual_market_warning` 措辭不精確且觸發條件過窄**（`src/i18n.py` 的 `dual_market_warning`、`src/graph.py` 的 `generate`）
+14. **`dual_market_warning` 措辭不精確且觸發條件過窄**（`src/i18n.py` 的 `dual_market_warning`、`src/graph.py` 的 `generate`）
     措辭把台美雙掛牌的 ADR 一律當成美元計價來提醒，實際上 ADR 的計價與換算關係比這句話複雜。另外觸發條件是「單一公司且為雙掛牌且 `market == "both"`」，多標的比較題不會觸發——但跨市場比較正是最需要提醒幣別的場合。2026-09-18 在 `market.py` 的快照加入 `currency` 欄後，幣別資訊已直接進 prompt，此條的急迫性下降，但措辭錯誤本身還在。難度：小。
-16. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
+15. **logfile 保留策略與敏感資料**（`config.LOG_BACKUP_DAYS`）
    目前只記錄長度（`prompt_chars`／`answer_chars`）而非內容，故無個資疑慮。若未來為了回測要記錄 prompt／回應全文，需先決定保留天數與去識別化方式——專案已有 `NEWS_RETENTION_DAYS`／`THREAD_RETENTION_DAYS` 的保留期慣例可循（後者的註解明確指出「對話含提問內容，屬個資，留短一點」）。另需觀測 `LOG_BACKUP_DAYS=30` 是否合適：日檔大小取決於實際使用量，累積一段時間後回頭確認磁碟佔用與「回測要看多久以前」的實際需求是否匹配。
+16. **生成的首字延遲（TTFT）沒有量測數字**（`src/graph.py` 的 `generate`、`src/logging_setup.py` 的 `log_duration`）
+   `generate` 目前只記錄整段生成的 `elapsed_ms` 與 `answer_chars`，**首字延遲一個數字都沒有**。這是唯一一個「非得在節點內部拿到 token 才量得到」的需求——`app.py` 那端量到的首字含 graph 前段所有節點，切不出生成本身的等待；而專案慣例要求效能判斷須有實測數據、不接受純推導（`.stream()` 的其他用途已判定不採用，詳見「保持現狀」同名項目）。
+   **為何還沒做**：現有的延遲討論（見「保持現狀」的「回應延遲過長」一項）把生成當成單一區塊處理，結論「剩下的槓桿是輸出量」隱含「每秒約 10 字是均勻的」這個未驗證的假設。若首字其實佔掉可觀的固定成本，該結論就得改寫——但在沒有數字之前無從判斷值不值得動。
+   **卡在哪**：卡在改法與收益不對稱。要量到就得把 `generate` 改成消費 chunk（首個 chunk 抵達時記一筆），而那正是「保持現狀」列出代價的那個改動；為了一個觀測指標付整個節點的重構成本，除非延遲重回議程否則不划算。**門檻**：下次要動生成延遲時先做這項，別再憑推導估首字。難度：小（改動集中在 `generate` 一個函式），但需併同 `log_duration` 的欄位一起設計。
 
 ## 保持現狀（已評估，判斷暫不處理）
 
@@ -93,7 +91,9 @@
 
 - **回應延遲過長——輸入側架構已無可省，剩下的槓桿是輸出量**（`src/graph.py` 的 `generate` 節點）— 單題總耗時 186 至 470 秒，其中 `generate` 佔 90 至 160 秒（生成速度穩定在每秒約 10 字）。**輸入側**（context 大小、呼叫次數、模型選用）09-09 已收斂完畢：`_trim_for_llm` 裁掉 agent 迴圈重複傳遞的 context 只降低膨脹速率、不改善延遲；`route_after_tools` 在資料足夠時跳過第二輪 agent 決策是唯一入袋的結構性收益（該節點原佔 82 至 106 秒）；另三項已排除——決策卡字數約束 A/B 後反使輸出變長 35% 且遺漏免責聲明、合併 `rewrite_question`／`extract_filters` 僅佔 3%、換用較小或 MLX 版本的模型會先失去 tool calling 與結構化輸出能力。詳見 2026-09-08、09-09 章節。
 
-  **2026-09-17 推翻的是這條結論的適用範圍，不是數字**：當時寫成「屬硬體限制而非架構問題」，套用得太寬。每秒輸出 token 數確實受硬體限制，但**要寫多少字**是硬體不固定的自由變數——決策卡欄位依意圖與證據裁剪後，news 題實測字數降 36.5%、時間同向降 23.6%（詳見 09-17 章節）。仍然成立的是體感結論：121s 與 159s 同屬一個量級，砍總量改變不了「盯著空畫面等」這件事，那要靠 streaming（待辦第 11 項）。
+  **2026-09-17 推翻的是這條結論的適用範圍，不是數字**：當時寫成「屬硬體限制而非架構問題」，套用得太寬。每秒輸出 token 數確實受硬體限制，但**要寫多少字**是硬體不固定的自由變數——決策卡欄位依意圖與證據裁剪後，news 題實測字數降 36.5%、時間同向降 23.6%（詳見 09-17 章節）。仍然成立的是體感結論：121s 與 159s 同屬一個量級，砍總量改變不了「盯著空畫面等」這件事，那要靠 streaming——Chainlit 與 CLI 兩側皆已完成（逐 token 串流與分段進度顯示，補抓提示詳見 2026-09-19 章節第四節）。
+
+- **`generate` 節點內部改用 `.stream()`——評估後不採用**（`src/graph.py` 的 `generate`）— 2026-09-19 判斷不做。原假設是「節點用 `.invoke()` 等完整回應，所以前端拿不到逐字輸出」，這個因果不成立：LangGraph 的 `astream(stream_mode="messages")` 從底層 LLM 攔 token，節點內部寫 `.invoke()` 或 `.stream()` 對訂閱端毫無差別，逐 token 顯示早已在 `app.py` 運作，**改了收益為零**。代價則是節點要自己把 chunk 併回完整字串才能做引用編號與 `answer_chars` 記錄。**觸發條件**：節點內部真的需要邊生成邊對 token 做事時（見待辦第 16 項的首字延遲量測）。
 
 - **收緊 tool 呼叫輪數上限——2026-09-19 A/B 後撤下待辦，維持 4**（`src/graph.py` 的 `_MAX_TOOL_ROUNDS`、`agent_route`）— **這個值從來不是調校出來的**：它是把補資料決策交給 LLM 那次架構改造的配套（`ef76670`），用來取代舊的「補抓只准一次」那個結構上的迴圈保證，4 只是接手的保險絲額定值。原假設「最後一輪常是模型只回一句『我查完了』，收緊到 3 能省掉它」被實測推翻——十個樣本的輪數全落在 1 或 3，上限一次都沒被觸及。原因是 09-18 把「補哪一家」從模型手上收回程式之後（`b447d02`、`864e7ad`），唯一能撞到上限的那條循環（補抓後重查仍過期）斷在第 2 輪。上限因此降級為殘餘保險絲，只剩「擋住外部補不到新資料時的無限重試」這一個職責，而收緊到 3 恰好會截斷該降級情境。`config.MAX_TOOL_ROUNDS` 保留為環境變數，下次重測不必改程式碼。**觸發條件**：若日後 log 出現實際達到上限的題目，代表補抓失敗率上升，屆時該查的是補抓本身而非這個值。量測表與 A/B 汙染機制詳見 2026-09-19 章節。
 
@@ -104,6 +104,14 @@
 - **測試為手寫 assert script，非 pytest**（`tests/*.py`）— 目前覆蓋純函式與資料轉換層（`assemble`、`agent_route`、MCP tool 的回傳格式、`fetch_missing_data`、格式化函式等），`generate` 因直接耦合本地 LLM 未做 mock、無自動化覆蓋。轉 pytest 本身工程量小（1 天內），但要測生成節點需先做依賴注入（2-3 天+），現階段 CP 值不如上述待辦項目。
 - **LLM 選用 tool 的正確性無自動化測試**（`src/mcp_server.py` 的 tool 說明、`src/graph.py` 的 `_tool_llm`）— 「資料過期時會不會主動補抓」取決於模型行為，需真實 Ollama 呼叫且結果不保證重現，不適合寫成自動化斷言。目前靠端到端手動驗證，且需連續執行多次確認一致性（09-08 有過單次成功、重複執行皆失敗的實例）。模型換版、調整 tool 說明或改動 `_tool_llm` 的參數時都需重跑。
 - **MOPS 爬蟲改用 Playwright——評估後不採用**（`src/update.py`）— `t57sb01` 端點是純表單 POST，回傳可直接用 regex 解析的 HTML，不需要 JS 渲染或模擬瀏覽器互動，換工具不會提升穩定性。爬蟲本體仍依賴網站當前頁面結構，網站改版仍會失效，屬結構性限制。此判斷本身仍成立，但影響範圍已於 09-09 縮小：財報數字改由官方 OpenAPI 提供，爬蟲只剩文字敘述一項職責，掛掉不再等於該公司完全沒有台股財報資料。若未來 MOPS 移除直連表單端點，此判斷需重新評估。詳見 2026-09-04、09-09 章節。
+
+---
+
+## 待補紀錄
+
+後續每次修復或有新決策時，於本檔案新增一節（日期 + 標題），保留「做了什麼／為什麼／取捨」，不需重複貼完整程式碼片段，指向檔案路徑或函式名即可。新完成的修復項目同時要移出「目前待辦」或「保持現狀」區塊。
+
+---
 
 ---
 
@@ -382,7 +390,7 @@ rewrite_question → extract_filters → agent ⇄ tools → assemble → (gener
 
 AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間戳、只進 stdout，而 `docker logs` 有輪替上限、容器重啟即失去歷史——**無法回答「上週那一題為什麼跑了 400 秒」**，對一個以本地模型生成為瓶頸的專案等於放棄優化依據。
 
-改用標準庫 `logging` 輸出 JSON Lines 到已掛載的 `data/logs/`，四個 LLM 呼叫點與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid` 串連（設定細節見改動內容表）。**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦第 15 項）。
+改用標準庫 `logging` 輸出 JSON Lines 到已掛載的 `data/logs/`，四個 LLM 呼叫點與 `retrieve_context` 各記 `elapsed_ms`，同一題以 `qid` 串連（設定細節見改動內容表）。**只記長度不記內容**，避免把提問寫進 log（保留策略未定前不落地個資，見待辦的「logfile 保留策略與敏感資料」一項）。
 
 ### 檢索平行化與 query embedding 快取
 
@@ -434,7 +442,7 @@ AI 路徑原有 9 處 `print`（`graph.py` 8、`mcp_server.py` 1），無時間�
 
 `reason` 一律用短代碼（`no_cik`／`api_miss`／`mops_blocked` 等）而非自由文字，否則 `jq` 彙總不動——回測要問的是「哪一類失敗最多」。另有兩處是**降級**而非失敗：`cover_only`（6-K 退回封面頁）與 `no_chinese_doc`（MOPS 改抓替代檔）；後者仍回 `ok=True` 而內容是替代檔，logfile 是唯一能保留這個區別的地方。
 
-**已知限制**：只改紀錄的正確性，未改變任何抓取行為；補抓成功率要等實際使用累積後才答得出來（門檻見待辦第 9 項）。
+**已知限制**：只改紀錄的正確性，未改變任何抓取行為；補抓成功率要等實際使用累積後才答得出來（門檻見待辦的「AI 執行時間的持續觀測與回測」一項）。
 
 ### 接上自架 Langfuse 與節點層級追蹤
 
@@ -528,7 +536,7 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 **「不得整段棄權」改為測試斷言。** `conclusion`／`facts`／`inference`／`upside`／`risk` 五欄在任何形式、任何證據狀態下無條件輸出。寫在註解裡，下一個調 gating 邏輯的人隨時會破壞它，故 `tests/test_allowed_fields.py` 對「形式 × 證據集 × 行情狀態」的完整交叉組合逐一斷言這五欄必然存在。
 
-**取捨**：計時起點前移先獨立 commit（`34cfd5c`）——舊計時器緊貼 LLM 呼叫之前，而行情抓取就發生在那之前、同一節點之內，用它量兩段式的節省會完全看不見。拆開是因為這個修正獨立於 gating 正確，方案若因 A/B 數字不佳被 revert 也該留著。另有一項結構調整刻意未併入，以免把欄位邊界的風險混進效能改動（待辦第 12 項）。`answer_shape` 是對整個問句判定一次的回答形式，與標的數無關——多標的比較題同樣共用一個形式，`allowed_fields` 不讀 `companies`，故不在 09-16 那批「多標的時取第一家」的降級範圍內。
+**取捨**：計時起點前移先獨立 commit（`34cfd5c`）——舊計時器緊貼 LLM 呼叫之前，而行情抓取就發生在那之前、同一節點之內，用它量兩段式的節省會完全看不見。拆開是因為這個修正獨立於 gating 正確，方案若因 A/B 數字不佳被 revert 也該留著。另有一項結構調整刻意未併入，以免把欄位邊界的風險混進效能改動（待辦「決策卡的 `## 📈` 結構邊界改用非 emoji 標記」一項）。`answer_shape` 是對整個問句判定一次的回答形式，與標的數無關——多標的比較題同樣共用一個形式，`allowed_fields` 不讀 `companies`，故不在 09-16 那批「多標的時取第一家」的降級範圍內。
 
 **驗收**（同容器同模型 `qwen3.5:9b`，5 題 × 2 次 × 開關兩組共 20 次，0 失敗；`market` 預先指定以繞過雙掛牌反問，否則 2330 題會停在市場詢問而到不了 `generate`）：
 
@@ -546,7 +554,7 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 **已知限制——時間軸的雜訊底線高達 ±16 至 37%。** 同題同設定、**輸出字數完全相同**的兩次執行，節點總時長可以差 91.6s 對 118.9s（35%）。這意味著單次比較毫無意義，也是 `MAINTENANCE_LOG.md` 早先「generate 本身的浮動就蓋過了省下的時間」那條記錄的再次印證。本次結論之所以站得住，是因為：(1) 字數是確定性的；(2) news 的時間效果在 rep0（−20.0%）與 rep1（−27.8%）**各自獨立成立**；(3) 執行順序上 gating=1 固定跑在 gating=0 之前，而 rep0 整體比 rep1 慢約 19s，這個暖機梯度是**對 gating=1 不利**的方向，效果仍然存活。若未來要更精確的數字，需隨機化執行順序並加大樣本。**這個節省沒有改變體感的量級**，降低的是總量而非等待感受（見「保持現狀」該條的 09-17 補述）。
 
-**已知限制。** 本次 20 次執行中 `answer_shape` 分類全部正確（邊界題「新聞對股價的影響」如預期判為 `full`），但 5 題不構成誤判率的估計（待辦第 10 項）。另外 `generate` 的 logfile 累積筆數仍未達約 30 筆的分析門檻——本次是以腳本直接驅動 graph 並自行記錄，沒有經過 Chainlit，故未寫進 `app-*.log`（待辦第 9 項的門檻不因本次而推進）。
+**已知限制。** 本次 20 次執行中 `answer_shape` 分類全部正確（邊界題「新聞對股價的影響」如預期判為 `full`），但 5 題不構成誤判率的估計（見待辦的「`answer_shape` 誤判率的量測」一項）。另外 `generate` 的 logfile 累積筆數仍未達約 30 筆的分析門檻——本次是以腳本直接驅動 graph 並自行記錄，沒有經過 Chainlit，故未寫進 `app-*.log`（待辦的「AI 執行時間的持續觀測與回測」一項的門檻不因本次而推進）。
 
 ### 改動內容
 
@@ -697,13 +705,17 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 ---
 
-## 2026-09-19　補抓路徑的收斂與雙掛牌反問的繞過修復
+## 2026-09-19　補抓路徑收斂、財報期間維度、embedding 分批與進度回饋
 
-補抓路徑收斂之後，先回頭清掉兩筆因它而起的待辦：tool 輪數上限原本被懷疑訂太寬，實測發現它在指名修好後根本摸不到；`extract_filters` 換小模型則是趁著要建量測基礎時一併驗掉。接著轉向另一條線——雙掛牌反問被繞過，根因與 09-18 的補抓問題同型：**都是把該由程式判斷的事託付給模型的一個欄位**。收尾順手修掉兩個獨立缺陷（`plotly` 未鎖版本、財報日標記自始未成功），後者是雙掛牌驗收時暴露出來的。
+四件各自獨立的工作，共通脈絡是**補抓與檢索這條路徑上累積的待辦一次清掉**。先回頭驗掉兩筆因補抓收斂而起的參數疑慮（tool 輪數上限、抽取模型換小），並修掉同型的雙掛牌反問繞過；接著處理財報檢索只看相似度、不看期間的問題；查證期間問題時發現 JPM 的財報全文從未入庫，追出 embedding 整批失敗這個獨立 bug；最後補上補抓期間的進度回饋，那是前述 67.6s 等待唯一還沒解決的部分。
 
-### 一、tool 輪數上限 A/B：它是架構轉換的補償機制，已降級為殘餘保險絲
+### 一、補抓路徑的收斂與雙掛牌反問的繞過修復
 
-**結論：維持 4 不動，待辦撤下。** 收緊沒有效益，因為那個上限在 09-18 的指名修復之後根本摸不到——十次實測沒有一次觸及它。
+本節的雙掛牌修復與 09-18 的補抓問題同型：**都是把該由程式判斷的事託付給模型的一個欄位**。
+
+#### 一、tool 輪數上限 A/B：它是架構轉換的補償機制，已降級為殘餘保險絲
+
+**結論：維持 4 不動，待辦撤下**（判斷與觸發條件見「保持現狀」同名項目）。收緊沒有效益，因為那個上限在 09-18 的指名修復之後根本摸不到——十次實測沒有一次觸及它。
 
 **這個值的來歷解釋了為什麼。** `_MAX_TOOL_ROUNDS` 不是為了觀察到的問題而加的，是把補資料決策交給 LLM 那次架構改造的配套（`ef76670`，詳見 2026-09-07 章節）。在那之前補抓由 `fetched` 布林控制、只准執行一次，「不會無限迴圈」是**結構上的保證**；決策權交給模型之後這個保證消失了，只好用一個計數器兜底。**4 這個值當時沒有任何實測依據，它是保險絲的額定電流，不是調校過的參數**——這也是它後來被列為待辦的原因：看到 round 4 花 289.9 秒只回一句「我查完了」，很自然會懷疑是這個值訂太寬。A/B 依慣例做：同一份程式碼、同一個容器，上限由環境變數切換，兩臂各跑五題。
 
@@ -721,9 +733,9 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 這個判斷靠 LLM 端到端測不出來（要它「補抓失敗」不可控，且每跑一次就消耗掉下一輪需要的過期狀態），改在程式層固定住：`tests/test_route_after_tools.py` 補上四條斷言，上限值取自 `graph._MAX_TOOL_ROUNDS` 而非寫死，改設定值不會假過。
 
-### 二、`extract_filters` 換小模型：實測後不採用
+#### 二、`extract_filters` 換小模型：實測後不採用
 
-**結論：維持 9b。候選模型 qwen3.5:4b 快一倍，但認不得 MSFT 與 GOOGL。**
+**結論：維持 9b。候選模型 qwen3.5:4b 快一倍，但認不得 MSFT 與 GOOGL**（再評估門檻見「保持現狀」同名項目）。
 
 `extract_filters` 只做結構化抽取，不需要與生成同級的模型，是全流程 CP 值最差的一段，故列為換小模型的首選。但換模型的驗收不能只看耗時：抽錯代號的代價是整條流程查錯公司。為此新增 28 題固定答案題組（`tests/eval_data/extract_filters_annotations.json`）與逐欄計分的評估程式，兩臂以 `FILTERS_MODEL` 環境變數切換。各欄代價不對稱，故分開報而非合成單一分數——`companies` 錯會讓後續全部查錯公司，`in_scope` 錯會讓正常問題被拒答，兩者不該與市場欄相抵銷：
 
@@ -741,7 +753,7 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 **原假設是「多標的會讓小模型的抽取塌掉」，實測後被推翻。** 4b 在「微軟與 Google 的新聞？近期財報如何？」抽出空陣列，重跑三次皆同，故先懷疑標的數量。題組因此從 22 題擴到 28 題，多標的補成 8 題，並刻意設計成同句型換標的、同標的換句型的交叉組——結果同句型換成 Google 與 Amazon 就正常，同標的換句型照樣抽空。再往下拆到單標的，「微軟的新聞？」與「Google 的新聞？」各自也都回空陣列。**真正的原因是 4b 認不得這兩家的中英文名轉 ticker，與標的數量無關。** MSFT 與 GOOGL 不是冷門標的，而 `companies` 抽空會讓整條流程失去過濾條件，這是換模型換不掉的失分，故不採用。**取捨**：維持 9b 等於放棄每題約 6 秒的節省，換來主流美股代號不會被靜默丟掉。此判斷為元件級、跨日期仍成立，另記於「保持現狀」區。**已知限制**：兩臂各跑一次，僅對判定關鍵的失敗項補做三次重跑確認非雜訊，其餘欄位的離散度未測。
 
-### 三、雙掛牌反問被繞過：市場判斷移出 LLM
+#### 三、雙掛牌反問被繞過：市場判斷移出 LLM
 
 **根因不在抽取品質，在消費端的信任假設**：`resolve_market` 只在 `market is None` 時反問，等於把「使用者有沒有講市場」這個判斷完全託付給模型的一個欄位，而該欄位實測會違反 prompt 第 5 點自行填值。修法是不再信任它——新增 `_market_in_question`（`graph.py`）只認問句裡明白寫出的市場字樣（`台股`／`美股`／`ADR`／`兩邊` 等），`resolve_market` 在判斷是否反問前先用它覆寫 `market`，三條既有分支（反問、`both` 併陳、單邊對齊）的邏輯不動。不改 prompt 文案，理由見「保持現狀」區塊的第二次前例。
 
@@ -762,40 +774,21 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 **驗證**：28 題題組回歸，`companies` 由 27/28 升至 **28/28**，全欄皆對由 25/28 升至 **26/28**，其餘欄位無回歸，M3 兩欄皆 PASS。剩下的 S2、N8 兩題仍是 `market` 抽出 `'us'` 而標注為 `None`，兩題都不經過受害路徑（S2 非雙掛牌、N8 多標的短路），**無下游後果**，維持現狀。UI 端到端三條路徑全數實測通過（以 `qid` 串連節點，並對照 chainlit `steps` 表確認題目與按鈕）：
 
-| 問句 | 驗收點 | 結果 |
-|---|---|---|
-| 台積電最新財報重點？ | 出按鈕 → 選市場 → 不迴圈 | 通過。該 `qid` 下 `extract_filters` 只出現一次（舊碼為兩次） |
-| 2330 最新財報重點？ | 代號不算表態，仍須反問 | 通過。問句無市場字樣仍出按鈕，`**Selected:** Taiwan 2330` 後直接進 `agent`，無第二次抽取 |
-| 台積電台股美股兩邊比較一下 | 不反問、併陳兩市場 | 通過。無反問訊息，`agent` 一輪 `tool_calls=2`、`retrieved=15`（單一市場為 10），輸出台股與 ADR 並列 |
+端到端三輪手動驗收全數通過：問句含市場字樣不反問並併陳兩市場（`tool_calls=2`、`retrieved=15`，單一市場為 10），裸代號 `2330` 仍反問，選市場後直接進 `agent`——`extract_filters` 在該 `qid` 下只出現一次（舊碼為兩次）。
 
 這三輪另外暴露了兩件既有問題，都不是本次改動引入：ADR 側取到 2024 年報數字（留為待辦「財報檢索沒有期間維度」），以及財報日標記失敗（見下節，本次一併修掉）。
 
-### 四、兩個順手修掉的獨立缺陷
+#### 四、兩個順手修掉的獨立缺陷
 
 **圖表在瀏覽器端顯示 An error occurred——`plotly` 未鎖版本。** `requirements.txt` 的 `plotly` 沒有版本約束，為了跑本日實測而重建映像時解析成 7.0.0，而 chainlit 2.12.0 前端內嵌的是 plotly.js v2.30.1，讀不懂 plotly 7 的 figure JSON schema。後端完全正常——`pio.to_json(figure, validate=True)` 跑得出來，四張圖都正常序列化，log 裡沒有任何 traceback。**故障只在瀏覽器端可見**，這是它難查的原因。鎖成 `plotly<6` 後連帶要鎖 `kaleido`：1.x 要求 plotly >= 6.1.1，兩者互斥。過程中誤判過一次：先認定是 `SQLAlchemyDataLayer` 沒有 `storage_provider` 導致 `create_element` 拋錯，讀原始碼後發現它有 guard、會 early return 並印 warning——那條 warning 與空的 `elements` 表是既有現象（圖表不持久化），與本次錯誤無關。另有一項既有行為未處理：容器內 `report_pdf` 一律退回 `.md`，因為 `src/charts.py` 找的是 macOS host 的 Chrome 路徑。
 
 **財報日標記從來沒成功過。** log 長期出現 `財報日標記略過 ... error=unsupported operand type(s) for +: 'int' and 'str'`，圖表照樣產出、回答不中斷，只是少了「下次財報」那條虛線，屬靜默降級，所以一直沒人追。最初記成「`both` 情境炸開」，本次三輪實測推翻：單一市場兩輪與 `both` 一輪**三次同一則錯誤、同一家公司**，與市場別無關——這條路徑不是被併陳情境弄壞的，是自始就沒成功過。根因與日期資料無關，是 plotly 的 `add_vline(annotation_text=...)`：它要替標註算位置，把線的兩個 x 端點丟進 `sum()` 求平均（`shapeannotation._mean`），而 `sum()` 從 `0` 起加。本圖的 x 軸是 **ISO 日期字串**——那是為了 kaleido 的 orjson 不吃 pandas Timestamp 才轉的，於是 `0 + "2026-10-15"` 直接 TypeError。**兩個各自合理的決定撞在一起。** 改法是拆成 `add_shape` 畫線、`add_annotation` 自己指定位置，繞過那段平均，視覺結果相同。self-check 不連 yfinance（這個 bug 與資料無關），其中一條刻意**斷言 `add_vline` 仍然會炸**：哪天 plotly 修好了，那題會 FAIL 來提醒我們可以改回單行寫法。
 
-### 改動內容
-
-| 項目 | 涉及檔案與函式 | commit |
-|---|---|---|
-| 輪數上限 A/B 與 self-check | `config.py` 新增 `MAX_TOOL_ROUNDS`（環境變數，供同程式碼切換臂）、`graph.py` 的 `_MAX_TOOL_ROUNDS` 改讀它；`tests/test_route_after_tools.py` 補上輪數上限的四條斷言。實測後維持預設 4，參數保留是為了下次要動它時不必再改一次程式碼 | `2d20897` |
-| 抽取模型 A/B 與題組 | `config.py` 新增 `FILTERS_MODEL`（空字串沿用該輪主模型，供同程式碼同容器切換臂）、`graph.py` 的 `extract_filters` 改用它選模型；成功路徑的 `log_duration` 原本仍記主模型名，兩臂在 log 中無法分辨，一併改記實際模型。新增 `tests/eval_extract_filters.py` 逐欄計分與 `tests/eval_data/extract_filters_annotations.json` 題組；`tests/test_extracted_filters.py` 固定住「空值沿用主模型、有值才覆蓋」，避免開關寫錯時兩臂其實跑同一個模型而量出假的「沒有差異」。實測後維持 9b | `7d53347`／`c7ab5e9` |
-| 市場判斷移出 LLM | `graph.py` 新增 `_market_in_question` 與 `_TW_WORDS`／`_US_WORDS`／`_BOTH_WORDS`；`resolve_market` 在判斷反問前先覆寫 `market`，並把校正結果寫回 state——三條分支都回 `{**state, ...}` 帶著舊值，只改區域變數的話 `both` 會在這裡判對、到下游 `assemble`／`generate` 卻仍讀到舊的單邊值。同函式移除「company 出現在問句即依代號型別回 tw/us」的分支，連同已無用的 `company` 參數 | `f773e25` |
-| 雙掛牌收斂 | `graph.py` 新增 `_collapse_dual_listing`，接在 `extract_filters` 的 `companies` 後處理。只處理「剛好兩個元素且互為 peer」，`['2330','TSM','AAPL']` 這種一組雙掛牌加第三家語意真的模糊，不猜 | `f773e25` |
-| 已確認市場不重跑 | `graph.py` 的 `GraphState` 新增 `market_confirmed`；`rewrite_question`／`extract_filters` 各加早退；`app.py` 的重跑 state 補齊上一輪的 `doc_type`／`news_since_days`／`answer_shape`／`in_scope`。另新增 `answering_reask`：從歷史撿回公司代號的那條路沒有 `market_confirmed`，若被校正打回 `None` 會無限反問；`state.get("question", "")` 的預設值取空字串＝倒向反問這個保守側 | `f773e25` |
-| 反問 UI | `app.py` 的 `_pick_market` `timeout` 300 → 3600 並改寫 docstring；`i18n.py` 的 `ask_market` 中英文案改為只提按鈕 | `f773e25` |
-| self-check（雙掛牌） | 新增 `tests/test_resolve_market.py`（14 條斷言：收斂的正反例、代號仍反問的 `2330`／`TSM` 對稱兩題、`market_confirmed` 不被覆寫、多標的與非雙掛牌不受影響、兩個節點的早退）。`tests/test_dual_market.py` 的 `_FakeParsed` 補上 `answer_shape`，並為 6 個呼叫點補上含市場字樣的 `question`——市場判斷改以問句為準後，呼叫端給的 `market` 不再被無條件採信 | `f773e25` |
-| 圖表相依鎖版 | `requirements.txt`：`plotly` → `plotly<6`（跟著 chainlit 前端內嵌的 plotly.js v2.30.1），`kaleido` → `kaleido==0.2.1`（1.x 要求 plotly >= 6.1.1，與前者互斥） | `8b0c0e1` |
-| 財報日標記 | `charts.py` 的 `price_chart` 改用 `add_shape`＋`add_annotation` 取代 `add_vline(annotation_text=...)`，繞過 plotly 對字串 x 軸的平均計算；新增 `tests/test_chart_earnings_marker.py`（3 條斷言，含一條釘住 plotly 現行行為的反向斷言） | `f1c73ae` |
-| 題組標注 | `extract_filters_annotations.json` 的 D3 由 `null` 改為 `"tw"`：與 N3「比較一下 2330 和 2303 的表現」同為裸台股代號，prompt 第 5 點對兩者說的是同一句話，標注不該分歧。此欄量的是抽取端，與本次流程端的「代號不算表態」不衝突 | `f773e25` |
-
-## 2026-09-19　財報檢索的期間維度（待辦第 16 項）
+### 二、財報檢索的期間維度
 
 原待辦把台股側與美股側寫成「同一個病、兩個根因」，並提出「同一 company 內先取最新 `published_at` 的批次」作為共同解。**實測後前半成立、後半只對一半**：那個做法對台股側有效，對美股側是空操作，兩側最後用了兩種不同層級的修法。
 
-### 台股側：保留席位，而非改動排序
+#### 台股側：保留席位，而非改動排序
 
 病因確認為**顆粒度不對稱**。「2330 最新財報重點？」的純相似度排序裡，正確的 2026 Q2（`TWSE-API:2330:115Q2`，2026-08-01）那兩塊排在**第 242 名（0.3322）與第 248 名（0.3273）**，`TOP_K=5` 撈到的五塊全來自 2026-01 的舊 PDF（0.4905～0.4560）。結構化來源整季壓成 2 塊密集數字、PDF 散成上百塊自然語言，舊資料靠塊數多穩定勝出。
 
@@ -805,7 +798,7 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 驗證（重建映像後）：席位在位置 1-2 且內容正確（營收 2,404,483,690 仟元、基本 EPS 49.33），舊 PDF 五塊全部保留在 3-7，新聞配額不受影響。回歸題「2330 今年營收和去年同期比較如何？」與「2330 2025 年報的毛利率」各自仍拿到舊 chunk，**原待辦擔心的風險沒有發生**。
 
-### 美股側：期間維度是空操作，病灶在入庫端
+#### 美股側：期間維度是空操作，病灶在入庫端
 
 `SEC-XBRL:TSM:...541` 那塊寫的是 2024 年報數字。**檢索端的期間維度對它完全無效**：它與正確的 371 塊 EDGAR 全文**共用同一個 `published_at`（2026-08-14）**，因為兩者來自同一次申報——「最新一批」等於全部，席位不會啟動。實測 `retrieve_context('TSM 最新財報重點？')` 確認席位沒觸發、那塊仍排第 1。
 
@@ -815,13 +808,13 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 **逐條而非整份丟，是評估後推翻第一版實作的結果。** 第一版判斷「整份落後就不入庫」，理由是「同一份申報的正確內容由 `fetch_edgar` 那軌提供」。查證後這個前提不成立：全庫 12 家 XBRL 公司裡，**JPM 與 SPCX 的 EDGAR 全文塊數是 0**，整份丟等於這兩家完全沒有財報數字，而且是無聲歸零（只寫 log）。
 
-**那兩個 0 的成因事後查明，與當時的假設不同，在此更正**（結論不變，但因果不可沿用）。當時把 0 讀成「這兩家沒有 EDGAR 那一軌可接手」的外部事實，實際上兩家各有不同原因、都不是 SEC 沒資料：**SPCX 只是從未抓過**——補跑 `fetch_edgar('SPCX')` 一次就成功入庫 434 塊；**JPM 是 `ingest_text` 的 embedding 整批失敗**，1533 塊一次性送出時在 Ollama 端穩定失敗，且因錯誤型別不在 `fetch_edgar` 的攔截範圍而直接拋穿（已於同日修復，見下一章節）。所以「逐條濾而非整份丟」這個決定仍然正確——在該 bug 修好前 JPM 確實取不到 EDGAR 全文，逐條濾是當下唯一保得住它的做法——但支撐它的那個 0 是**我們自己造成的**，不是外部缺料。看到「某家 EDGAR 塊數為 0」時不要直接推論成外部沒有資料。JPM 本身也推翻了第一版註解裡「混合期不會發生」那句——它 13 條裡 11 條正好是當期，只有營業收入落後一年、現金及約當現金落後**八年**（2018-12-31，正是 `_pick_fact` docstring 早就警告過的停用概念型失分）。全份旗標把「2/13 錯」和 TSM 的「13/13 錯」當同一件事處理，一個過當、一個剛好。
+**那兩個 0 的成因事後查明，與當時的假設不同，在此更正**（結論不變，但因果不可沿用）。當時把 0 讀成「這兩家沒有 EDGAR 那一軌可接手」的外部事實，實際上兩家各有不同原因、都不是 SEC 沒資料：**SPCX 只是從未抓過**——補跑 `fetch_edgar('SPCX')` 一次就成功入庫 434 塊；**JPM 是 `ingest_text` 的 embedding 整批失敗**，1533 塊一次性送出時在 Ollama 端穩定失敗，且因錯誤型別不在 `fetch_edgar` 的攔截範圍而直接拋穿（已於同日修復，見本章第三節）。所以「逐條濾而非整份丟」這個決定仍然正確——在該 bug 修好前 JPM 確實取不到 EDGAR 全文，逐條濾是當下唯一保得住它的做法——但支撐它的那個 0 是**我們自己造成的**，不是外部缺料。看到「某家 EDGAR 塊數為 0」時不要直接推論成外部沒有資料。JPM 本身也推翻了第一版註解裡「混合期不會發生」那句——它 13 條裡 11 條正好是當期，只有營業收入落後一年、現金及約當現金落後**八年**（2018-12-31，正是 `_pick_fact` docstring 早就警告過的停用概念型失分）。全份旗標把「2/13 錯」和 TSM 的「13/13 錯」當同一件事處理，一個過當、一個剛好。
 
 同時移除了第一版的 `_XBRL_STALE_MARKER in text` 判斷——**用比對中文警語文案來決定入不入庫**，把控制流程綁在顯示文字上。逐條版直接用 `_pick_fact` 本來就逐概念回傳的 `exact`，文案怎麼改都不影響行為。這個 flag 本來就每條算好了，只是先前被 `stale = stale or not exact` 壓成一個布林，所以逐條化沒有新增任何資料傳遞。
 
 **為什麼不是加文案**：那塊 chunk 開頭原本就寫了「並非本次申報當期」、每條都標了期間，LLM 仍照引 2024——因為它是全庫唯一「長得像財報摘要」的乾淨數字清單，其餘 371 塊是會計附註碎片。這是本專案第三次確認「格式與正確性契約要靠程式而非文案」（前兩次見「保持現狀」的 09-09 字數約束與 09-18 幣別約束）。
 
-### 既有資料的清理
+#### 既有資料的清理
 
 三塊帶落後期數字的 chunk 分開處置，判準是「有沒有另一軌接得住」：
 
@@ -833,37 +826,17 @@ logfile 已能回答「哪個節點花了多久」，但答不出「送進模型
 
 JPM 以新邏輯重抓後留下 8 條當期數字（淨利 21,155,000,000、稀釋 EPS 7.7、資產總額 5,015,069,000,000 等，期間皆為 2026-04-01~2026-06-30 或 2026-06-30），落後的營業收入與現金及約當現金已不在其中，開頭明列這兩項已略去。檢索驗證：「JPM 最新財報重點？」與「JPMorgan 最新一季 EPS 與淨利」都由這塊排第 1。TSM 改以 EDGAR 全文佔滿前五，不再出現落後期數字。
 
-**一併補上的資料**：查證上述兩個 0 時補跑了 `fetch_edgar('SPCX')`，入庫 434 塊（`EDGAR:SPCX:0001628280-26-052535`，2026-08-04），該公司從只有 1 塊 XBRL 變成有財報全文。JPM 當時補不了，卡在 embedding 整批失敗；該 bug 於同日修復後已入庫 1533 塊（見下一章節）。
+**一併補上的資料**：查證上述兩個 0 時補跑了 `fetch_edgar('SPCX')`，入庫 434 塊（`EDGAR:SPCX:0001628280-26-052535`，2026-08-04），該公司從只有 1 塊 XBRL 變成有財報全文。JPM 當時補不了，卡在 embedding 整批失敗；該 bug 於同日修復後已入庫 1533 塊（見本章第三節）。
 
 **未一併處理**：`ingest.py` 的 `_MIN_FINANCIAL_REPORT_CHARS = 10000` 對每塊 XBRL 都會觸發「財報字數偏低」警告（全庫 479～721 字元）。該門檻是為 PDF 全文設的，對整季壓成一塊的結構化數字本就不適用，屬既有行為、非本次引入，僅記錄於此。
 
-### 做了什麼
+**本機 venv 與鎖版漂移**：`tests/test_chart_earnings_marker.py` 在本機失敗、容器通過——`./venv` 是 plotly 6.9.0，而 `requirements.txt` 鎖 `plotly<6`。那條反向斷言釘的是 plotly 5 的行為。照失敗訊息字面去改 `charts.py` 會在正式環境把圖表弄壞，**真正該修的是 venv 與鎖版不一致**；`kaleido` 同樣漂移（1.3.0 vs 鎖定的 0.2.1，1.x 與 plotly 5 互斥會讓 `write_image` 失效），一併降版對齊。
 
-| 項目 | 內容 |
-|---|---|
-| 期間維度 | `vectorstore.py` 的 `similarity_search` 新增 `latest_source_only`；連線池 `max_size` 5 → 6（並行檢索多出一條） |
-| 保留席位 | `graph.py` 新增 `_LATEST_REPORT_K`、`_merge_latest_report`、`_wants_latest_report`、`_latest_report_docs`；循序與並行兩路徑各插入同一條件，並行的 `max_workers` 3 → 4 |
-| XBRL 逐條濾期 | `update.py` 的 `_format_xbrl` 落後期數字不寫出、開頭明列略去項目、全落後回 `None`；`_fetch_sec_financials` 移除 `_XBRL_STALE_MARKER in text` 字串判斷與該常數 |
-| 資料清理 | 刪 `SEC-XBRL:TSM:...541`、`SEC-XBRL:ASML:...235`；`SEC-XBRL:JPM:...343` 重抓 |
-| self-check | `tests/test_retrieve_context.py` 補席位的邊界（新聞題／`doc_type=None`／無 company 不觸發、重疊去重、席位上限），循序與並行各跑一輪；`tests/test_update.py` 補混合期（JPM 形狀）與全落後兩例 |
-| venv 對齊 | `./venv` 的 `plotly` 6.9.0 → 5.24.1、`kaleido` 1.3.0 → 0.2.1，與 `requirements.txt` 的鎖版一致 |
+### 三、大型 filing 的 embedding 整批失敗：分批送出與批次值實測
 
-### 附帶修掉的假失敗
+上一節查證「JPM 的 EDGAR 塊數為 0」時發現的 bug，當天一併修掉。症狀是 JPM 在庫裡看起來像「SEC 沒有這家的財報全文」，實際上抓取、選檔、抽文字全部正常，**只死在 embedding**：`ingest_text` 把一份文件切完的 chunk 一次性全數丟進單一 `embed_documents()`，JPM 的 10-Q 是 982,991 字元、切成 1533 塊，這一批在 Ollama 端穩定失敗，錯誤是 `Post ".../tokenize": EOF`。
 
-`tests/test_chart_earnings_marker.py` 在本機 venv 一直失敗，容器內卻通過。**不是該測試的問題，也不是 plotly 修好了**：`./venv` 裝的是 plotly 6.9.0，而 `requirements.txt` 鎖 `plotly<6`、容器跑 5.24.1。那條反向斷言釘的是 plotly 5 的行為，在 6.x 上自然不成立。照該測試訊息字面去「簡化 `charts.py`」會在正式環境把圖表弄壞——真正該修的是 venv 與鎖版不一致。降版後本機 28 個測試檔全綠。順帶發現 `kaleido` 也漂了（1.3.0 vs 鎖定的 0.2.1，且 1.x 與 plotly 5 互斥會讓 `write_image` 失效），一併對齊。
-
-
-## 待補紀錄
-
-後續每次修復或有新決策時，於本檔案新增一節（日期 + 標題），保留「做了什麼／為什麼／取捨」，不需重複貼完整程式碼片段，指向檔案路徑或函式名即可。新完成的修復項目同時要移出「目前待辦」或「保持現狀」區塊。
-
----
-
-## 2026-09-19　大型 filing 的 embedding 整批失敗：分批送出與批次值實測
-
-上一章節查證「JPM 的 EDGAR 塊數為 0」時發現的 bug，當天一併修掉。症狀是 JPM 在庫裡看起來像「SEC 沒有這家的財報全文」，實際上抓取、選檔、抽文字全部正常，**只死在 embedding**：`ingest_text` 把一份文件切完的 chunk 一次性全數丟進單一 `embed_documents()`，JPM 的 10-Q 是 982,991 字元、切成 1533 塊，這一批在 Ollama 端穩定失敗，錯誤是 `Post ".../tokenize": EOF`。
-
-### 一、批次大小的實測：400 是上界，而且取小沒有代價
+#### 一、批次大小的實測：400 是上界，而且取小沒有代價
 
 依「效能優化須有實測數據」慣例，批次值不取推導值。同一份輸入（JPM 10-Q 的 1533 塊）、同一份程式碼、由 `EMBED_BATCH_SIZE` 切換，每個值跑 2 次：
 
@@ -879,7 +852,7 @@ JPM 以新邏輯重抓後留下 8 條當期數字（淨利 21,155,000,000、稀�
 
 **失敗時耗時反而更長**（230／335／344 秒 vs 正常 192 秒），符合資源／超時型失敗的特徵，不是乾淨的門檻拒絕。這也是為什麼「查表訂一個上限」的想法從一開始就不對。
 
-### 二、修在 `ingest_text` 而非四支 `fetch_*`——原待辦寫錯了位置，在此更正
+#### 二、修在 `ingest_text` 而非四支 `fetch_*`——原待辦寫錯了位置，在此更正
 
 原待辦的「預期做法」寫的是「把 `ollama.ResponseError` 納入 `fetch_*` 的錯誤收斂」。**這條建議與程式碼裡四處既有決策牴觸，沒有照做。** `fetch_edgar:208`、`fetch_tw_financials:598`、`fetch_mops:722` 都寫了同一條原則，`fetch_mops` 講得最直白：
 
@@ -891,30 +864,67 @@ JPM 以新邏輯重抓後留下 8 條當期數字（淨利 21,155,000,000、稀�
 
 **另外，原待辦把「靜默」的嚴重度記高了一階。** `graph.py:675` 的 `auto_fetch` 迴圈已有 `except Exception`，單一來源失敗不中斷也會記 log，所以正式環境不會炸掉對話。實際損失只有兩項：錯誤訊息長得像網路錯誤，以及 `FetchResult.ok` 的統計少一筆。
 
-### 三、重試只做一次
+#### 三、重試只做一次
 
 `_embed_in_batches` 每批失敗重試一次。實測顯示這不是形式上的保險——**JPM 真實入庫那次，第 1 批就失敗了一次、重試成功**，即使批次是已定案的 400。所以 400 並非完全不失敗，是「失敗率低到重試一次就能吃掉」。
 
 不重試更多次的理由：失敗是資源／超時型，同一批重送常會過，但連兩次不過就不是暫時性問題，繼續重試只是把等待時間拉長（單批失敗本身就要 200 秒以上）。
 
-### 四、驗收
+#### 四、驗收
 
 | 項目 | 內容 |
 |---|---|
 | JPM 真實入庫 | `fetch_edgar('JPM')` 回 `ok=True`，`EDGAR:JPM:0001628280-26-054343` 入庫 **1533 塊**（2026-08-06）。該公司從只有 1 塊 XBRL 變成有財報全文 |
-| 檢索未退化 | 「JPM 最新財報重點？」與「SPCX 最新財報重點？」皆由 XBRL 塊排第 1（sim 0.647／0.645），EDGAR 全文補 2-5 名。上一章節的保留席位機制在 1533 塊新增競爭者之下仍然成立 |
-| 分批 self-check | `tests/test_ingest.py` 新增 4 組斷言：依 `EMBED_BATCH_SIZE` 切批且向量數與塊數一致（錯位會讓 content 配到別人的向量）、`0` 不分批、單批失敗重試後成功、連兩次失敗往上拋 |
+| 檢索未退化 | 「JPM 最新財報重點？」與「SPCX 最新財報重點？」皆由 XBRL 塊排第 1（sim 0.647／0.645），EDGAR 全文補 2-5 名。第二節的保留席位機制在 1533 塊新增競爭者之下仍然成立 |
+| 分批 self-check | `tests/test_ingest.py` 四組斷言。其中「向量數與塊數一致」釘的是錯位風險：切批錯位會讓 content 配到別人的向量，而且不會報錯 |
 | 全套測試 | 容器內 28/28 通過 |
 
 **一併開出的待辦**：`CHUNK_SIZE` 的 A/B（384／600／900）本次刻意不做，因為它與分批的驗收會互相汙染——塊變大則總塊數下降，JPM 成功就分不清是分批修好的還是剛好避開失敗區，而 600 批次已實測會抖。它連同 parent-child 與表格切分合為待辦第 3 項，三者共用同一組 golden set 與同一次重灌全庫。
 
-**環境注意事項**：`finance_ai_assistant_pg` 沒有對外 port mapping，DB 只在 compose 網路內連得到，本機直接跑 `fetch_edgar` 會 `PoolTimeout`；且 `src/` 是烤進 image 的（只有 `data/` 是 bind mount），故驗證未提交的改動需先 `docker cp` 進容器。本機跑測試會有 18/28 因缺套件（`langchain_mcp_adapters`、`langfuse`）而失敗，與改動無關——**測試基準是容器內的 28/28**。
+### 四、補抓期間的進度回饋
 
-### 變更清單
+**待辦的前半早已完成，項目本身沒更新。** 原文寫「改 `.stream()` 後首字時間降到首個 token」，但逐 token 串流與三段進度顯示早已在 `app.py` 運作——LangGraph 的 `messages` 模式從底層 LLM 攔 token，節點是不是 `.invoke()` 與能不能串流無關（該手段已判定不採用，見「保持現狀」同名項目）。待辦原文把實作手段寫錯了，一併更正。
 
-| 項目 | 內容 |
-|---|---|
-| 分批 embedding | `ingest.py` 新增 `_embed_in_batches()`，取代 `ingest_text` 裡直接呼叫 `embeddings.embed_documents(chunks)` 那一行；逐批記耗時、重試記 `reason=embed_batch_failed` |
-| 批次參數 | `config.py` 新增 `EMBED_BATCH_SIZE`（預設 400，實測值）。`0` 代表不分批，供 A/B 用同一份程式碼切換，沿用 `EMBEDDING_CACHE_MAX_ENTRIES` 既有慣例 |
-| self-check | `tests/test_ingest.py` 新增 `_RecordingEmbeddings` 與分批／重試四組斷言 |
-| 資料補上 | JPM 的 EDGAR 全文 1533 塊 |
+實際缺的是補抓那段：中位 67.6s（見本章第一節）期間，進度顯示停在「檢索資料庫」不動，使用者既不知道系統在做什麼、也不知道要等多久。
+
+**掛勾點只有一個可選。** 直覺是在 `tools` 節點觸發，但 LangGraph 的 `updates` 事件在**節點跑完才送**，等 `tools` 的 update 到手補抓已經結束，提示沒有意義。可用的是 `agent` 完成的瞬間：它選定的 tool 寫在回傳的 `AIMessage.tool_calls` 裡，而 tool 尚未執行。判斷依據是 tool 名稱——`fetch_company_data`／`fetch_market_overview` 是慢的，`search_knowledge_base`（中位 0.5s）不提示，否則每輪純檢索都會閃一下誤導人。
+
+**取捨：只分「有沒有在補抓」，不做逐來源進度。** 逐來源完成事件確實存在（`graph.py` 的 `fetch_missing_data` 每個來源各記一筆），但它在 MCP server 那個 process 裡——`mcp_server.py` 以 `asyncio.to_thread` 驅動 `fetch_missing_data`，回傳值是一個彙整字串。要把逐筆事件送回 `app.py` 得新增 MCP progress notification 或另一條 channel，牴觸既有決策「對外 MCP 契約有外部 client 在用，不為內部需求改動」（詳見 2026-09-13 章節）。代價是使用者看不到「四個來源完成到第幾個」，只看得到「正在抓取，約 1-3 分鐘」。在沒有取消機制的前提下兩者導向的行為相同，都是等。
+
+**另一個理由是「補抓改為並行」那個待辦。** 逐來源進度的顯示邏輯會綁在「序列、逐一完成」上，而該項要把 `calls` 改成並行執行，屆時該串列沒有順序語意，這套顯示得重寫。粗粒度的提示並行與否都成立。
+
+**成本低於待辦原文的估計（1-2 天）。** `i18n.py` 的 `step_fetch` 字串兩種語言在此之前就已寫好、但沒有任何程式碼引用——這次是把備好的零件接上。實際改動為一個判斷函式與每個介面一個分支。
+
+**CLI 同步補上，這個待辦就此關閉。** 原估「CLI 是單人 debug REPL，降為低優先」偏保守：照搬 `app.py` 的訂閱只花一個函式。兩個介面都要「是否在補抓」這個判斷，故它放在 `graph.py` 而非顯示層——`app.py` 在模組層級 `import chainlit`，CLI 從那邊拿會把整個 Chainlit 拖進一支命令列工具。
+
+**已知限制**：只改「什麼時候給回饋」，補抓與生成的總耗時皆未變動。提示的粒度是每輪 agent 決策一次，同一題補抓多家公司時不會逐家更新。tool 名稱以字串比對，`mcp_server.py` 那邊改名要跟著改；比對不中只會少一句提示，不影響回答正確性。
+
+### 改動內容
+
+| 項目 | 涉及檔案與函式 | commit |
+|---|---|---|
+| 輪數上限 A/B 與 self-check | `config.py` 新增 `MAX_TOOL_ROUNDS`（環境變數，供同程式碼切換臂）、`graph.py` 的 `_MAX_TOOL_ROUNDS` 改讀它；`tests/test_route_after_tools.py` 補上輪數上限的四條斷言。實測後維持預設 4，參數保留是為了下次要動它時不必再改一次程式碼 | `2d20897` |
+| 抽取模型 A/B 與題組 | `config.py` 新增 `FILTERS_MODEL`（空字串沿用該輪主模型，供同程式碼同容器切換臂）、`graph.py` 的 `extract_filters` 改用它選模型；成功路徑的 `log_duration` 原本仍記主模型名，兩臂在 log 中無法分辨，一併改記實際模型。新增 `tests/eval_extract_filters.py` 逐欄計分與 `tests/eval_data/extract_filters_annotations.json` 題組；`tests/test_extracted_filters.py` 固定住「空值沿用主模型、有值才覆蓋」，避免開關寫錯時兩臂其實跑同一個模型而量出假的「沒有差異」。實測後維持 9b | `7d53347`／`c7ab5e9` |
+| 市場判斷移出 LLM | `graph.py` 新增 `_market_in_question` 與 `_TW_WORDS`／`_US_WORDS`／`_BOTH_WORDS`；`resolve_market` 在判斷反問前先覆寫 `market`，並把校正結果寫回 state——三條分支都回 `{**state, ...}` 帶著舊值，只改區域變數的話 `both` 會在這裡判對、到下游 `assemble`／`generate` 卻仍讀到舊的單邊值。同函式移除「company 出現在問句即依代號型別回 tw/us」的分支，連同已無用的 `company` 參數 | `f773e25` |
+| 雙掛牌收斂 | `graph.py` 新增 `_collapse_dual_listing`，接在 `extract_filters` 的 `companies` 後處理。只處理「剛好兩個元素且互為 peer」，`['2330','TSM','AAPL']` 這種一組雙掛牌加第三家語意真的模糊，不猜 | `f773e25` |
+| 已確認市場不重跑 | `graph.py` 的 `GraphState` 新增 `market_confirmed`；`rewrite_question`／`extract_filters` 各加早退；`app.py` 的重跑 state 補齊上一輪的 `doc_type`／`news_since_days`／`answer_shape`／`in_scope`。另新增 `answering_reask`：從歷史撿回公司代號的那條路沒有 `market_confirmed`，若被校正打回 `None` 會無限反問；`state.get("question", "")` 的預設值取空字串＝倒向反問這個保守側 | `f773e25` |
+| 反問 UI | `app.py` 的 `_pick_market` `timeout` 300 → 3600 並改寫 docstring；`i18n.py` 的 `ask_market` 中英文案改為只提按鈕 | `f773e25` |
+| self-check（雙掛牌） | 新增 `tests/test_resolve_market.py`（14 條斷言：收斂的正反例、代號仍反問的 `2330`／`TSM` 對稱兩題、`market_confirmed` 不被覆寫、多標的與非雙掛牌不受影響、兩個節點的早退）。`tests/test_dual_market.py` 的 `_FakeParsed` 補上 `answer_shape`，並為 6 個呼叫點補上含市場字樣的 `question`——市場判斷改以問句為準後，呼叫端給的 `market` 不再被無條件採信 | `f773e25` |
+| 圖表相依鎖版 | `requirements.txt`：`plotly` → `plotly<6`（跟著 chainlit 前端內嵌的 plotly.js v2.30.1），`kaleido` → `kaleido==0.2.1`（1.x 要求 plotly >= 6.1.1，與前者互斥） | `8b0c0e1` |
+| 財報日標記 | `charts.py` 的 `price_chart` 改用 `add_shape`＋`add_annotation` 取代 `add_vline(annotation_text=...)`，繞過 plotly 對字串 x 軸的平均計算；新增 `tests/test_chart_earnings_marker.py`（3 條斷言，含一條釘住 plotly 現行行為的反向斷言） | `f1c73ae` |
+| 題組標注 | `extract_filters_annotations.json` 的 D3 由 `null` 改為 `"tw"`：與 N3「比較一下 2330 和 2303 的表現」同為裸台股代號，prompt 第 5 點對兩者說的是同一句話，標注不該分歧。此欄量的是抽取端，與本次流程端的「代號不算表態」不衝突 | `f773e25` |
+| 期間維度 | `vectorstore.py` 的 `similarity_search` 新增 `latest_source_only`；連線池 `max_size` 5 → 6（並行檢索多出一條） | `fdc6972` |
+| 保留席位 | `graph.py` 新增 `_LATEST_REPORT_K`、`_merge_latest_report`、`_wants_latest_report`、`_latest_report_docs`；循序與並行兩路徑各插入同一條件，並行的 `max_workers` 3 → 4 | `fdc6972` |
+| XBRL 逐條濾期 | `update.py` 的 `_format_xbrl` 落後期數字不寫出、開頭明列略去項目、全落後回 `None`；`_fetch_sec_financials` 移除 `_XBRL_STALE_MARKER in text` 字串判斷與該常數 | `fdc6972` |
+| 資料清理（XBRL） | 刪 `SEC-XBRL:TSM:...541`、`SEC-XBRL:ASML:...235`；`SEC-XBRL:JPM:...343` 重抓 | `fdc6972` |
+| self-check（期間維度） | `tests/test_retrieve_context.py` 補席位的邊界（新聞題／`doc_type=None`／無 company 不觸發、重疊去重、席位上限），循序與並行各跑一輪；`tests/test_update.py` 補混合期（JPM 形狀）與全落後兩例 | `fdc6972` |
+| venv 對齊 | `./venv` 的 `plotly` 6.9.0 → 5.24.1、`kaleido` 1.3.0 → 0.2.1，與 `requirements.txt` 的鎖版一致 | `f1c73ae` |
+| 分批 embedding | `ingest.py` 新增 `_embed_in_batches()`，取代 `ingest_text` 裡直接呼叫 `embeddings.embed_documents(chunks)` 那一行；逐批記耗時、重試記 `reason=embed_batch_failed` | `72ac871` |
+| 批次參數 | `config.py` 新增 `EMBED_BATCH_SIZE`（預設 400，實測值）。`0` 代表不分批，供 A/B 用同一份程式碼切換，沿用 `EMBEDDING_CACHE_MAX_ENTRIES` 既有慣例 | `72ac871` |
+| self-check（分批） | `tests/test_ingest.py` 新增 `_RecordingEmbeddings` 與分批／重試四組斷言 | `72ac871` |
+| 資料補上（JPM） | JPM 的 EDGAR 全文 1533 塊 | — |
+| 補抓提示 | `graph.py` 新增 `is_fetching()` 與 `_FETCH_TOOLS`，讀 `agent` 節點 update 裡最後一則訊息的 `tool_calls`；`app.py` 的 `_stream_answer` 在 `updates` 分支新增 `agent` 一支，命中即切到 `step_fetch`。掛在 `agent` 而非 `tools`，因為 `updates` 是節點完成才送 | `f45173a` |
+| 原有註解更正 | `_stream_answer` 裡「無法預判下一步是檢索還是補抓」一句已不成立（`agent` 的 update 帶著 tool 選擇），改寫為掛勾點的理由 | `f45173a` |
+| CLI 漸進回饋 | `cli.py` 新增 `_ask()`，以與 `app.py` 相同的三種 stream_mode 取代原本的 `app.ainvoke()`；逐 token 用 `print` 避開 `rich` 把 token 裡的 `[]` 當標記，最後再用 `Markdown` 重印補排版 | `f45173a` |
+| 判斷放在 graph 層 | `is_fetching` 未留在顯示層：`app.py` 模組層級 import chainlit，CLI 從那邊拿會把整個 Chainlit 拖進一支命令列工具；判斷讀的是 agent 節點的 state，本就屬 graph 語意（`unique_sources` 為同樣先例） | `f45173a` |
+| self-check（進度回饋） | `tests/test_is_fetching.py`：補抓／純檢索／混合呼叫／無 tool_calls／directive 在前／空值與缺 key 共九組斷言，import 改指 `graph.is_fetching` | `f45173a` |
