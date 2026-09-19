@@ -19,7 +19,7 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
 from src import config, tracing
-from src.graph import build_graph, unique_sources
+from src.graph import build_graph, is_fetching, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.logging_setup import setup_logging
 from src.tickers import is_tw_ticker
@@ -275,11 +275,19 @@ async def _stream_answer(state: dict, msg: cl.Message, tracker: _StepTracker) ->
             await msg.stream_token(chunk.content)
         elif mode == "updates":
             node = next(iter(payload))
-            # ponytail: tool 呼叫順序由 LLM 動態決定，無法預判下一步是檢索還是補抓，
-            # 因此整個 agent<->tools 迴圈只顯示一個步驟，跑完（assemble）才關掉
             if node == "extract_filters":
                 if tracker.step is not None:
                     await tracker.advance(t(tracker.ui_lang, "step_retrieve"))
+            elif node == "agent":
+                # agent 完成時它選的 tool 已經定了，但還沒跑——這是補抓開始前唯一
+                # 能提前告知的時機（tools 節點的 update 要等補抓跑完才送，那時
+                # 已經沒有提示價值）。補抓是全流程最慢的一段（中位 67.6s），
+                # 沒有這句的話使用者會一直盯著「檢索資料庫」。
+                # ponytail: 只分「有沒有在補抓」，不追逐來源進度——後者的事件在
+                # MCP server 那個 process 裡（mcp_server.py 以 asyncio.to_thread
+                # 驅動 fetch_missing_data），要送回來得動對外 MCP 契約。
+                if is_fetching(payload[node]):
+                    await tracker.advance(t(tracker.ui_lang, "step_fetch"))
             elif node == "assemble":
                 await tracker.advance(t(tracker.ui_lang, "step_generate"))
         else:  # values：最後一筆就是 final state
