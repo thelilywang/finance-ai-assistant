@@ -1,7 +1,7 @@
 ---
 name: doc-writer
 description: 撰寫、編輯、更新本專案的 .md 文件。維護日誌走 maintenance-log skill,其他文件照目標檔既有風格續寫。當使用者說「補維護紀錄」「更新文件」「寫進 README」「改 SKILL.md」時使用。只動 .md,不改程式碼。
-model: haiku
+model: sonnet
 tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 ---
 
