@@ -47,6 +47,12 @@ RETRIEVE_PARALLEL = os.getenv("RETRIEVE_PARALLEL", "1").lower() not in ("0", "fa
 # 保留是為了能在同一份程式碼上跑 A/B。
 ANSWER_SHAPE_GATING = os.getenv("ANSWER_SHAPE_GATING", "1").lower() not in ("0", "false", "no")
 
+# extract_filters 專用模型。它只做結構化抽取（companies／doc_type／news_since_days／
+# market／in_scope／answer_shape），不需要與 generate 同級的模型，但抽錯代號會讓整條
+# 流程查錯公司，故換不換須看實測的正確率而非只看耗時。空字串代表沿用該輪的主模型，
+# 供同程式碼同容器 A/B 切換臂。
+FILTERS_MODEL = os.getenv("FILTERS_MODEL", "")
+
 # tool 呼叫輪數上限。最後一輪常是模型只回一句「我查完了」（tool_calls 0），
 # 實測單輪可達 93 至 290 秒，佔單題三到六成。收緊到 3 能否在不損答案品質的
 # 前提下省下那一輪，須同程式碼同容器 A/B，故拉成可調參數而非改常數。
