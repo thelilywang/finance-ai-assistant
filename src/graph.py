@@ -1082,7 +1082,9 @@ def generate(state: GraphState) -> GraphState:
     if needs_market and companies:
         market_started = time.monotonic()
         snapshots = get_market_snapshots(companies)
-        log_duration(log, "market_snapshots", market_started, node="generate",
+        # node 標 market 而非 generate：這是 generate 節點內的行情抓取，不是生成呼叫，
+        # 兩者混在同一個 node 值會讓耗時彙總把 3-7 秒的抓取算進生成中位數。
+        log_duration(log, "market_snapshots", market_started, node="market",
                      requested=len(companies), succeeded=len(snapshots),
                      failed=len(companies) - len(snapshots))
     if snapshots:
