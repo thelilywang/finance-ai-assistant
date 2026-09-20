@@ -192,11 +192,10 @@ try:
     latest_lock = threading.Lock()
 
     def recording_search(_vector, **kwargs):
-        # 一律回新 dict：_relax_doc_type 會就地寫入 relaxed，共用同一個 fixture
-        # 會把前面案例的標記帶到後面，讓最新財報席位誤判成「已放寬」而不觸發
+        # 一律回新 dict，模擬正式環境每次查詢都拿到新的 row：共用 fixture 若被就地
+        # 寫入，殘留標記會讓最新財報席位誤判成「已放寬」而不觸發（歷史 bug，見
+        # MAINTENANCE_LOG）。_relax_doc_type 現已回傳複本，這裡維持隔離當防呆。
         def fresh(d):
-            # 去掉 relaxed：前面的 fallback 案例經 _relax_doc_type 就地標記過共用
-            # fixture，殘留的標記會讓最新財報席位誤判成「已放寬」而不觸發
             return {k: v for k, v in d.items() if k != "relaxed"}
 
         if kwargs.get("latest_source_only"):
@@ -249,7 +248,7 @@ try:
     graph.config.RETRIEVE_PARALLEL = True
 
     # 最新一期的 chunk 已在主結果裡時不得重複（去重靠 id）
-    # 同樣要去掉前面案例殘留的 relaxed 標記（見 recording_search 的註解）
+    # 同樣回新 dict 隔離共用 fixture（見 recording_search 的註解）
     def _fresh(d):
         return {k: v for k, v in d.items() if k != "relaxed"}
 

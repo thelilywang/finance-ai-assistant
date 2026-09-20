@@ -60,7 +60,7 @@ assert "citation_out_of_range" in _rule_names(violations)
 detail = next(v["detail"] for v in violations if v["rule"] == "citation_out_of_range")
 assert detail == [9]
 
-# 6: [即時市場數據] -> unknown_citation_marker（待辦第 2 項迴歸）
+# 6: [即時市場數據] -> unknown_citation_marker（待辦「[即時市場數據] 被當成引用標記」迴歸）
 unknown_marker = GOOD_ZH.replace("需求強", "需求強 [即時市場數據]")
 violations = check_answer_format(unknown_marker, FIELDS, 3, "zh")
 assert "unknown_citation_marker" in _rule_names(violations)

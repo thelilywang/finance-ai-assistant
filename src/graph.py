@@ -506,9 +506,7 @@ def _relax_doc_type(query_vec, company, news_since_days) -> list[dict]:
     掛在每筆 dict 上而非改回傳結構，assemble 與既有測試都不受影響。
     """
     docs = similarity_search(query_vec, company=company, news_since_days=news_since_days)
-    for d in docs:
-        d["relaxed"] = "doc_type"
-    return docs
+    return [{**d, "relaxed": "doc_type"} for d in docs]
 
 
 def _merge_market_news(docs: list[dict], candidates: list[dict]) -> list[dict]:
