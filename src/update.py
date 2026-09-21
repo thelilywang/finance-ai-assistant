@@ -846,6 +846,103 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
     return FetchResult(total > 0 or skipped > 0, msg)
 
 
+# 財報的軌別：每個市場正常該有「全文」與「數字」兩軌，決定「0 塊」算不算缺口。
+# 台股（fetch_tw_financials + fetch_mops）：TWSE-API 數字 + MOPS PDF 全文。
+# 美股（2026-09-09 建立的雙軌）：SEC-XBRL 數字 + EDGAR 全文。
+# 本地 PDF 的 source 是檔案路徑、沒有共同前綴，故以「非其他三種」歸入 MOPS 全文軌。
+_TRACKS = {
+    "tw": {"full": "MOPS-PDF", "num": "TWSE-API"},
+    "us": {"full": "EDGAR", "num": "SEC-XBRL"},
+}
+# 不報數字軌屬正常的例外：ASML/TSM 是 F 股，SEC 不收它們的 XBRL，只有 EDGAR 全文。
+# 白名單而非「缺數字軌一律放行」——否則 META 那種只剩 1 塊 XBRL 的反例也會被放過。
+_NO_NUM_TRACK = {"ASML", "TSM"}
+
+
+def _track_of(prefix: str, market: str) -> str:
+    """把來源前綴歸到 full／num 軌；不屬於該市場任一軌則回空字串。"""
+    t = _TRACKS[market]
+    if prefix == t["num"]:
+        return "num"
+    # 台股全文軌是本地 PDF，前綴就是檔案路徑本身
+    if market == "tw" and prefix not in ("TWSE-API", "EDGAR", "SEC-XBRL", "https"):
+        return "full"
+    if prefix == t["full"]:
+        return "full"
+    return ""
+
+
+def inventory(doc_type: str | None = None, company: str | None = None) -> bool:
+    """盤點庫內來源：列出來源與塊數，並標出軌別缺口（某標的某一軌整個掛零）。
+
+    純讀，不改資料。缺口偵測的由來見維護日誌「待建能力：按來源重跑 ingest」：
+    ingest 的低字數警示只在入庫當下觸發，且只看得到進來的那塊，看不到
+    「整軌沒進來」——META 那筆就是這樣拖到人工查才發現。
+    """
+    from .vectorstore import list_sources
+
+    rows = list_sources(doc_type, company)
+    if not rows:
+        print("[inventory] 查無資料")
+        return True
+
+    by_prefix: dict[tuple[str, str], list[int]] = {}
+    for r in rows:
+        key = (r["prefix"], r["doc_type"])
+        acc = by_prefix.setdefault(key, [0, 0])
+        acc[0] += 1
+        acc[1] += r["chunks"]
+    print("依來源前綴：")
+    print(f"  {'前綴':<28} {'doc_type':<18} {'來源數':>6} {'塊數':>8}")
+    for (prefix, dtype), (n_src, n_chunk) in sorted(
+            by_prefix.items(), key=lambda kv: -kv[1][1]):
+        print(f"  {prefix:<28} {dtype:<18} {n_src:>6} {n_chunk:>8}")
+    print(f"  {'合計':<28} {'':<18} {len(rows):>6} "
+          f"{sum(r['chunks'] for r in rows):>8}")
+
+    # 軌別交叉表：只看財報，新聞沒有軌的概念
+    tracks: dict[str, dict[str, int]] = {}
+    for r in rows:
+        if r["doc_type"] != "financial_report" or not r["company"]:
+            continue
+        co = r["company"]
+        market = "tw" if is_tw_ticker(co) else "us"
+        # 市場看代號本身，不看「碰巧有哪幾軌」——否則整個市場的軌都掛零時
+        # 會被判成「不屬於任何市場」而靜默跳過，正是要偵測的那種情況
+        slot = tracks.setdefault(co, {"market": market, "full": 0, "num": 0})
+        track = _track_of(r["prefix"], market)
+        if track:
+            slot[track] += r["chunks"]
+    if tracks:
+        print("\n財報軌別（每個市場應有全文與數字兩軌）：")
+        print(f"  {'company':<10} {'市場':<4} {'全文軌':>8} {'數字軌':>8}  判定")
+        gaps = []
+        for co in sorted(tracks, key=lambda c: (tracks[c]["market"], c)):
+            slot = tracks[co]
+            full, num = slot["full"], slot["num"]
+            t = _TRACKS[slot["market"]]
+            if full == 0:
+                verdict = f"缺口：全文軌（{t['full']}）掛零"
+                gaps.append(co)
+            elif num == 0 and co in _NO_NUM_TRACK:
+                verdict = f"僅全文軌（F 股不報 {t['num']}，正常）"
+            elif num == 0:
+                verdict = f"缺口：數字軌（{t['num']}）掛零"
+                gaps.append(co)
+            else:
+                verdict = "正常"
+            print(f"  {co:<10} {slot['market']:<4} {full:>8} {num:>8}  {verdict}")
+        if gaps:
+            print(f"\n  ⚠ {len(gaps)} 個標的有軌別缺口：{'、'.join(gaps)}")
+
+    stale = [r for r in rows if r["chunk_unit"] is None]
+    print(f"\n切法出處：舊塊（chunk_unit 為 NULL）{len(stale)} 源／"
+          f"{sum(r['chunks'] for r in stale)} 塊，"
+          f"帶值 {len(rows) - len(stale)} 源／"
+          f"{sum(r['chunks'] for r in rows if r['chunk_unit'] is not None)} 塊")
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="抓取財報/新聞並匯入 pgvector")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -863,6 +960,11 @@ def main() -> None:
 
     p_market_news = sub.add_parser("market-news", help="掃市場總覽新聞列表頁（udn/cmoney）")
     p_market_news.add_argument("--limit", type=int, default=10, help="每個來源抓取篇數，預設 10")
+
+    p_inv = sub.add_parser("inventory", help="盤點庫內來源與軌別缺口（唯讀）")
+    p_inv.add_argument("--doc-type", default=None,
+                       choices=["financial_report", "news"])
+    p_inv.add_argument("--company", default=None, help="只看單一標的")
 
     p_prune = sub.add_parser("prune", help="刪除過期新聞 chunk（財報不刪）")
     p_prune.add_argument("--days", type=int, default=180, help="保留天數，預設 180")
@@ -883,6 +985,8 @@ def main() -> None:
         ok = fetch_news(args.company, args.limit).ok
     elif args.command == "market-news":
         ok = fetch_market_news(args.limit).ok
+    elif args.command == "inventory":
+        ok = inventory(args.doc_type, args.company)
     else:
         from .vectorstore import delete_news_older_than
 

@@ -186,3 +186,32 @@ def similarity_search(
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(sql, params)
             return cur.fetchall()
+
+
+def list_sources(doc_type: str | None = None, company: str | None = None) -> list[dict]:
+    """列出庫內來源與各自狀態，供重跑前選取與缺口盤點。
+
+    source_exists() 只答得出單一來源在不在；要問「有哪些來源」「哪一軌整個沒進來」
+    在此之前只能臨時手打 SQL，沒有可重複執行的東西。
+
+    chunk_unit/chunk_size/embed_model 取每個來源的任一值：同一次 ingest 寫入的塊
+    設定相同，混值代表該來源跨過設定變更，留給重跑後的對照報表處理。
+    """
+    sql = """
+        SELECT source,
+               split_part(source, ':', 1) AS prefix,
+               doc_type, company, published_at,
+               count(*) AS chunks,
+               min(chunk_unit) AS chunk_unit,
+               min(chunk_size) AS chunk_size,
+               min(embed_model) AS embed_model
+        FROM doc_chunks
+        WHERE (%s::text IS NULL OR doc_type = %s)
+          AND (%s::text IS NULL OR company = %s)
+        GROUP BY source, doc_type, company, published_at
+        ORDER BY doc_type, company NULLS LAST, source
+    """
+    with get_connection() as conn:
+        cur = conn.execute(sql, (doc_type, doc_type, company, company))
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
