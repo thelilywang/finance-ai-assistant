@@ -1038,6 +1038,18 @@ def allowed_fields(state: GraphState, has_market: bool | None = None) -> list[st
 _FIELD_LINE_RE = re.compile(r"^- \*\*(.+?)\*\*[：:]", re.MULTILINE)
 
 
+def append_disclaimer(answer: str, lang: str) -> str:
+    """回答結尾補上免責聲明，已經有的話原樣回傳。
+
+    冪等是必要的而不只是保險：streaming 端與 generate 節點都會經過這條路徑，
+    不擋重複呼叫就會在畫面上看到兩句。
+    """
+    disclaimer = t(lang, "disclaimer")
+    if not answer.strip() or disclaimer in answer:
+        return answer
+    return f"{answer.rstrip()}\n\n{disclaimer}"
+
+
 def check_answer_format(answer: str, fields: list[str], ordered_count: int, lang: str,
                         source_markets: list[str | None] | None = None,
                         market: str | None = None) -> list[dict]:
@@ -1331,29 +1343,32 @@ def generate(state: GraphState) -> GraphState:
 
 {trend_block}
 
-{t(lang, "disclaimer")}
-
 參考資料：
 {context}
 {market_block}{dual_block}{history_block}
 使用者問題：{state['question']}
 """
     resp = _llms(_model_of(state))["llm"].invoke(prompt)
+    # 免責聲明是固定常數，由程式追加而非要模型複誦：實測 40 筆真實回答只有 11 筆
+    # 命中，且寬鬆比對（只找「非投資建議」等關鍵詞）僅多撈到 1 筆——不是模型改寫，
+    # 是整段「固定追加」區塊沒生出來時跟著一起掉。文案解不了格式契約（同一個坑
+    # 09-09、09-18 已踩過兩次），故從 prompt 移除、改在這裡補。
+    answer = append_disclaimer(resp.content or "", lang)
     # 已知端到端瓶頸在本地模型生成，prompt/回應長度是判斷「慢在輸入還是輸出」的依據；
     # 只記長度不記內容，避免把提問寫進 log（保留策略未定前先不落地個資）
     log_duration(log, "generate", started, node="generate", model=_model_of(state),
                  qid=_qid(state["question"]), prompt_chars=len(prompt),
-                 answer_chars=len(resp.content or ""), retrieved=len(state.get("retrieved") or []))
+                 answer_chars=len(answer), retrieved=len(state.get("retrieved") or []))
     # 來源編號 → 該來源的市場，對齊 ordered 的順序（索引 n-1 即 [來源n]）
     doc_market = {d["source"]: d.get("market") for d in state["retrieved"]}
     violations = check_answer_format(
-        resp.content or "", fields, len(ordered), lang,
+        answer, fields, len(ordered), lang,
         source_markets=[doc_market.get(s) for s in ordered], market=state.get("market"))
     if violations:
         log.warning("決策卡格式違規", extra={"fields": {
             "node": "generate", "qid": _qid(state["question"]),
             "violations": violations, "allowed_fields": fields}})
-    return {**state, "answer": resp.content, "allowed_fields": fields}
+    return {**state, "answer": answer, "allowed_fields": fields}
 
 
 def no_result(state: GraphState) -> GraphState:

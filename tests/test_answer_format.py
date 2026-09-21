@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.graph import check_answer_format, _ALL_FIELDS, _FIELD_LINE_RE
+from src.graph import append_disclaimer, check_answer_format, _ALL_FIELDS, _FIELD_LINE_RE
 from src.i18n import t
 
 FIELDS = ["conclusion", "facts", "inference", "upside", "risk"]
@@ -116,5 +116,25 @@ full_oor = full_ok.replace("【來源2】", "【來源9】")
 violations = check_answer_format(full_oor, FIELDS, 3, "zh")
 detail = next(v["detail"] for v in violations if v["rule"] == "citation_out_of_range")
 assert detail == [9]
+
+# append_disclaimer：補上、冪等、不動空字串，且補完必須讓 missing_disclaimer 消失。
+# 最後一條是這個改動的重點——免責聲明不再靠模型複誦，驗證層據此應永遠不再報這條。
+for lang in ("zh", "en"):
+    disclaimer = t(lang, "disclaimer")
+
+    appended = append_disclaimer("回答本體。", lang)
+    assert appended.endswith(disclaimer)
+    assert append_disclaimer(appended, lang) == appended, "重複呼叫不得補第二句"
+    assert append_disclaimer("", lang) == ""
+    assert append_disclaimer("   ", lang) == "   "
+
+    # 模型自己有寫時不重複，且位置維持原樣
+    already = f"回答本體。\n\n{disclaimer}"
+    assert append_disclaimer(already, lang) == already
+
+no_disc = GOOD_ZH.replace("\n以上非投資建議，僅為資料解讀，投資請自行判斷。\n", "\n")
+assert "missing_disclaimer" in _rule_names(check_answer_format(no_disc, FIELDS, 3, "zh"))
+assert "missing_disclaimer" not in _rule_names(
+    check_answer_format(append_disclaimer(no_disc, "zh"), FIELDS, 3, "zh"))
 
 print("check_answer_format self-check OK")

@@ -19,7 +19,7 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
 from src import config, tracing
-from src.graph import build_graph, is_fetching, unique_sources
+from src.graph import append_disclaimer, build_graph, is_fetching, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.logging_setup import setup_logging
 from src.tickers import is_tw_ticker
@@ -438,6 +438,10 @@ async def on_message(message: cl.Message):
     if not msg.content:
         # no_result 路徑沒有 generate token，用 final state 的 answer 補上
         msg.content = answer
+    else:
+        # 串流端拿到的是模型吐的 token，不含 generate 補的免責聲明，這裡補在
+        # 來源列之前——免責聲明屬於回答本體，附在來源清單後面讀起來像註腳。
+        msg.content = append_disclaimer(msg.content, content_lang)
 
     if final_state:
         await _send_with_sources(msg, final_state, message.content, content_lang)
