@@ -741,7 +741,10 @@ def fetch_mops(co_id: str) -> FetchResult:
 
 
 def fetch_news(company: str, limit: int = 10) -> FetchResult:
-    """從 Yahoo Finance RSS 抓最新新聞並匯入。台股代號自動加 .TW。"""
+    """從 Yahoo Finance RSS 抓最新新聞並匯入；RSS 空手時（台股中小型股常見）改走
+    台股個股頁 fetch_tw_stock_news 補。台股代號自動加 .TW。"""
+    from .vectorstore import source_exists
+
     symbol = f"{company}.TW" if is_tw_ticker(company) else company
     url = (
         "https://feeds.finance.yahoo.com/rss/2.0/headline"
@@ -757,16 +760,25 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
 
     items = ET.fromstring(resp.content).findall(".//item")[:limit]
     if not items:
+        # Yahoo RSS 台股覆蓋只到大型股（實測 3049/2380/3025 一律回 0 篇），
+        # 個股頁則有 20 篇且跨代號不重疊。兩者同母站不同端點，互補而非替代，
+        # 故只在空手時才付這個額外請求的成本，不無條件都打。
+        if is_tw_ticker(company):
+            return fetch_tw_stock_news(company, limit=limit)
         msg = f"{symbol} 的 RSS 沒有新聞。"
         log.warning(msg, extra={"fields": {
             "company": company, "source": "yahoo_rss", "reason": "no_content"}})
         return FetchResult(False, msg)
 
     total = 0
+    skipped = 0
     for item in items:
         try:
             title = item.findtext("title", "").strip()
             link = item.findtext("link", "").strip()
+            if source_exists(link):
+                skipped += 1
+                continue
             pub_date = item.findtext("pubDate", "").strip()
             published_at = None
             if pub_date:
@@ -786,9 +798,78 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
             log.warning(f"新聞處理失敗（{link}）：{e}", extra={"fields": {
                 "company": company, "source": "yahoo_rss", "reason": "news_failed",
                 "error": str(e)}})
-    msg = f"新聞更新完成，共寫入 {total} 筆 chunk。"
-    log.info(msg, extra={"fields": {"company": company, "source": "yahoo_rss", "chunks": total}})
-    return FetchResult(total > 0, msg)
+    msg = f"新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
+    log.info(msg, extra={"fields": {
+        "company": company, "source": "yahoo_rss", "chunks": total, "skipped": skipped}})
+    return FetchResult(total > 0 or skipped > 0, msg)
+
+
+def fetch_tw_stock_news(company: str, limit: int = 10) -> FetchResult:
+    """從 Yahoo 台股個股頁抓新聞並匯入，補 Yahoo RSS 對台股中小型股的覆蓋缺口。
+
+    與 fetch_news 同母站（tw.stock.yahoo.com）不同端點：RSS 走
+    feeds.finance.yahoo.com（美股導向），個股頁是台股在地內容。
+    實測 3049/2380/3025 三檔在 RSS 一律 0 篇，個股頁穩定 20 篇且互不重疊，
+    故只作為 fetch_news 的 fallback，不取代它。
+    """
+    from .vectorstore import source_exists
+
+    url = f"https://tw.stock.yahoo.com/quote/{company}.TW/news"
+    resp = requests.get(url, headers=BROWSER_UA, timeout=TIMEOUT)
+    if resp.status_code != 200:
+        msg = f"Yahoo 台股個股頁取得失敗（HTTP {resp.status_code}），稍後再試。"
+        log.warning(msg, extra={"fields": {
+            "company": company, "source": "yahoo_tw_stock", "reason": "http_error"}})
+        return FetchResult(False, msg)
+
+    # 保序去重，同 fetch_market_news 的手法
+    links = list(dict.fromkeys(
+        re.findall(r'"(https://tw\.stock\.yahoo\.com/news/[^"?]+\.html)"', resp.text)
+    ))[:limit]
+    if not links:
+        msg = f"{company} 的個股頁找不到任何新聞連結（版面可能改版）。"
+        log.warning(msg, extra={"fields": {
+            "company": company, "source": "yahoo_tw_stock", "reason": "no_content"}})
+        return FetchResult(False, msg)
+
+    total = 0
+    skipped = 0
+    for link in links:
+        # 中文標題經 URL 編碼可能超過 doc_chunks.source 的 varchar(512)（實測虹光
+        # 一篇公告連結編碼後 544 字元），插入會整批失敗；截斷會讓不同長 URL 共用
+        # 前綴、騙過 source_exists 去重，故直接跳過整篇，不硬塞。
+        if len(link) > 512:
+            log.warning(f"個股頁連結超過欄位長度上限，跳過：{link}", extra={"fields": {
+                "company": company, "source": "yahoo_tw_stock", "reason": "url_too_long",
+                "length": len(link)}})
+            continue
+        if source_exists(link):
+            skipped += 1
+            continue
+        try:
+            html = trafilatura.fetch_url(link)
+            if not html:
+                log.warning(f"個股頁文章下載失敗：{link}", extra={"fields": {
+                    "company": company, "source": "yahoo_tw_stock", "reason": "http_error"}})
+                continue
+            doc = trafilatura.bare_extraction(html, with_metadata=True)
+            if not doc or len(doc.text or "") < 100:
+                log.warning(f"個股頁內文過短或抽取失敗：{link}", extra={"fields": {
+                    "company": company, "source": "yahoo_tw_stock", "reason": "no_content"}})
+                continue
+            total += ingest_text(
+                doc.text, source=link, company=company, doc_type="news",
+                published_at=doc.date, title=doc.title, market="tw",
+            )
+        except (requests.RequestException, OSError, ValueError) as e:
+            # 單篇失敗跳過，DB/embedding 失敗往上拋，同 fetch_news 的例外邊界
+            log.warning(f"個股頁文章處理失敗（{link}）：{e}", extra={"fields": {
+                "company": company, "source": "yahoo_tw_stock", "reason": "news_failed",
+                "error": str(e)}})
+    msg = f"個股頁新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
+    log.info(msg, extra={"fields": {
+        "company": company, "source": "yahoo_tw_stock", "chunks": total, "skipped": skipped}})
+    return FetchResult(total > 0 or skipped > 0, msg)
 
 
 def _company_from_title(title: str) -> str | None:

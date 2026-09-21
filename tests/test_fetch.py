@@ -5,6 +5,7 @@
 現在由 LLM 依 MCP tool 說明自行判斷（見 src/mcp_server.py 的 docstring），沒有確定性路由可測。
 執行：python tests/test_fetch.py
 """
+import asyncio
 import sys
 from pathlib import Path
 
@@ -69,3 +70,46 @@ finally:
      update.fetch_market_news, update.fetch_tw_financials, update.fetch_sec_financials) = _orig
 
 print("fetch_missing_data self-check OK")
+
+
+# --- agent() 的 directive 要同時指名 stale 與 missing ---
+# 迴歸防線：修前 `if stale := _stale_companies(state)[0]:` 丟掉了 missing，
+# 零新聞的標的（如 TSM）永遠進不了 directive，補抓從未被觸發（見待辦4）。
+class _FakeToolLLM:
+    """假 bind_tools 鏈：回一則沒有 tool_calls 的訊息，讓 agent() 立刻收工。"""
+    def bind_tools(self, tools):
+        return self
+
+    async def ainvoke(self, messages):
+        sent_messages.clear()
+        sent_messages.extend(messages)
+        return graph.AIMessage(content="ok")
+
+
+sent_messages: list = []
+
+async def _fake_get_tools():
+    return []
+
+_orig_llms = graph._llms
+_orig_get_tools = graph._mcp_client.get_tools
+graph._llms = lambda model: {"tool": _FakeToolLLM()}
+graph._mcp_client.get_tools = _fake_get_tools
+try:
+    # TSM 沒有任何檢索結果可算天數 → 落在 missing，不落在 stale
+    state = {
+        "question": "TSM 最近新聞", "companies": ["TSM"], "messages": [],
+        "news_since_days": None, "model": "",
+    }
+    result = asyncio.run(graph.agent(state))
+    directive_msgs = [m for m in result["messages"] if isinstance(m, graph.HumanMessage)]
+    assert directive_msgs, "零新聞標的應觸發 directive，結果卻是空的"
+    text = directive_msgs[0].content
+    assert "TSM" in text and "完全沒有檢索到新聞" in text, text
+    # 送進模型的訊息裡也要看得到 directive，否則模型收不到指名
+    assert any("TSM" in getattr(m, "content", "") for m in sent_messages), "directive 沒送進模型"
+finally:
+    graph._llms = _orig_llms
+    graph._mcp_client.get_tools = _orig_get_tools
+
+print("agent directive (missing) self-check OK")
