@@ -82,16 +82,29 @@ def delete_threads_older_than(days: int) -> int:
 
 
 def insert_chunks(rows: list[dict]) -> None:
-    """rows 每筆需含: source, title, doc_type, company, published_at, chunk_index, content, embedding"""
+    """rows 每筆需含: source, title, doc_type, company, published_at, chunk_index, content, embedding
+
+    切塊出處三欄（chunk_unit／chunk_size／embed_model）由本函式統一補上當下的設定值，
+    呼叫端不必傳——出處記的是「這批塊實際上是怎麼切出來的」，那就是寫入當下的 config，
+    交給呼叫端傳只會多一個忘記傳就靜默留白的地方。
+    """
+    provenance = {
+        "chunk_unit": config.CHUNK_UNIT,
+        "chunk_size": config.CHUNK_SIZE,
+        "embed_model": config.EMBEDDING_MODEL,
+    }
+    rows = [{**provenance, **row} for row in rows]
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.executemany(
                 """
                 INSERT INTO doc_chunks
-                    (source, title, doc_type, company, published_at, chunk_index, content, embedding)
+                    (source, title, doc_type, company, published_at, chunk_index, content, embedding,
+                     chunk_unit, chunk_size, embed_model)
                 VALUES
                     (%(source)s, %(title)s, %(doc_type)s, %(company)s, %(published_at)s,
-                     %(chunk_index)s, %(content)s, %(embedding)s)
+                     %(chunk_index)s, %(content)s, %(embedding)s,
+                     %(chunk_unit)s, %(chunk_size)s, %(embed_model)s)
                 """,
                 rows,
             )

@@ -123,4 +123,59 @@ else:
     raise AssertionError("連續失敗應往上拋")
 
 ingest.config.EMBED_BATCH_SIZE = 400  # 還原，避免影響後續
+
+# --- chunk_text：長度單位（config.CHUNK_UNIT）---
+# 單位錯不會報錯，只會讓 CHUNK_SIZE 對中英文語意不同（真實語料實測 bge-m3 中文
+# 1.60、英文 3.84 字元／token，差 2.4 倍），故這裡驗的是「走到哪條計數路徑」。
+
+_orig_unit = ingest.config.CHUNK_UNIT
+zh_text = "本公司本季合併營收為新台幣八千三百五十億元，較去年同期成長百分之三十九點五。" * 120
+
+
+def _chunk_with(unit, text=zh_text):
+    ingest.config.CHUNK_UNIT = unit
+    ingest._token_counter.cache_clear()  # 避免沿用上一輪的 tokenizer 判定
+    return ingest.chunk_text(text)
+
+
+try:
+    # char：以字元計，每塊不超過 CHUNK_SIZE 個「字元」
+    char_chunks = _chunk_with("char")
+    assert max(len(c) for c in char_chunks) <= ingest.config.CHUNK_SIZE
+
+    # token：中文約 1.60 字元／token，同樣的 CHUNK_SIZE 下每塊裝得下「更多字元」
+    # （800 token ≈ 1280 字元），所以塊會變大、總塊數變少。驗塊的大小而非塊數——
+    # 塊數在短文字上可能碰巧相同，大小才直接反映單位換了沒。
+    # 沒裝 tokenizers（或未登記模型）時會退回字元計數，切法與 char 完全相同、
+    # 不算失敗，但必須留下 log——否則會出現「以為在跑 token 臂、其實照字元切」
+    # 而讓 A/B 數字無聲失真的情況。
+    with captured_logs() as records:
+        token_chunks = _chunk_with("token")
+    fell_back = any(
+        r.fields.get("reason") in ("tokenizer_load_failed", "tokenizer_not_registered")
+        for r in records
+    )
+    if fell_back:
+        assert [len(c) for c in token_chunks] == [len(c) for c in char_chunks]
+        print("  (tokenizer 不可用，已退回字元計數並留下 log)")
+    else:
+        # 每塊的 token 數仍受 CHUNK_SIZE 約束（這才是換單位的目的）
+        _count = ingest._token_counter()
+        assert max(_count(c) for c in token_chunks) <= ingest.config.CHUNK_SIZE
+        # 而字元數會超過 CHUNK_SIZE——證明限制的確實是 token 不是字元
+        assert max(len(c) for c in token_chunks) > ingest.config.CHUNK_SIZE, \
+            [len(c) for c in token_chunks]
+
+    # 未登記的 embedding 模型：不猜 tokenizer，退回字元計數並記 log
+    _orig_model = ingest.config.EMBEDDING_MODEL
+    ingest.config.EMBEDDING_MODEL = "some-unregistered-model"
+    with captured_logs() as records:
+        unreg_chunks = _chunk_with("token")
+    assert any(r.fields.get("reason") == "tokenizer_not_registered" for r in records)
+    assert [len(c) for c in unreg_chunks] == [len(c) for c in char_chunks]
+    ingest.config.EMBEDDING_MODEL = _orig_model
+finally:
+    ingest.config.CHUNK_UNIT = _orig_unit
+    ingest._token_counter.cache_clear()
+
 print("ingest self-check OK")

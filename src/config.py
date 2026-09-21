@@ -29,9 +29,21 @@ MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 # MCP SDK 的 DNS rebinding 防護允許清單：docker 內是 service 名稱，本機開發是 localhost
 MCP_ALLOWED_HOSTS = os.getenv("MCP_ALLOWED_HOSTS", "mcp-server:8000,localhost:8000,127.0.0.1:8000").split(",")
 
-# chunk 切割參數
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 120
+# chunk 切割參數。CHUNK_UNIT 決定 CHUNK_SIZE／CHUNK_OVERLAP 的單位：
+#   "char"（預設，現行行為）— 以字元計。同一個數字對中英文語意不同：取真實語料
+#     400 塊實測 bge-m3，中文 1.60、英文 3.84 字元／token，兩邊差 2.4 倍——同樣
+#     800 字元，中文吃 499 token、英文只有 208。而本專案同時吃台股中文 PDF
+#     與 SEC 英文 filing。
+#   "token" — 以 embedding 模型自己的 tokenizer 計（見 CHUNK_TOKENIZERS），中英文才對齊。
+# 預設維持 char 是因為改單位要重灌全庫：新舊塊混在同一張表裡相似度不可比。切到
+# token 臂寫進去的塊會在 doc_chunks.chunk_unit 留記號，事後分得出來（見 vectorstore）。
+CHUNK_UNIT = os.getenv("CHUNK_UNIT", "char")
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
+# embedding 模型 → HF tokenizer repo。token 計數必須用該模型自己的 tokenizer，否則
+# 數字沒有意義：bge-m3 是 t5/sentencepiece，改用 tiktoken 的 BPE 算中文會差約 2 倍
+# （實測 0.68 對 1.60 字元／token，且是反方向）。未登記的模型不猜、退回字元計數。
+CHUNK_TOKENIZERS = {"bge-m3": "BAAI/bge-m3"}
 # 一次送進 embed_documents 的 chunk 數。整份一次送在長 filing 上會失敗，故分批送。
 # 400 取自 JPM 10-Q（982,991 字元／1533 塊）的實測：100／200／400 皆 2/2 成功且
 # 耗時相同（192-198 秒），600 是 1/2 成功（失敗那次 230 秒），不分批 0/2 成功。

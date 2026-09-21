@@ -13,8 +13,21 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     chunk_index INT NOT NULL,
     content TEXT NOT NULL,
     embedding VECTOR(1024) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now()
+    created_at TIMESTAMPTZ DEFAULT now(),
+    -- 切塊出處：這三欄一起回答「這塊還能不能跟其他塊比相似度」。
+    -- 切法或 embedding 模型不同的塊，向量空間不可比，混在同一張表裡檢索結果無法解讀。
+    -- 語料是持續增長的（自動補抓每天寫入），沒有這三欄，一旦用不同參數跑過補抓就會
+    -- 永久混塊且事後分不出來。NULL 代表本欄上線前的舊塊，不需 backfill。
+    chunk_unit VARCHAR(10),             -- 'char' / 'token'，見 config.CHUNK_UNIT
+    chunk_size INT,                     -- 當時的 config.CHUNK_SIZE（單位由 chunk_unit 決定）
+    embed_model VARCHAR(100)            -- 當時的 config.EMBEDDING_MODEL
 );
+
+-- 既有資料庫升級用：init.sql 只在新庫初始化時跑，已存在的庫要靠這幾行補欄位。
+-- 與上面的 CREATE TABLE 重複是刻意的，兩條路徑都要能得到同樣的結果。
+ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS chunk_unit VARCHAR(10);
+ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS chunk_size INT;
+ALTER TABLE doc_chunks ADD COLUMN IF NOT EXISTS embed_model VARCHAR(100);
 
 -- 向量相似度索引（HNSW：增量寫入不需重建分群，適合本專案隨用隨抓的寫入模式）
 CREATE INDEX IF NOT EXISTS doc_chunks_embedding_idx

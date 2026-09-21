@@ -8,6 +8,9 @@ pgvector>=0.3.0
 pypdf>=4.0.0
 python-dotenv>=1.0.0
 tiktoken>=0.7.0
+# chunk 以 token 計數時載 embedding 模型自己的 tokenizer（見 config.CHUNK_UNIT）。
+# 選 tokenizers 而非 transformers：只多約 5MB，不含 torch。
+tokenizers>=0.20
 rich>=13.7.0
 requests>=2.31.0
 trafilatura>=1.8.0
