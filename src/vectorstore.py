@@ -92,6 +92,9 @@ def insert_chunks(rows: list[dict]) -> None:
         "chunk_unit": config.CHUNK_UNIT,
         "chunk_size": config.CHUNK_SIZE,
         "embed_model": config.EMBEDDING_MODEL,
+        # market 不同於上面三欄：它逐筆不同（由寫入端依來源決定），這裡只給預設值，
+        # 讓沒帶這個 key 的呼叫端寫入 NULL＝「市場不明」而不是整批 KeyError。
+        "market": None,
     }
     rows = [{**provenance, **row} for row in rows]
     with get_connection() as conn:
@@ -100,11 +103,11 @@ def insert_chunks(rows: list[dict]) -> None:
                 """
                 INSERT INTO doc_chunks
                     (source, title, doc_type, company, published_at, chunk_index, content, embedding,
-                     chunk_unit, chunk_size, embed_model)
+                     chunk_unit, chunk_size, embed_model, market)
                 VALUES
                     (%(source)s, %(title)s, %(doc_type)s, %(company)s, %(published_at)s,
                      %(chunk_index)s, %(content)s, %(embedding)s,
-                     %(chunk_unit)s, %(chunk_size)s, %(embed_model)s)
+                     %(chunk_unit)s, %(chunk_size)s, %(embed_model)s, %(market)s)
                 """,
                 rows,
             )
@@ -119,6 +122,7 @@ def similarity_search(
     exclude_company: str | None = None,
     order_by_recency: bool = False,
     latest_source_only: bool = False,
+    market: str | None = None,
 ) -> list[dict]:
     """回傳最相似的 chunk，附上 source 供引用。
 
@@ -135,6 +139,11 @@ def similarity_search(
     自然語言，問「最新財報」時舊 PDF 靠塊數多穩定勝出（2330 實測 Q2 那兩塊排在第 242
     名，TOP_K=5 永遠撈不到）。限定在最新那批之內排序即繞過這個顆粒度偏差。
     需與 company 併用；published_at 為 NULL 的來源不參與（無期間可比）。
+
+    market 限定市場別（'tw'/'us'），market 為 NULL 的塊會一併排除（見下方註解）。
+    指定了 company 時市場已由 company 鎖定，再傳 market 是多餘的；這個參數真正的
+    用途是沒有 company 的查詢——「美股醫藥有哪些標的」這類問句過去無從過濾，
+    只能靠語意相似度，結果撈回台股大盤新聞。
     """
     filters = []
     params: dict = {"embedding": query_embedding, "top_k": top_k}
@@ -149,6 +158,12 @@ def similarity_search(
     if doc_type:
         filters.append("doc_type = %(doc_type)s")
         params["doc_type"] = doc_type
+    if market:
+        # 市場不明（market IS NULL）的塊一律排除，不是放行：問美股卻收到台股大盤
+        # 就是這樣來的。留白的塊多半是認不出市場的市場新聞，拿它填版面等於用
+        # 不相干的素材回答，比少給幾筆更糟。要放行得由呼叫端不傳 market。
+        filters.append("market = %(market)s")
+        params["market"] = market
     if news_since_days is not None:
         filters.append(
             "(doc_type != 'news' OR published_at >= CURRENT_DATE - %(news_since_days)s)"
@@ -174,7 +189,7 @@ def similarity_search(
     )
 
     sql = f"""
-        SELECT id, source, title, doc_type, company, published_at, content,
+        SELECT id, source, title, doc_type, company, published_at, content, market,
                1 - (embedding <=> %(embedding)s::vector) AS similarity
         FROM doc_chunks
         {where_clause}

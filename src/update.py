@@ -56,7 +56,7 @@ MARKET_SOURCES = {
     "cmoney_tw": ("https://www.cmoney.tw/notes/?navId=twstock",
                   r"note-detail\.aspx\?nid=(\d+)",
                   lambda m: f"https://www.cmoney.tw/notes/note-detail.aspx?nid={m.group(1)}"),
-    "cmoney_tag": ("https://www.cmoney.tw/notes/?tag=12367",
+    "cmoney_us": ("https://www.cmoney.tw/notes/?tag=12367",
                    r"note-detail\.aspx\?nid=(\d+)",
                    lambda m: f"https://www.cmoney.tw/notes/note-detail.aspx?nid={m.group(1)}"),
     "cnyes_us": ("https://news.cnyes.com/news/cat/us_stock",
@@ -66,6 +66,18 @@ MARKET_SOURCES = {
                  r"/news/id/(\d+)",
                  lambda m: f"https://news.cnyes.com/news/id/{m.group(1)}"),
 }
+
+def _market_of_source(name: str) -> str | None:
+    """從 MARKET_SOURCES 的 key 取市場別；key 沒標明就回 None（市場不明）。
+
+    市場新聞的 company 是從標題猜的、多半為 NULL，推不出市場；但「這篇是從哪個
+    列表頁抓來的」本來就知道，key 的 _tw／_us 尾碼就是答案，不必靠網域或內容猜
+    （三個網域都同時供應台股與美股版面，網域推市場必錯）。
+    來源本身混合兩市場時不得硬給一個值，回 None 讓它只出現在不限市場的查詢裡。
+    """
+    suffix = name.rsplit("_", 1)[-1]
+    return suffix if suffix in ("tw", "us") else None
+
 
 # 官方財報 OpenAPI：證交所（上市）與櫃買（上櫃），皆免驗證。
 # 每個 dataset 只含「最新一季」全體公司，所以是抓整包再挑出該公司那一列。
@@ -835,6 +847,7 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
                 total += ingest_text(
                     text, source=url, company=company, doc_type="news",
                     published_at=published_at, title=title,
+                    market=_market_of_source(name),
                 )
             except (requests.RequestException, OSError, ValueError) as e:
                 # 同 fetch_news：單篇失敗跳過，DB/embedding 失敗往上拋

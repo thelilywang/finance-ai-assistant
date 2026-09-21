@@ -77,11 +77,12 @@ Single table `doc_chunks`:
 ```sql
 id BIGSERIAL PK, source VARCHAR(512), doc_type VARCHAR(50),  -- 'financial_report' / 'news'
 company VARCHAR(100), published_at DATE, chunk_index INT,
+market VARCHAR(2),                                             -- 'tw' / 'us' / NULL (unknown market)
 content TEXT, embedding VECTOR(1024),                        -- bge-m3 dimension
 created_at TIMESTAMPTZ
 ```
 
-HNSW cosine index on `embedding`, plus B-tree indexes on `company` and `doc_type`.
+HNSW cosine index on `embedding`, plus B-tree indexes on `company`, `doc_type`, and `market`.
 
 ### Data sources & update commands
 
@@ -104,6 +105,7 @@ Re-running any command on the same source replaces old chunks (idempotent).
 - **Idempotent ingest**: `ingest_text` deletes all chunks for the same `source` before inserting, so updates can be re-run freely without duplicates.
 - **Everything local**: Ollama (qwen3.5:9b + bge-m3) keeps sensitive financial documents on-machine.
 - **HNSW over IVFFlat**: the vector index is HNSW because it handles incremental inserts well (no cluster rebuild needed), matching this project's fetch-on-demand write pattern.
+- **Market decision at write time, not query time**: the `market` column ('tw'/'us'/NULL) is decided once by the ingest layer (`ingest_text` by ticker, `_market_of_source` by source key suffix), not inferred later from ticker regex; this avoids ticker-shape misclassification (0700 Hong Kong, 7203 Japan) and keeps the decision in one place. Retrieval filters out `market IS NULL` chunks when a market is specified, excluding unidentifiable cross-market news from results.
 - **Market snapshot is prompt-only, never stored**: yfinance data is fetched fresh per question and injected into the `generate` prompt; it's excluded from `doc_chunks` and from the citation numbering since it isn't a retrievable source, and any fetch failure is caught and silently degrades to no snapshot.
 - **Decision card can't fully abstain**: `generate` always includes triggers, key event, and watch metrics even with thin data, so the answer stays actionable; only the directional "stance" is gated on having filings+news+market data to back it.
 - **No probabilities or confidence scores — consensus thresholds come from real data**: scenario probabilities ("35% chance of a beat") and confidence scores would be hallucinations dressed up as quantification, since the LLM has no probability model behind them; instead the decision card's thresholds are the actual yfinance analyst-consensus range (low/avg/high), and the scenario read is strictly conditional ("if above the high…") with probabilities explicitly forbidden by the prompt's hard rules.
@@ -115,6 +117,8 @@ Re-running any command on the same source replaces old chunks (idempotent).
 - **No API figures for financial-sector companies**: the official OpenAPI covers general industry only; financial, holding, insurance and securities firms use different schemas and fall back to the MOPS track alone.
 - Answer quality depends on the local model; figures should be verified against the cited sources.
 - **No multi-company comparison**: a question naming two companies degrades to a market-news sweep instead of a side-by-side analysis.
+- **165 chunks still have no market label** (as of 2026-09-21), from two distinct causes. 137 of them (67 docs) come from cmoney and **cannot be backfilled**: the tag page and the main notes page emit identical `note-detail.aspx?nid=` URLs, so once ingested the two sources are indistinguishable and the titles carry no market signal; repairing them requires a re-fetch. (The tag 12367 was verified to be US-focused and the key renamed to `cmoney_us`, which fixes the write path going forward but not the existing rows.) The other 28 (12 docs) are udn/cnyes articles from sections not listed in `MARKET_SOURCES` — `udn_tw` only crawls `cate/5590`, so siblings like 5599/5613/5616/5618 arrive unattributed. All 165 remain `market=NULL` and appear only in market-unfiltered queries.
+- **`both` (two-market) queries still require duplicate retrieval**: when both TW and US data are needed, queries run twice (once per market) because financial data is stored under a single company value (e.g., 2330 for TSMC, not TSM); a future data model supporting dual tickers per company could consolidate to one retrieval pass.
 
 ---
 
@@ -191,11 +195,12 @@ flowchart TD
 ```sql
 id BIGSERIAL PK, source VARCHAR(512), doc_type VARCHAR(50),  -- 'financial_report' / 'news'
 company VARCHAR(100), published_at DATE, chunk_index INT,
+market VARCHAR(2),                                             -- 'tw' / 'us' / NULL (市場未知)
 content TEXT, embedding VECTOR(1024),                        -- bge-m3 維度
 created_at TIMESTAMPTZ
 ```
 
-`embedding` 上有 HNSW cosine 索引,`company` 與 `doc_type` 各有 B-tree 索引。
+`embedding` 上有 HNSW cosine 索引,`company`、`doc_type` 與 `market` 各有 B-tree 索引。
 
 ### 資料來源與更新指令
 
@@ -218,6 +223,7 @@ created_at TIMESTAMPTZ
 - **Idempotent ingest**:`ingest_text` 寫入前先刪除同 `source` 的舊 chunk,更新指令可任意重跑不會重複。
 - **全部本地執行**:Ollama(qwen3.5:9b + bge-m3)讓財報這類敏感資料不出本機。
 - **HNSW 而非 IVFFlat**:向量索引改用 HNSW,增量寫入不需重建分群,符合本專案隨用隨抓的寫入模式。
+- **市場別在寫入端決定一次,不在查詢時推導**:`market` 欄位(tw/us/NULL)在 ingest 層決定(有 company 時靠 ticker 判定、市場新聞靠來源 key 尾碼 `_tw`/`_us`),不在查詢時從代號格式推導,避免正則誤判(港股 0700、日股 7203)並集中邏輯。檢索指定市場時排除 `market IS NULL` 的塊,防止無法歸屬的跨市場新聞污染結果。
 - **市場快照只進 prompt,不入庫**:yfinance 資料每次問答即時抓取後併入 `generate` 的 prompt;不寫進 `doc_chunks`,也不計入引用編號,因為它不是可檢索的來源,抓取失敗一律靜默降級成無快照。
 - **決策卡不整段棄權**:即使資料稀薄,`generate` 仍固定要求觸發條件、關鍵事件、觀察指標,讓回答保持可執行;只有方向性的「立場」需要財報+新聞+市場數據齊全才會給。
 - **不輸出機率與信心分數——共識門檻用真實數據**:情境機率(「35% 機率 beat」)與信心分數是包裝成量化的幻覺,LLM 背後沒有任何機率模型;決策卡的門檻改用 yfinance 真實分析師共識區間(low/avg/high),情境解讀限定為條件式描述(「若高於上緣…」),prompt 硬規則明文禁止機率數字。
@@ -229,3 +235,5 @@ created_at TIMESTAMPTZ
 - **金融業查不到 API 數字**:官方 OpenAPI 只涵蓋一般業,金融、金控、保險、證券期貨業的欄位結構不同,這些公司只剩 MOPS 那軌。
 - 回答品質受本地模型限制,數字請對照引用來源確認。
 - **不支援多公司比較**:同時指名兩間公司的問題會降級為市場新聞掃描,不會做並列分析。
+- **165 筆 chunk 尚無市場標記**(2026-09-21 查庫),成因有兩種。其中 137 筆(67 篇)來自 cmoney,**無法回填**:標籤頁與筆記頁產生完全相同的 `note-detail.aspx?nid=` URL,入庫後分不出來源,標題也無市場線索,要修得重抓。(tag 12367 經查證為美股,key 已改名 `cmoney_us`,修好的是之後的寫入路徑,既有這些筆不受影響。)另外 28 筆(12 篇)是 udn/cnyes 未列入 `MARKET_SOURCES` 的鄰近版面——`udn_tw` 只掃 `cate/5590`,5599／5613／5616／5618 這些同層版面的文章進來時無來源可對應。這 165 筆維持 `market=NULL`,僅在不限市場查詢時出現。
+- **`both`(兩市場)查詢仍需重複檢索**:台美同一公司用不同代號(如 2330／TSM),資料在單一公司欄位下,要查兩邊得執行兩次檢索;未來若資料模型支援雙代號對應,可合併為一次檢索。

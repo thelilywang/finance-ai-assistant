@@ -163,6 +163,33 @@ def _format_history(history: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+# 只在上一則確實是市場反問時才附加。抽成常數是為了讓「這段有條件」一眼看得出來，
+# 埋在 f-string 中間的話下一個人很容易又把它改回無條件。
+_MARKET_REASK_RULE = """助理上一則是在問「要看台股還是美股」，而新問題是在回答它
+（「台股」「美股」「都要」），改寫時務必保留這個選擇：「台股」→「…台股（代號）的…」、
+「美股」→「…美股 ADR 的…」、「都要」→「請同時提供台股與美股兩邊的…」。
+不可把它當成其他意思（例如業務部門）。
+"""
+
+# ask_market 文案是 i18n 模板（公司名、代號會替換），但結尾這句固定，中英各一。
+# 比對結尾而非整段，模板裡的變數就不影響判斷。
+_REASK_MARKERS = ("請問你要看哪一邊？", "Which one would you like?")
+
+
+def _last_turn_is_market_reask(history: list[tuple[str, str]]) -> bool:
+    """上一則助理回覆是不是雙掛牌的市場反問。
+
+    認文案結尾的固定句，且該輪問句要撿得回雙掛牌代號——兩個條件都成立才算，
+    避免使用者自己打出「請問你要看哪一邊？」就觸發那三個模板。
+    """
+    if not history:
+        return False
+    _user, assistant = history[-1]
+    if not any(m in (assistant or "") for m in _REASK_MARKERS):
+        return False
+    return _last_dual_listed(history[-1:]) is not None
+
+
 def rewrite_question(state: GraphState) -> GraphState:
     """有對話歷史時，把追問改寫成不依賴上下文的獨立問題；沒有就直接通過。
 
@@ -172,13 +199,19 @@ def rewrite_question(state: GraphState) -> GraphState:
     if state.get("market_confirmed") or not state.get("history"):
         return state
 
+    # 市場消歧那三個模板只在「上一則真的是反問」時才給模型看。它們原本無條件寫在
+    # prompt 裡，模型會把「請同時提供台股與美股兩邊的…」當成通用句型往外套：實測
+    # 「美股半導體最近如何？」「台股電子股最近表現怎麼樣？」都被改寫成兩邊都要，
+    # market 因此抽成 both，撈回使用者沒問的那個市場（tests/eval_multiturn_market.py
+    # 的 M4／M5／M6）。條件本來就寫在句子裡，但和一般規則平級擺著等於沒有約束力。
+    reask_block = _MARKET_REASK_RULE if _last_turn_is_market_reask(state["history"]) else ""
+
     prompt = f"""以下是使用者與財經助理的對話紀錄，以及使用者的新問題。
 若新問題依賴上下文（例如「那毛利率呢？」），請改寫成一個不依賴上下文、可獨立理解的完整問題；
 若新問題本身已經獨立完整，原樣輸出即可。只輸出改寫後的問題，不要有其他文字。
-若助理上一則是在問「要看台股還是美股」，而新問題是在回答它（「台股」「美股」「都要」），
-改寫時務必保留這個選擇：「台股」→「…台股（代號）的…」、「美股」→「…美股 ADR 的…」、
-「都要」→「請同時提供台股與美股兩邊的…」。不可把它當成其他意思（例如業務部門）。
-
+改寫只補回問句缺少的資訊，不得增加使用者沒問的東西；使用者只問單一市場（只講台股或
+只講美股）時，改寫後也只能有那一個市場，不可擅自擴成兩邊都要。
+{reask_block}
 對話紀錄：
 {_format_history(state["history"])}
 
@@ -186,9 +219,12 @@ def rewrite_question(state: GraphState) -> GraphState:
 """
     started = time.monotonic()
     rewritten = _llms(_model_of(state))["llm"].invoke(prompt).content.strip()
+    # qid 以改寫「後」的問句計算：下游節點看到的都是改寫後的問句，用改寫前的算會讓
+    # 這筆紀錄掛在一個之後再也不出現的 qid 上，同一題的耗時就串不起來。
+    question = rewritten or state["question"]
     log_duration(log, "rewrite_question", started, node="rewrite_question",
-                 model=_model_of(state), qid=_qid(state["question"]))
-    return {**state, "question": rewritten or state["question"]}
+                 model=_model_of(state), qid=_qid(question))
+    return {**state, "question": question}
 
 
 class ExtractedFilters(BaseModel):
@@ -473,7 +509,7 @@ def _merge_latest_report(docs: list[dict], candidates: list[dict]) -> list[dict]
 
 
 def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None,
-                     news_since_days: int | None = None) -> list[dict]:
+                     news_since_days: int | None = None, market: str | None = None) -> list[dict]:
     """向量檢索 + 既有的補資料規則（doc_type 濾空放寬重查、財報補新聞、補全域市場新聞）。
 
     news_since_days 由 extract_filters 的 LLM 從問題判斷（None 表示不限日期），
@@ -483,11 +519,15 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
     query_vec, cache_hit = _embed_query_cached(question)
     embed_ms = round((time.monotonic() - started) * 1000)
 
+    # "both" 是「兩邊都要」＝不限制，不是第三個市場值；不在這裡收掉的話會被當成
+    # market='both' 帶進 SQL，過濾出零筆。
+    market = market if market in ("tw", "us") else None
+
     parallel = bool(company) and config.RETRIEVE_PARALLEL
     if parallel:
-        docs = _retrieve_parallel(query_vec, company, doc_type, news_since_days)
+        docs = _retrieve_parallel(query_vec, company, doc_type, news_since_days, market)
     else:
-        docs = _retrieve_sequential(query_vec, company, doc_type, news_since_days)
+        docs = _retrieve_sequential(query_vec, company, doc_type, news_since_days, market)
 
     # pool 統計是決定 max_size 的依據：requests_waiting 持續大於 0 代表連線不夠用，
     # 三段並行各佔一條，連線不足時會等到 timeout 而不是變慢
@@ -499,13 +539,14 @@ def retrieve_context(question: str, company: str | None = None, doc_type: str | 
     return docs
 
 
-def _relax_doc_type(query_vec, company, news_since_days) -> list[dict]:
+def _relax_doc_type(query_vec, company, news_since_days, market=None) -> list[dict]:
     """doc_type 濾到空就放寬重查，避免問「財報」時把僅有的新聞全濾光。
 
     標記放寬過，讓呼叫端能告訴 LLM「拿到的不是原本要的類型」；
     掛在每筆 dict 上而非改回傳結構，assemble 與既有測試都不受影響。
     """
-    docs = similarity_search(query_vec, company=company, news_since_days=news_since_days)
+    docs = similarity_search(query_vec, company=company, news_since_days=news_since_days,
+                             market=market)
     return [{**d, "relaxed": "doc_type"} for d in docs]
 
 
@@ -545,13 +586,18 @@ def _latest_report_docs(query_vec, company, doc_type) -> list[dict]:
     )
 
 
-def _retrieve_sequential(query_vec, company, doc_type, news_since_days) -> list[dict]:
-    """循序版本：無 company 時的唯一路徑，也是 RETRIEVE_PARALLEL=0 的回退路徑。"""
+def _retrieve_sequential(query_vec, company, doc_type, news_since_days, market=None) -> list[dict]:
+    """循序版本：無 company 時的唯一路徑，也是 RETRIEVE_PARALLEL=0 的回退路徑。
+
+    market 只在沒有 company 時真正起作用——有 company 時市場已由代號鎖定。
+    但市場新聞那段補充無論如何都要帶上：它刻意不限公司，正是市場外洩的通道。
+    """
     docs = similarity_search(
         query_vec, company=company, doc_type=doc_type, news_since_days=news_since_days,
+        market=market,
     )
     if not docs and doc_type:
-        docs = _relax_doc_type(query_vec, company, news_since_days)
+        docs = _relax_doc_type(query_vec, company, news_since_days, market)
     if not company:
         return docs
 
@@ -572,11 +618,12 @@ def _retrieve_sequential(query_vec, company, doc_type, news_since_days) -> list[
         docs = _merge_market_news(docs, similarity_search(
             query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
             news_since_days=news_since_days, exclude_company=company, order_by_recency=True,
+            market=market,
         ))
     return docs
 
 
-def _retrieve_parallel(query_vec, company, doc_type, news_since_days) -> list[dict]:
+def _retrieve_parallel(query_vec, company, doc_type, news_since_days, market=None) -> list[dict]:
     """同公司新聞與市場脈絡最後是否採用要看主檢索結果，但 SQL 本身不依賴它；先並行取
     候選、後過濾即可省掉兩段等待。採用條件與順序和 _retrieve_sequential 完全相同。"""
     want_latest = _wants_latest_report(company, doc_type)
@@ -584,7 +631,7 @@ def _retrieve_parallel(query_vec, company, doc_type, news_since_days) -> list[di
     try:
         primary: Future = executor.submit(
             similarity_search, query_vec, company=company, doc_type=doc_type,
-            news_since_days=news_since_days,
+            news_since_days=news_since_days, market=market,
         )
         latest_report: Future | None = executor.submit(
             _latest_report_docs, query_vec, company, doc_type,
@@ -596,12 +643,13 @@ def _retrieve_parallel(query_vec, company, doc_type, news_since_days) -> list[di
         market_news: Future = executor.submit(
             similarity_search, query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
             news_since_days=news_since_days, exclude_company=company, order_by_recency=True,
+            market=market,
         )
 
         docs = primary.result()
         if not docs and doc_type:
             # doc_type 放寬是主結果為空才成立，無法預先決定；其餘候選仍可平行等待。
-            docs = _relax_doc_type(query_vec, company, news_since_days)
+            docs = _relax_doc_type(query_vec, company, news_since_days, market)
 
         # 與循序版同一個條件與順序：放寬過就不插財報席位
         if docs and latest_report is not None and not docs[0].get("relaxed"):
@@ -724,6 +772,14 @@ def _seed_prompt(state: GraphState) -> str:
     if state.get("news_since_days"):
         known.append(f"使用者要求的新聞時效：只看最近 {state['news_since_days']} 天內的新聞，"
                      f"請把這個天數帶進檢索工具的 news_since_days 參數")
+    # 市場是程式已經判定好的（extract_filters／resolve_market），直接指名讓模型照填，
+    # 不要它自己從問句再推一次——推錯就會撈回使用者沒問的那個市場。
+    # "both" 不指名：那是「兩邊都要」，限制任一邊都會漏掉另一邊。
+    if state.get("market") in ("tw", "us"):
+        label = "台股" if state["market"] == "tw" else "美股"
+        known.append(f"本次檢索的市場：{label}（{state['market']}）。"
+                     f"請把 {state['market']} 填進檢索工具的 market 參數，"
+                     f"不要檢索另一個市場的資料")
     known_block = "\n".join(known)
     return f"""使用者問題：{state['question']}
 {known_block}
@@ -982,7 +1038,9 @@ def allowed_fields(state: GraphState, has_market: bool | None = None) -> list[st
 _FIELD_LINE_RE = re.compile(r"^- \*\*(.+?)\*\*[：:]", re.MULTILINE)
 
 
-def check_answer_format(answer: str, fields: list[str], ordered_count: int, lang: str) -> list[dict]:
+def check_answer_format(answer: str, fields: list[str], ordered_count: int, lang: str,
+                        source_markets: list[str | None] | None = None,
+                        market: str | None = None) -> list[dict]:
     """事後檢查決策卡是否符合 prompt 訂的格式，只寫 log、不擋輸出、不改寫輸出。
 
     回傳結構化 dict 而非字串，是為了讓 log 之後能被彙總分析（例如數
@@ -1036,6 +1094,24 @@ def check_answer_format(answer: str, fields: list[str], ordered_count: int, lang
     })
     if unknown:
         violations.append({"rule": "unknown_citation_marker", "detail": unknown})
+
+    # (e) 跨市場引用：問美股卻引用了台股來源。正常流程走不到這裡——市場不明且是
+    # 雙掛牌時 resolve_market 會停下來反問使用者（ask_market），問句講了市場則由
+    # similarity_search 的 market 過濾把另一邊擋在檢索外，模型手上根本沒有那些素材。
+    # 這條是那兩層萬一失效時的可觀測性：來源沒標市場（market 為 NULL）而混進來、
+    # 或 both 路徑兩邊併陳時，都會在這裡留下記錄。
+    # ponytail: 只寫 log 不擋輸出——前兩層是真正的防線，這層的作用是讓「防線破了」
+    # 這件事數得出頻率。log 若真的開始出現再考慮升級成重生成。
+    if market in ("tw", "us") and source_markets:
+        wrong = sorted({
+            n for n in (int(x) for x in citation_re.findall(answer))
+            if 1 <= n <= len(source_markets)
+            and source_markets[n - 1] in ("tw", "us")
+            and source_markets[n - 1] != market
+        })
+        if wrong:
+            violations.append({"rule": "cross_market_citation",
+                               "detail": {"market": market, "cited": wrong}})
 
     return violations
 
@@ -1219,10 +1295,22 @@ def generate(state: GraphState) -> GraphState:
             us=otc, tw=companies[0],
         ) + "\n"
 
+    # 跨市場素材的防線掛在哪裡由設定決定（見 config.CROSS_MARKET_GUARD）。預設掛在
+    # 「已知事實」欄：它是唯一直接引用檢索素材、且必附 [來源N] 的欄位，素材market 不對
+    # 的話第一個出問題的就是它；掛在共用規則區則會對每一欄都加一條約束。
+    guard = t(lang, "cross_market_guard")
+    field_lines = []
+    for f in fields:
+        line = t(lang, f"trend_field_{f}")
+        if f == "facts" and config.CROSS_MARKET_GUARD == "facts":
+            line += guard
+        field_lines.append(line)
+
     trend_block = "\n".join([
         t(lang, "trend_header"),
-        *(t(lang, f"trend_field_{f}") for f in fields),
-        t(lang, "trend_rules_common"),
+        *field_lines,
+        t(lang, "trend_rules_common")
+        + (guard if config.CROSS_MARKET_GUARD == "common" else ""),
     ])
 
     prompt = f"""你是專業的財經分析助理。請根據下方參考資料回答使用者問題。
@@ -1256,7 +1344,11 @@ def generate(state: GraphState) -> GraphState:
     log_duration(log, "generate", started, node="generate", model=_model_of(state),
                  qid=_qid(state["question"]), prompt_chars=len(prompt),
                  answer_chars=len(resp.content or ""), retrieved=len(state.get("retrieved") or []))
-    violations = check_answer_format(resp.content or "", fields, len(ordered), lang)
+    # 來源編號 → 該來源的市場，對齊 ordered 的順序（索引 n-1 即 [來源n]）
+    doc_market = {d["source"]: d.get("market") for d in state["retrieved"]}
+    violations = check_answer_format(
+        resp.content or "", fields, len(ordered), lang,
+        source_markets=[doc_market.get(s) for s in ordered], market=state.get("market"))
     if violations:
         log.warning("決策卡格式違規", extra={"fields": {
             "node": "generate", "qid": _qid(state["question"]),

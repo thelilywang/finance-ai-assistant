@@ -17,6 +17,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
 from . import config
+from .tickers import is_tw_ticker
 from .vectorstore import delete_by_source, insert_chunks
 
 log = logging.getLogger("ingest")
@@ -116,12 +117,17 @@ def _embed_in_batches(embeddings, chunks: list[str], source: str) -> list[list[f
 
 def ingest_text(
     text: str, source: str, company: str | None, doc_type: str, published_at: str | None,
-    title: str | None = None,
+    title: str | None = None, market: str | None = None,
 ) -> int:
     """切 chunk → embedding → 寫入 pgvector，回傳寫入的 chunk 數。
 
     寫入前先 delete_by_source(source) 去重，重跑同一來源不會累積重複資料。
+
+    market 不傳時由 company 的代號格式推定；市場新聞沒有 company（推不出來），
+    由呼叫端依來源指定。推定只發生在這一個地方，檢索端直接讀欄位不再推。
     """
+    if market is None and company:
+        market = "tw" if is_tw_ticker(company) else "us"
     if not text or not text.strip():
         log.warning("內容為空（可能 PDF 抽不出文字），跳過", extra={"fields": {
             "source": source, "company": company, "reason": "no_content"}})
@@ -147,6 +153,7 @@ def ingest_text(
             "title": title,
             "doc_type": doc_type,
             "company": company,
+            "market": market,
             "published_at": dt.date.fromisoformat(published_at) if published_at else None,
             "chunk_index": i,
             "content": chunk,

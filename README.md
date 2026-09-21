@@ -53,7 +53,7 @@ See steps 1-4 of Quick Start above (Ollama models, database, Python env, Google 
 
 ### Features
 
-- **Q&A over reports and news** with source citations, plus a structured decision card (facts, inference, valuation, consensus & thresholds, scenario read, earnings-call watch list, stance, triggers, key event, watch metrics) at the end of each answer
+- **Q&A over reports and news** with source citations, plus a structured decision card (facts, inference, valuation, consensus & thresholds, scenario read, earnings-call watch list, stance, triggers, key event, watch metrics) at the end of each answer; retrieval is market-aware, filtering TW/US data separately to prevent cross-market mixing
 - **Live market snapshot with real analyst consensus**: price, 52-week range, PE, target price, analyst view, plus yfinance consensus data — current-quarter EPS/revenue consensus range, analyst count, past-4-quarter beat/miss, next earnings date — folded into the decision card; any failure degrades gracefully, never breaks the answer
 - **Interactive charts under each answer** (real data, no LLM involved): 6-month price line with a next-earnings-date marker, and 8-quarter EPS estimate vs actual grouped bars colored by beat (green) / miss (red)
 - **One-command data updates**: US filings on two tracks (SEC XBRL API for figures, incl. `ifrs-full` for foreign issuers; SEC EDGAR filing text incl. 6-K/20-F), TW filings on two tracks (official TWSE/TPEx OpenAPI for figures, MOPS PDFs for narrative), Yahoo Finance RSS (news), market-news sweep from udn/cmoney/cnyes listings; idempotent re-runs
@@ -110,6 +110,7 @@ flowchart TD
 |---|---|---|
 | `NEWS_RETENTION_DAYS` | `180` | News chunks older than this are auto-pruned on app startup (reports are never pruned) |
 | `HISTORY_ANSWER_MAX_CHARS` | `400` | Max chars of a past answer kept in chat history (trend section stripped first) sent to the LLM on later turns |
+| `CROSS_MARKET_GUARD` | `facts` | Retrieval market-awareness guard level; `off` (disabled), `facts` (reminder appended to facts section), or `common` (reminder in common-rules section) |
 
 For architecture, design decisions, and the full AI Product Case Study (CRISP-DM, ML system design, production risks), see [docs/AI_Product_Case_Study.md](docs/AI_Product_Case_Study.md) and [docs/PROJECT.md](docs/PROJECT.md).
 
@@ -165,7 +166,7 @@ chainlit run src/app.py -w    # 開 http://localhost:8000,用 Google 帳號登�
 
 ### 功能
 
-- **財報/新聞問答**:回答附引用來源,結尾附結構化決策卡(事實、推論、估值、市場共識與門檻、情境解讀、法說會關注清單、立場、觸發條件、關鍵事件、觀察指標)
+- **財報/新聞問答**:回答附引用來源,結尾附結構化決策卡(事實、推論、估值、市場共識與門檻、情境解讀、法說會關注清單、立場、觸發條件、關鍵事件、觀察指標);檢索具市場意識,台股/美股資料分開過濾防止跨市混淆
 - **即時市場快照含真實分析師共識**:用 yfinance 抓股價、52 週區間、本益比、目標價、分析師評等,加上共識資料——當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss、下次財報日——併入決策卡;抓取失敗時優雅降級,不影響回答
 - **回答附兩張互動圖表**(全部真資料,LLM 不參與畫圖):6 個月股價走勢線圖(含下次財報日標記)、近 8 季 EPS 預估 vs 實際 grouped bar(beat 綠/miss 紅)
 - **一鍵抓取更新**:美股財報兩軌(SEC XBRL API 取數字,外國發行人走 ifrs-full;SEC EDGAR 取申報全文,含 6-K/20-F)、台股財報兩軌(證交所/櫃買官方 OpenAPI 取數字、MOPS 取文字敘述)、Yahoo Finance RSS(新聞)、udn/cmoney/鉅亨網 cnyes 市場新聞列表頁掃描;重跑同一來源自動去重
@@ -228,5 +229,6 @@ flowchart TD
 |---|---|---|
 | `NEWS_RETENTION_DAYS` | `180` | 啟動時自動清除超過此天數的新聞 chunk(財報一律保留) |
 | `HISTORY_ANSWER_MAX_CHARS` | `400` | 對話歷史中保留的過去回答最大字數(先去掉趨勢觀點段落),控制後續輪次送給 LLM 的 token 量 |
+| `CROSS_MARKET_GUARD` | `facts` | 檢索市場意識防線等級;`off`(關閉)、`facts`(提醒併入事實段)、`common`(提醒併入共用規則區) |
 
 架構、設計決策與完整 AI Product Case Study(CRISP-DM、ML 系統設計、production risks)請見 [docs/AI_Product_Case_Study.md](docs/AI_Product_Case_Study.md) 與 [docs/PROJECT.md](docs/PROJECT.md)。

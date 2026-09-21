@@ -66,6 +66,15 @@ RETRIEVE_PARALLEL = os.getenv("RETRIEVE_PARALLEL", "1").lower() not in ("0", "fa
 # 保留是為了能在同一份程式碼上跑 A/B。
 ANSWER_SHAPE_GATING = os.getenv("ANSWER_SHAPE_GATING", "1").lower() not in ("0", "false", "no")
 
+# 決策卡的「跨市場素材」提醒掛在哪裡。檢索層上線市場過濾後這條規則多半用不到，
+# 但留一層防線仍有價值，問題只在於掛的位置——共用規則區（common）的指令密度已經
+# 很高，專案兩次實測都顯示堆上去會擠掉欄位本職（見 MAINTENANCE_LOG「保持現狀」）。
+#   off    不加（檢索層已擋）
+#   facts  只加在「已知事實」欄——唯一直接引用檢索素材、必附 [來源N] 的欄位
+#   common 加在共用規則區（原階段 5 的作法）
+# 保留三個值是為了能在同一份程式碼上跑 A/B。
+CROSS_MARKET_GUARD = os.getenv("CROSS_MARKET_GUARD", "facts").lower()
+
 # extract_filters 專用模型。它只做結構化抽取（companies／doc_type／news_since_days／
 # market／in_scope／answer_shape），不需要與 generate 同級的模型，但抽錯代號會讓整條
 # 流程查錯公司，故換不換須看實測的正確率而非只看耗時。空字串代表沿用該輪的主模型，
