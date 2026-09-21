@@ -1,4 +1,5 @@
-"""最小 self-check：fetch_missing_data 收集各來源結果訊息，單一來源失敗不中斷、不吞訊息。
+"""最小 self-check：fetch_missing_data 收集各來源結果訊息，單一來源失敗不中斷、不吞訊息，
+且每筆耗時 log 帶正確的 company／source（市場總覽新聞不掛在當次查詢的公司名下）。
 
 原本的 route_after_retrieve/needs_refetch 測試已隨函式移除——「資料夠不夠新、要不要補抓」
 現在由 LLM 依 MCP tool 說明自行判斷（見 src/mcp_server.py 的 docstring），沒有確定性路由可測。
@@ -9,9 +10,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import src.graph as graph
 import src.update as update
 from src.graph import fetch_missing_data
 from src.update import FetchResult
+
+# 攔 log_duration 收欄位：驗 company/source 標籤有沒有貼錯到隔壁那筆
+logged = []
+_orig_log_duration = graph.log_duration
+graph.log_duration = lambda log, event, started, **f: logged.append(f)
 
 _orig = (update.fetch_mops, update.fetch_edgar, update.fetch_news,
          update.fetch_market_news, update.fetch_tw_financials, update.fetch_sec_financials)
@@ -38,7 +45,26 @@ try:
     # has_report=True 只補新聞，兩軌財報都不重抓（依賴新聞排在最後）
     results = fetch_missing_data("2330", has_report=True)
     assert results == ["已寫入 3 筆", "已寫入 2 筆"]
+
+    # 市場總覽新聞與特定公司無關，記成 company=None 才不會灌水該公司的抓取成功率
+    update.fetch_mops = lambda co_id: FetchResult(False, "MOPS 查無財報")
+    logged.clear()
+    fetch_missing_data("2330", has_report=False)
+    assert [(f["company"], f["source"], f["ok"]) for f in logged] == [
+        ("2330", "fetch_tw_financials", True),
+        ("2330", "fetch_mops", False),
+        ("2330", "fetch_news", True),
+        (None, "fetch_market_news", True),
+    ]
+
+    # 例外那條路徑也要帶對標籤（成功/失敗兩處 log_duration 各自帶參數，容易漏改一邊）
+    update.fetch_mops = _boom
+    logged.clear()
+    fetch_missing_data("2330", has_report=False)
+    assert (logged[1]["company"], logged[1]["source"], logged[1]["ok"]) == ("2330", "fetch_mops", False)
+    assert logged[-1]["company"] is None
 finally:
+    graph.log_duration = _orig_log_duration
     (update.fetch_mops, update.fetch_edgar, update.fetch_news,
      update.fetch_market_news, update.fetch_tw_financials, update.fetch_sec_financials) = _orig
 

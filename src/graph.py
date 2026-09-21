@@ -642,27 +642,28 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
             # 台股財報走兩軌：官方 OpenAPI 拿精準數字，MOPS 拿 PDF 的文字敘述
             # （管理層討論、風險、展望）。兩軌各自獨立成敗，一軌掛掉仍有另一軌。
             calls = [
-                lambda: fetch_tw_financials(company),
-                lambda: fetch_mops(company),
-                lambda: fetch_news(company),
+                (company, "fetch_tw_financials", lambda: fetch_tw_financials(company)),
+                (company, "fetch_mops", lambda: fetch_mops(company)),
+                (company, "fetch_news", lambda: fetch_news(company)),
             ]
         else:
             # 美股財報也走兩軌：XBRL 拿精準數字，EDGAR 拿申報全文的文字敘述。
             # 數字在前、新聞維持最後（has_report 靠 calls[-1:] 取新聞，順序是契約）
             calls = [
-                lambda: fetch_sec_financials(company.upper()),
-                lambda: fetch_edgar(company.upper()),
-                lambda: fetch_news(company.upper()),
+                (company, "fetch_sec_financials", lambda: fetch_sec_financials(company.upper())),
+                (company, "fetch_edgar", lambda: fetch_edgar(company.upper())),
+                (company, "fetch_news", lambda: fetch_news(company.upper())),
             ]
         # 已有該公司財報才只補新聞；只有新聞時財報照抓（原本檢查整個 retrieved，害外國發行人的財報永遠沒抓）
         # 依賴「新聞排在最後」這個順序，上面兩個分支都要維持
         if has_report:
             calls = calls[-1:]
     # ponytail: 市場總覽新聞一律補掃，source_exists 會跳過已入庫的，重複觸發便宜
-    calls.append(lambda: fetch_market_news(3))
+    # company=None：市場總覽與特定公司無關，掛在當次查詢的公司名下會灌水該公司的抓取成功率
+    calls.append((None, "fetch_market_news", lambda: fetch_market_news(3)))
 
     results = []
-    for call in calls:
+    for call_company, source, call in calls:
         started = time.monotonic()
         try:
             # 取 FetchResult.ok 而非「沒拋例外就算成功」：查無 CIK、OpenAPI 查無公司、
@@ -670,11 +671,11 @@ def fetch_missing_data(company: str | None, has_report: bool) -> list[str]:
             result = call()
             results.append(result.detail)
             log_duration(log, "auto_fetch 單一來源完成", started, node="auto_fetch",
-                         company=company, ok=result.ok)
+                         company=call_company, source=source, ok=result.ok)
         except Exception as e:  # noqa: BLE001  單一來源失敗不中斷
             msg = f"抓取失敗：{e}"
             log_duration(log, "auto_fetch 單一來源失敗", started, node="auto_fetch",
-                         company=company, ok=False, error=str(e))
+                         company=call_company, source=source, ok=False, error=str(e))
             results.append(msg)
     return results
 
