@@ -137,4 +137,16 @@ assert "missing_disclaimer" in _rule_names(check_answer_format(no_disc, FIELDS, 
 assert "missing_disclaimer" not in _rule_names(
     check_answer_format(append_disclaimer(no_disc, "zh"), FIELDS, 3, "zh"))
 
+# 欄名被當行內標籤用不算自創引用標記。prompt 明文要「明確標示為推論」，模型就寫
+# 【推論】——2026-09-20/21 正式環境 17 筆 unknown_citation_marker 有 13 筆是這種假警報。
+inline_label = GOOD_ZH.replace("  - 動能延續 [來源2]", "  - 動能延續 [來源2]（【推論】非事實）")
+assert "unknown_citation_marker" not in _rule_names(
+    check_answer_format(inline_label, FIELDS, 3, "zh")), "欄名行內標籤不得誤報"
+
+# 但真的自創標記仍要抓到（這條規則存在的理由）
+rogue = GOOD_ZH.replace("- **利多**：需求強", "- **利多**：需求強 [即時市場數據]")
+assert "即時市場數據" in next(
+    v["detail"] for v in check_answer_format(rogue, FIELDS, 3, "zh")
+    if v["rule"] == "unknown_citation_marker")
+
 print("check_answer_format self-check OK")
