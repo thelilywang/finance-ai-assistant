@@ -107,6 +107,13 @@ STRINGS = {
             "不要寫「無」、不要用任何佔位文字）。不得輸出信心百分比；情境解讀不得含機率數字；"
             "不得編造資料中沒有的數字。）"
         ),
+        # 跨市場素材的防線。掛在哪一欄由 config.CROSS_MARKET_GUARD 決定，不寫死在
+        # common——共用規則區每多一條約束就擠壓所有欄位的本職（專案已兩次實測驗證）。
+        "cross_market_guard": (
+            "（本欄限制：參考資料屬於問句沒問的那個市場時（例如問美股卻只有台股大盤、"
+            "台股個股的資料），不得拿它來填本欄，改寫「參考資料中無美股／台股對應資料」"
+            "（依問句的市場擇一）。）"
+        ),
         "no_result_market": (
             "雖查無相關財報/新聞資料，以下為即時行情供參考：\n{snapshot}\n"
             "建議追蹤：下次財報/月營收公告、法說會，以及營收與毛利率變化。以上非投資建議。"
@@ -251,6 +258,12 @@ STRINGS = {
             "\"insufficient data\", no \"N/A\", no placeholder text of any kind). Never output a confidence "
             "percentage; the scenario read must not contain probability figures; "
             "never fabricate numbers not in the reference material.)"
+        ),
+        "cross_market_guard": (
+            "(Constraint for this field: when the reference material belongs to a market the question did "
+            "not ask about (e.g. the question is about US stocks but only Taiwan index/single-stock "
+            "material is available), do not use it to fill this field — write \"no US/Taiwan material in "
+            "the reference set\" (pick the one matching the question's market) instead.)"
         ),
         "no_result_market": (
             "No related filings/news were found, but here is the current market snapshot:\n{snapshot}\n"

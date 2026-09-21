@@ -50,7 +50,7 @@ mcp = FastMCP(
 @mcp.tool()
 async def search_knowledge_base(
     question: str, company: str | None = None, doc_type: str | None = None,
-    news_since_days: int | None = None,
+    news_since_days: int | None = None, market: str | None = None,
 ) -> str:
     """在向量資料庫中檢索與問題相關的財報/新聞片段。只做檢索，不會自動補抓資料。
 
@@ -60,6 +60,8 @@ async def search_knowledge_base(
         不可填多個值（例如 "financial_report,news" 是錯的），想兩種都查就留空。
     news_since_days: 只查最近 N 天內的新聞（財報不受影響），留空表示不限日期。
         問題有指定時效才填（「今天」填 1、「本週」填 7、「最近」填 90），沒指定就留空。
+    market: 只查某個市場，"tw"（台股）或 "us"（美股），留空表示不限市場。
+        引導訊息若已指明「本次檢索的市場」，就照填；沒指明就留空，不要自己從問題推測。
 
     回傳 JSON 字串：{"summary_for_llm": 整理過的可讀文字, "chunks": 結構化資料陣列}。
     你只需要讀 summary_for_llm，chunks 是給程式組引用用的，不需處理。summary 開頭會
@@ -86,9 +88,13 @@ async def search_knowledge_base(
     # 同理，天數也可能收到字串或 0/負數，非正整數一律視為不過濾
     if not isinstance(news_since_days, int) or isinstance(news_since_days, bool) or news_since_days < 1:
         news_since_days = None
+    # 同上：只認兩個合法值。"both"／"TW"／亂填一律視為不限市場——猜錯市場會過濾出
+    # 空結果，寧可不過濾也不要因為模型填錯字而查無資料
+    if market not in ("tw", "us"):
+        market = None
 
     docs = await asyncio.to_thread(
-        retrieve_context, question, company, doc_type, news_since_days
+        retrieve_context, question, company, doc_type, news_since_days, market
     )
     today = dt.date.today()
     _LABEL = {"news": "新聞", "financial_report": "財報"}

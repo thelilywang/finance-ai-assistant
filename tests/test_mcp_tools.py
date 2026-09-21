@@ -24,7 +24,7 @@ chunks = [
 ]
 
 # --- search_knowledge_base：回傳 JSON 須同時給 LLM 讀的文字與程式用的結構化 chunks ---
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: chunks
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: chunks
 out = json.loads(asyncio.run(mcp_server.search_knowledge_base("AAPL 財報", "AAPL")))
 assert set(out) == {"summary_for_llm", "chunks"}
 assert len(out["chunks"]) == len(chunks)  # 原封不動帶回，generate 要靠它組來源編號
@@ -49,7 +49,7 @@ mixed = chunks + [
     {"id": 4, "source": "https://news/other", "title": "他家", "doc_type": "news",
      "company": "MSFT", "published_at": TODAY, "content": "別家新聞"},
 ]
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: mixed
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: mixed
 mixed_summary = json.loads(
     asyncio.run(mcp_server.search_knowledge_base("AAPL 新聞", "AAPL"))
 )["summary_for_llm"]
@@ -57,18 +57,18 @@ assert "最新的 AAPL 的「新聞」距今 1 天" in mixed_summary, mixed_summ
 assert "距今 0 天" not in mixed_summary.split("以下是檢索結果")[0]
 
 # 不指名公司時維持原行為：全部新聞一起算，取最新的 0 天
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: mixed
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: mixed
 any_summary = json.loads(
     asyncio.run(mcp_server.search_knowledge_base("大盤新聞"))
 )["summary_for_llm"]
 assert "最新的「新聞」距今 0 天" in any_summary, any_summary
 
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: chunks
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: chunks
 
 # 只給 N 讓模型自己比門檻不夠：實測報 N=17 仍直接收工，故把結論一起寫進 header。
 # 門檻與 docstring 的判準必須一致，否則等於給模型兩套互相矛盾的說明。
 def _fresh_line(days_ago, news_since_days=None):
-    mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: [
+    mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: [
         {"id": 1, "source": "s", "title": None, "doc_type": "news", "company": "AAPL",
          "published_at": TODAY - dt.timedelta(days=days_ago), "content": "新聞"}]
     s = json.loads(asyncio.run(
@@ -86,12 +86,12 @@ assert "請呼叫 fetch_company_data" in _fresh_line(2, 7), _fresh_line(2, 7)
 assert "不需補抓" in _fresh_line(2, 90)
 
 # 只有財報沒有新聞時要明講，否則模型會誤以為新聞夠新
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: [chunks[0]]
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: [chunks[0]]
 only_report = json.loads(asyncio.run(mcp_server.search_knowledge_base("x")))
 assert "沒有任何新聞" in only_report["summary_for_llm"]
 
 # 日期不明的資料不應該炸，也不該硬掰天數
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: [
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: [
     {"id": 3, "source": "s", "title": None, "doc_type": "news",
      "company": None, "published_at": None, "content": "無日期"}
 ]
@@ -100,7 +100,7 @@ assert "發布日期：不明" in no_date["summary_for_llm"]
 
 # doc_type 只接受單一合法值：LLM 實測會塞 "financial_report,news"，那樣過濾會查空
 seen = {}
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: seen.update(doc_type=d) or chunks
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: seen.update(doc_type=d) or chunks
 asyncio.run(mcp_server.search_knowledge_base("x", None, "financial_report,news"))
 assert seen["doc_type"] is None  # 多值 → 不過濾，而非照字面查
 asyncio.run(mcp_server.search_knowledge_base("x", None, "news"))
@@ -108,8 +108,20 @@ assert seen["doc_type"] == "news"  # 單一合法值照常傳遞
 asyncio.run(mcp_server.search_knowledge_base("x", None, "亂填"))
 assert seen["doc_type"] is None
 
+# market 同樣只接受 "tw"/"us"：模型填錯字時寧可不過濾，也不要因為猜錯市場查出空結果
+seen = {}
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: seen.update(market=m) or chunks
+asyncio.run(mcp_server.search_knowledge_base("x", None, None, None, "us"))
+assert seen["market"] == "us"  # 合法值照常傳遞到檢索層
+asyncio.run(mcp_server.search_knowledge_base("x", None, None, None, "both"))
+assert seen["market"] is None  # "both"＝兩邊都要，不可當成市場值過濾
+asyncio.run(mcp_server.search_knowledge_base("x", None, None, None, "TW"))
+assert seen["market"] is None  # 大小寫不符一律視為不過濾
+asyncio.run(mcp_server.search_knowledge_base("x", None, None, None))
+assert seen["market"] is None  # 沒填就是不限市場
+
 # 查無資料時仍是合法 JSON，chunks 為空
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: []
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: []
 empty = json.loads(asyncio.run(mcp_server.search_knowledge_base("無此標的")))
 assert empty["chunks"] == []
 assert "查無" in empty["summary_for_llm"]
@@ -120,11 +132,11 @@ mcp_server.fetch_missing_data = lambda company, has_report: (
     calls.update(company=company, has_report=has_report) or ["已匯入財報", "新聞更新完成"]
 )
 
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: []  # 沒有既有財報
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: []  # 沒有既有財報
 assert asyncio.run(mcp_server.fetch_company_data("2330")) == "已匯入財報；新聞更新完成"
 assert calls == {"company": "2330", "has_report": False}
 
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: chunks  # 已有財報 → 只補新聞
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: chunks  # 已有財報 → 只補新聞
 asyncio.run(mcp_server.fetch_company_data("aapl.us"))  # 順便驗證後綴會被正規化掉
 assert calls == {"company": "AAPL", "has_report": True}
 
@@ -136,7 +148,7 @@ def _report(days_ago):
              "content": "財報"}]
 
 for days, expected in [(89, True), (120, True), (121, False), (229, False), (None, False)]:
-    mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, _d=days: _report(_d)
+    mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None, _d=days: _report(_d)
     asyncio.run(mcp_server.fetch_company_data("AAPL"))
     assert calls["has_report"] is expected, (days, calls)
 
@@ -155,7 +167,7 @@ logging.getLogger("mcp_tools").addHandler(
     type("H", (logging.Handler,), {"emit": lambda self, r: seen.append(r)})()
 )
 
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: mixed
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: mixed
 seen.clear()
 s = json.loads(asyncio.run(mcp_server.search_knowledge_base("AAPL 新聞", "AAPL")))["summary_for_llm"]
 kb = [r for r in seen if r.msg == "search_knowledge_base"]
@@ -167,7 +179,7 @@ assert f"距今 {f['news_age_min']} 天" in s.split("以下是檢索結果")[0]
 assert 0 not in f["news_ages"], f         # 別家的 0 天不得混進這家的清單
 
 # 查無資料時不得炸掉，N 記為 None
-mcp_server.retrieve_context = lambda q, c=None, d=None, n=None: []
+mcp_server.retrieve_context = lambda q, c=None, d=None, n=None, m=None: []
 seen.clear()
 asyncio.run(mcp_server.search_knowledge_base("查無", "ZZZZ"))
 assert [r for r in seen if r.msg == "search_knowledge_base"][0].fields["news_age_min"] is None
