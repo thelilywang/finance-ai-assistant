@@ -1103,6 +1103,9 @@ def check_answer_format(answer: str, fields: list[str], ordered_count: int, lang
     unknown = sorted({
         m.group(1) for m in bracket_re.finditer(answer)
         if not re.fullmatch(rf"{re.escape(label)}\s*\d+", m.group(1))
+        # 欄名被當行內標籤用（prompt 要求「明確標示為推論」，模型就寫【推論】）
+        # 是遵守指示，不是自創引用標記；不排除掉的話假警報會淹掉真正要數的東西。
+        and m.group(1).strip() not in expected_names
     })
     if unknown:
         violations.append({"rule": "unknown_citation_marker", "detail": unknown})
