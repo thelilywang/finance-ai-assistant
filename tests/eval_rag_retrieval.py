@@ -38,6 +38,22 @@ def published_dates(company: str, doc_type: str) -> list[str]:
         return [str(r[0]) for r in cur.fetchall()]
 
 
+def _company_missing(doc_type: str) -> str | None:
+    """找一家「庫內有資料、但完全沒有該 doc_type」的公司；沒有就回 None。
+
+    放寬重查的題目不能寫死標的：補抓會持續補進財報，寫死的那家遲早不再符合情境。
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            "SELECT company FROM doc_chunks WHERE company IS NOT NULL"
+            " GROUP BY company HAVING count(*) FILTER (WHERE doc_type = %s) = 0"
+            " ORDER BY count(*) DESC LIMIT 1",
+            (doc_type,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
 def header_age(summary: str) -> int | None:
     """從 summary 開頭抓「最新的[ 公司 的]「新聞」距今 N 天」的 N；沒有就回 None。
 
@@ -67,11 +83,25 @@ def check_relax(item, chunks, summary):
     co, dt_ = item["company"], item["doc_type"]
     in_db = published_dates(co, dt_)
     if in_db:
-        return False, f"前提不成立：{co} 在庫內有 {len(in_db)} 個 {dt_} 日期，測不到放寬"
+        # 情境需要「有該公司的資料、但沒有該 doc_type」——沒有任何資料的公司
+        # 測不到放寬（濾掉 doc_type 後仍是空），測到的只是「查無此公司」。
+        # 題目寫死標的會過期：補抓一旦補進該公司的財報，情境就永久消失
+        # （2026-09-21 實測，庫內 21 家公司已全部都有財報）。故改為現找一家符合的。
+        alt = _company_missing(dt_)
+        if alt is None:
+            return False, (f"前提不成立：{co} 已有 {len(in_db)} 個 {dt_} 日期，"
+                           f"且庫內找不到任何「有資料但缺 {dt_}」的公司，此情境目前無法測")
+        # 換了標的就得重查：原本的 chunks 是對舊標的檢索出來的，拿來判定沒有意義
+        substituted = f"（{co} 已有 {dt_}，改測 {alt}）"
+        co = alt
+        raw = asyncio.run(search_knowledge_base(item["question"], co, dt_))
+        chunks = json.loads(raw)["chunks"]
+    else:
+        substituted = ""
     if not chunks:
-        return False, f"{co} 無 {dt_} 資料且 chunks 為空，放寬規則未觸發"
+        return False, f"{co} 無 {dt_} 資料且 chunks 為空，放寬規則未觸發{substituted}"
     kinds = sorted({c.get("doc_type") for c in chunks})
-    return True, f"{co} 無 {dt_} 資料，放寬後回 {len(chunks)} 筆，類型 {kinds}"
+    return True, f"{co} 無 {dt_} 資料，放寬後回 {len(chunks)} 筆，類型 {kinds}{substituted}"
 
 
 def check_report_plus_news(item, chunks, summary):
@@ -102,9 +132,29 @@ def check_global_news(item, chunks, summary):
 
 
 def check_freshness(item, chunks, summary):
-    """新鮮度 header：比對 expect 裡的天數字串。"""
-    m = re.search(r"距今 (\d+) 天", item["expect"])
-    want = int(m.group(1))
+    """新鮮度 header：header 報的天數要等於該公司在庫內最新新聞的實際天數。
+
+    標準答案**從資料庫現算**，不寫在 expect 裡。寫死天數（原本是「距今 57 天」這種）
+    會隨補抓寫入新新聞而失效——2026-09-21 實測 E1 期望 57 天、實際已是 2 天，
+    三題全 FAIL 但程式沒有任何問題，純粹是標注過期。這種題目會定期假警報，
+    久了就沒人信它，等於白養一支測試。
+    """
+    co = item["company"]
+    in_db = published_dates(co, "news")
+    if not in_db:
+        return False, f"前提不成立：{co} 在庫內沒有任何帶日期的新聞，測不到新鮮度"
+    # 標準答案是「**實際回傳的** chunk 裡最新那則的天數」，不是庫內最新那則。
+    # 兩者常常不同，而且差異是合理的：庫內最新的那筆未必是檢索選中的——例如
+    # 2026-09-21 實測，ASML 庫內最新是 2 天前的「Eisman Says Buy Micron And SK
+    # Hynix」（掛在 ASML 名下的大盤新聞），而檢索挑的是 3 天前真正講 ASML 的那則。
+    # header 要忠實反映的是「這次給 LLM 的素材有多新」，拿庫內最新值去比會製造假警報。
+    own_dates = [c["published_at"] for c in chunks
+                 if c.get("company") == co and c.get("doc_type") == "news"
+                 and c.get("published_at")]
+    if not own_dates:
+        return False, f"回傳的 chunks 裡沒有 {co} 的新聞，無從驗新鮮度"
+    newest = max(dt.date.fromisoformat(str(d)[:10]) for d in own_dates)
+    want = (TODAY - newest).days
     got = header_age(summary)
     if got is None:
         return False, f"summary 開頭無新聞天數（開頭：{summary[:40]!r}）"
@@ -117,9 +167,9 @@ def check_freshness(item, chunks, summary):
                   if c.get("doc_type") == "news" and c.get("company") != co and c.get("published_at")]
         other_ages = sorted({(TODAY - dt.date.fromisoformat(str(c["published_at"])[:10])).days
                              for c in others})
-        return False, (f"header 報 {got} 天，預期 {want} 天；"
+        return False, (f"header 報 {got} 天，回傳的 {co} 新聞最新為 {want} 天；"
                        f"{co} 自身新聞距今 {own_ages}，非本公司新聞距今 {other_ages}")
-    return True, f"header 報距今 {got} 天，符合預期"
+    return True, f"header 報距今 {got} 天，與回傳素材最新一則相符"
 
 
 def check_single_period(item, chunks, summary):
