@@ -818,13 +818,16 @@ async def agent(state: GraphState) -> GraphState:
     # 不用補，它去補了 NVDA。工具 header 是逐次回傳的，模型得自己記住哪次結果對應
     # 哪一家——程式這邊早就知道了，直接指名，不要它自己對應。
     directive = []
-    if stale := _stale_companies(state)[0]:
-        directive = [HumanMessage(content="；".join(
-            f"{c} 的新聞距今 {age} 天，已過期，請對 {c} 呼叫 fetch_company_data"
-            for c, age in stale
-        ) + "。補抓後請以同樣的代號重新檢索。")]
+    stale, missing = _stale_companies(state)
+    if stale or missing:
+        # missing 沒有天數可填，措辭與 stale 分開，硬湊數字會讓訊息與 log 都失真
+        parts = [f"{c} 的新聞距今 {age} 天，已過期，請對 {c} 呼叫 fetch_company_data"
+                 for c, age in stale]
+        parts += [f"{c} 完全沒有檢索到新聞，請對 {c} 呼叫 fetch_company_data"
+                  for c in missing]
+        directive = [HumanMessage(content="；".join(parts) + "。補抓後請以同樣的代號重新檢索。")]
         log.info("指名過期標的", extra={"fields": {
-            "node": "agent", "stale": [c for c, _ in stale]}})
+            "node": "agent", "stale": [c for c, _ in stale], "missing": missing}})
     messages = messages + directive
     started = time.monotonic()
     resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(

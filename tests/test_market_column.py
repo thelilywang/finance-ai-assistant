@@ -10,6 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src import ingest, vectorstore
+import src.update as update
 from src.update import MARKET_SOURCES, _market_of_source
 
 
@@ -49,5 +51,59 @@ def main() -> None:
     print("OK")
 
 
+def test_fetch_tw_stock_news_market():
+    """fetch_tw_stock_news 是函式而非 MARKET_SOURCES 的 key，market 靠程式明確傳
+    'tw'，不靠 ingest_text 從 company 推定（此來源定義上只供台股）。
+
+    攔 ingest.insert_chunks 收 rows 驗欄位，同 test_ingest.py 的手法；
+    requests/trafilatura 全部假掉，不碰網路。
+    """
+    class _FakeResp:
+        status_code = 200
+        text = '"https://tw.stock.yahoo.com/news/公告-精金-2026年8月合併營收-111.html"'
+
+    class _FakeDoc:
+        text = "內文" * 60  # >= 100 字元門檻
+        title = "公告-精金-2026年8月合併營收"
+        date = "2026-08-31"
+
+    captured_rows = []
+
+    _orig_get = update.requests.get
+    _orig_fetch_url = update.trafilatura.fetch_url
+    _orig_bare_extraction = update.trafilatura.bare_extraction
+    _orig_source_exists = vectorstore.source_exists
+    _orig_insert_chunks = ingest.insert_chunks
+    _orig_delete_by_source = ingest.delete_by_source
+    _orig_ollama = ingest.OllamaEmbeddings
+
+    update.requests.get = lambda *a, **k: _FakeResp()
+    update.trafilatura.fetch_url = lambda link: "<html>fake</html>"
+    update.trafilatura.bare_extraction = lambda html, with_metadata=True: _FakeDoc()
+    vectorstore.source_exists = lambda source: False
+    ingest.delete_by_source = lambda source: None
+    ingest.OllamaEmbeddings = lambda *a, **k: type(
+        "E", (), {"embed_documents": lambda self, chunks: [[0.0] for _ in chunks]}
+    )()
+    ingest.insert_chunks = lambda rows: captured_rows.extend(rows)
+    try:
+        result = update.fetch_tw_stock_news("3049", limit=10)
+        assert result.ok, result.detail
+        assert captured_rows, "應寫入至少一筆 chunk"
+        assert all(r["market"] == "tw" for r in captured_rows), captured_rows
+        assert all(r["company"] == "3049" for r in captured_rows), captured_rows
+    finally:
+        update.requests.get = _orig_get
+        update.trafilatura.fetch_url = _orig_fetch_url
+        update.trafilatura.bare_extraction = _orig_bare_extraction
+        vectorstore.source_exists = _orig_source_exists
+        ingest.insert_chunks = _orig_insert_chunks
+        ingest.delete_by_source = _orig_delete_by_source
+        ingest.OllamaEmbeddings = _orig_ollama
+
+    print("fetch_tw_stock_news market='tw' self-check OK")
+
+
 if __name__ == "__main__":
     main()
+    test_fetch_tw_stock_news_market()
