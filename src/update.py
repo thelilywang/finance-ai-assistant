@@ -5,6 +5,7 @@
     python -m src.update report --market tw --company 2330
     python -m src.update news --company 2330 --limit 10
     python -m src.update market-news [--limit 10]
+    python -m src.update inventory [--doc-type news] [--company 2330]   # 唯讀盤點，不改資料
     python -m src.update prune --days 180
 
 美股財報與台股一樣走雙軌：SEC XBRL API 拿結構化數字、SEC EDGAR 拿申報全文的
@@ -28,6 +29,7 @@ import trafilatura
 
 from . import config
 from .ingest import ingest_file, ingest_text
+from .logging_setup import setup_logging
 from .tickers import is_tw_ticker
 
 log = logging.getLogger("update")
@@ -279,7 +281,8 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
                     "error": cover_only_reason}})
 
     url = f"{base}/{doc}"
-    print(f"[update] 下載 {form}：{url}")
+    log.info("下載 EDGAR 文件", extra={"fields": {
+        "company": ticker.upper(), "source": "edgar", "form": form, "url": url}})
     resp = requests.get(url, headers=headers, timeout=TIMEOUT)
     resp.raise_for_status()
 
@@ -1038,6 +1041,9 @@ def inventory(doc_type: str | None = None, company: str | None = None) -> bool:
 
 
 def main() -> None:
+    # CLI 進入點也要設定 logging，否則本模組的 log.* 只會落到 stderr，不會寫進
+    # data/logs 的 JSON Lines——抓取耗時與失敗原因就無法事後回測。
+    setup_logging("update")
     parser = argparse.ArgumentParser(description="抓取財報/新聞並匯入 pgvector")
     sub = parser.add_subparsers(dest="command", required=True)
 
