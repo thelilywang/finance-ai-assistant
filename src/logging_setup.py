@@ -1,7 +1,11 @@
 """集中設定 logging：stdout 照舊，另外每日一檔寫 JSON Lines 供事後回測。
 
-各服務進入點呼叫一次 `setup_logging("app")` / `setup_logging("mcp")`。
+各服務進入點呼叫一次：`setup_logging("app")` / `setup_logging("mcp")` / `setup_logging("update")`。
 之後各模組用 `logging.getLogger(__name__)` 取得 logger 即可，不需再設定。
+
+**新增任何 __main__ / CLI 進入點都要呼叫一次**，否則 root logger 沒有 handler，
+該路徑的 log 只會落到 stderr、不會寫進 JSON Lines——從終端看不出差別，
+要翻 LOG_DIR 有沒有生成當天的檔案才會發現（update.py 的 CLI 就曾漏掉）。
 
 耗時等結構化欄位透過 `extra={"fields": {...}}` 傳入，會併進 JSON 那一行：
 
