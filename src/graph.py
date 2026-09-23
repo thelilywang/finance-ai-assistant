@@ -31,7 +31,7 @@ from typing import Annotated, Literal, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, field_validator
@@ -916,7 +916,7 @@ def _news_age_days(doc: dict) -> int | None:
     return (dt.date.today() - published).days
 
 
-def _news_ages_by_company(state: GraphState) -> dict[str, list[int]]:
+def _news_ages_by_company(state: GraphState) -> dict[str, list[int]] | None:
     """把所有 search_knowledge_base 回傳的新聞按 company 分組，各自算距今天數。
 
     多標的的新鮮度必須逐家判斷：合併後取 min 會讓最新的那家代表全部。
@@ -928,6 +928,9 @@ def _news_ages_by_company(state: GraphState) -> dict[str, list[int]]:
     留著會讓 min 永遠停在舊天數——實測 2454 在 round 2 就補抓成功、新聞已是 0 天，
     卻因 round 1 的 16 天還在訊息串裡而被重複指名到輪數上限，白花 38.9 秒。
     assemble 反過來要累積全部歷史，那是檢索涵蓋率，與「現在最新是幾天」不同問題。
+
+    若補抓之後一次檢索都沒有，回傳 None：這種情況無從判斷「新聞是否存在」，
+    只代表還沒查——不能當成「查了但沒有」。
     """
     msgs = state["messages"]
     last_fetch = max(
@@ -935,8 +938,11 @@ def _news_ages_by_company(state: GraphState) -> dict[str, list[int]]:
          if isinstance(m, ToolMessage) and m.name == "fetch_company_data"),
         default=-1,
     )
+    tail = msgs[last_fetch + 1:]
+    if not any(isinstance(m, ToolMessage) and m.name == "search_knowledge_base" for m in tail):
+        return None
     ages: dict[str, list[int]] = {}
-    for m in msgs[last_fetch + 1:]:
+    for m in tail:
         if not isinstance(m, ToolMessage) or m.name != "search_knowledge_base":
             continue
         try:
@@ -969,8 +975,14 @@ def _stale_companies(state: GraphState) -> tuple[list[tuple[str, int]], list[str
     新聞 0 天蓋掉）。route_after_tools 用它決定要不要回 agent，agent 用它把「哪一家
     過期」寫進訊息——實測模型收到「該補抓」會照做，卻補錯家，因為 header 是逐次
     回傳的，得自己記住哪次結果對應哪家。兩處共用這裡，判準才不會各自漂移。
+
+    ages 為 None（補抓後尚未檢索）時兩者皆回空：沒有可判斷的檢索就不指名，
+    交還 LLM 依 tool 說明自行先查庫，否則每家都會落進 missing，變成叫模型
+    重抓剛抓完的公司、或在首輪還沒查庫時就白白補抓。
     """
     ages = _news_ages_by_company(state)
+    if ages is None:
+        return [], []
     limit = _fresh_limit(state)
     stale, missing = [], []
     for c in state.get("companies") or []:
