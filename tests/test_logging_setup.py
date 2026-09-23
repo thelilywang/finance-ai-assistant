@@ -1,27 +1,18 @@
-"""自檢 logging：JSON Lines 格式、按日期分檔的檔名、冪等設定。
-
-執行：PYTHONDONTWRITEBYTECODE=1 python tests/test_logging_setup.py
-"""
+"""自檢 logging：JSON Lines 格式、按日期分檔的檔名、冪等設定。"""
 import datetime as dt
 import json
 import logging
-import sys
 import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from src import config, logging_setup
 
-original_dir = config.LOG_DIR
-original_handlers = logging.getLogger().handlers[:]
-original_level = logging.getLogger().level
 
-try:
+def test_logging_setup(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
-        config.LOG_DIR = tmp
-        logging.getLogger().handlers = []
+        monkeypatch.setattr(config, "LOG_DIR", tmp)
+        monkeypatch.setattr(logging.getLogger(), "handlers", [])
 
         logging_setup.setup_logging("app")
         handler_count = len(logging.getLogger().handlers)
@@ -77,10 +68,3 @@ try:
 
         for h in logging.getLogger().handlers:
             h.close()
-
-finally:
-    config.LOG_DIR = original_dir
-    logging.getLogger().handlers = original_handlers
-    logging.getLogger().setLevel(original_level)
-
-print("logging_setup self-check OK")
