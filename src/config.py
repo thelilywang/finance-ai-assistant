@@ -1,5 +1,6 @@
 """集中管理設定，從 .env 讀取。"""
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,7 +25,8 @@ SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "finance-ai-assistant contact@examp
 
 # MCP server：LangGraph agent 與外部 client（如 Claude Desktop）共用的 tool 端點
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp")
-# 空字串代表不啟用驗證（本機開發用）；有設值時 mcp_server 會檢查 Authorization: Bearer
+# 有設值時 mcp_server 會檢查 Authorization: Bearer。空字串的行為看跑在哪裡：
+# 容器內拒絕啟動（見 mcp_server.py 的 __main__），容器外僅印 warning 後放行供本機開發。
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 # MCP SDK 的 DNS rebinding 防護允許清單：docker 內是 service 名稱，本機開發是 localhost
 MCP_ALLOWED_HOSTS = os.getenv("MCP_ALLOWED_HOSTS", "mcp-server:8000,localhost:8000,127.0.0.1:8000").split(",")

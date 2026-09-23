@@ -20,6 +20,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -238,6 +239,11 @@ if __name__ == "__main__":
     http_app = mcp.streamable_http_app()
     if config.MCP_AUTH_TOKEN:
         http_app = _add_bearer_auth(http_app)
+    elif Path("/.dockerenv").exists():
+        # ponytail: 只擋容器內——那才是 port 可能被 expose 出去的情境，本機開發照舊放行。
+        # 要連本機也擋（例如日後開放外部 client）就把這條改成 else。
+        raise SystemExit("MCP_AUTH_TOKEN 未設定，容器內拒絕無驗證啟動。請在 .env 設定後重啟。")
     else:
         logging.getLogger("mcp").warning("MCP_AUTH_TOKEN 未設定，未啟用身分驗證（僅適合本機開發）")
-    uvicorn.run(http_app, host="0.0.0.0", port=8000)
+    # 容器內要讓其他 service 連得到，必須綁全介面；無驗證的情況已在上面擋掉
+    uvicorn.run(http_app, host="0.0.0.0", port=8000)  # noqa: S104
