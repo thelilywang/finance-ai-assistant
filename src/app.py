@@ -28,19 +28,23 @@ from src.vectorstore import delete_news_older_than, delete_threads_older_than
 setup_logging("app")  # chainlit 以模組載入方式啟動，沒有 __main__ 可掛
 log = logging.getLogger("app")
 
-try:  # 啟動時清過期新聞，DB 未起不擋 app
-    pruned = delete_news_older_than(config.NEWS_RETENTION_DAYS)
-    if pruned:
-        log.info("已清除過期新聞 chunk", extra={"fields": {"pruned": pruned}})
-except Exception as e:
-    log.warning("新聞清理略過：%s", e)
+@cl.on_app_startup
+def prune_expired():
+    """啟動時清過期資料。掛在 startup hook 而非模組層：測試 import 本模組取純函式時，
+    不該真的連 DB 刪資料，也不該留下背景重連的連線池。"""
+    try:  # DB 未起不擋 app
+        pruned = delete_news_older_than(config.NEWS_RETENTION_DAYS)
+        if pruned:
+            log.info("已清除過期新聞 chunk", extra={"fields": {"pruned": pruned}})
+    except Exception as e:
+        log.warning("新聞清理略過：%s", e)
 
-try:  # 啟動時清過期對話 thread，DB 未起不擋 app
-    pruned_threads = delete_threads_older_than(config.THREAD_RETENTION_DAYS)
-    if pruned_threads:
-        log.info("已清除過期對話 thread", extra={"fields": {"pruned": pruned_threads}})
-except Exception as e:
-    log.warning("對話清理略過：%s", e)
+    try:
+        pruned_threads = delete_threads_older_than(config.THREAD_RETENTION_DAYS)
+        if pruned_threads:
+            log.info("已清除過期對話 thread", extra={"fields": {"pruned": pruned_threads}})
+    except Exception as e:
+        log.warning("對話清理略過：%s", e)
 
 
 @cl.data_layer
