@@ -104,6 +104,17 @@ flowchart TD
 | `python -m src.cli` | Terminal chat (single-turn) |
 | `chainlit run src/app.py -w` | Web chat UI at http://localhost:8000 |
 
+### Testing
+
+```bash
+venv/bin/pip install -r requirements-dev.txt   # requirements.txt + pytest; not in the Docker image
+venv/bin/pytest                                 # run all (config: pyproject.toml)
+venv/bin/pytest tests/test_fetch.py             # single file
+venv/bin/pytest tests/test_fetch.py::test_fetch_missing_data_keeps_all_source_messages   # single test
+```
+
+`tests/test_market_filter.py` needs Postgres; it's skipped automatically (reason: "需要 Postgres") when the DB is unreachable. `tests/bench_*.py` and `tests/eval_*.py` are benchmark/evaluation scripts, not collected by pytest — run them directly (check each file's docstring for the exact invocation, e.g. `docker exec finance_ai_assistant_app python tests/bench_retrieve.py`). Mocking uses pytest's built-in `monkeypatch`/`caplog` plus stdlib `unittest.mock`; no pytest-mock; no real Ollama/network calls in tests.
+
 ### Environment variables (data/token control)
 
 | Variable | Default | What it does |
@@ -222,6 +233,17 @@ flowchart TD
 - 「AAPL 最新一季營收多少?」
 - 「台積電最新一季的毛利率是多少?」
 - 「2330 最近有沒有負面新聞?」
+
+### 測試
+
+```bash
+venv/bin/pip install -r requirements-dev.txt   # requirements.txt + pytest,Docker image 內未含
+venv/bin/pytest                                 # 跑全部(設定見 pyproject.toml)
+venv/bin/pytest tests/test_fetch.py             # 只跑單一檔案
+venv/bin/pytest tests/test_fetch.py::test_fetch_missing_data_keeps_all_source_messages   # 只跑單一測試
+```
+
+`tests/test_market_filter.py` 需要 Postgres;連不到資料庫時會自動跳過(原因顯示「需要 Postgres」)。`tests/bench_*.py` 與 `tests/eval_*.py` 是效能/評測腳本,不會被 pytest 收集,需直接執行(確切指令請看各檔案開頭 docstring,例如 `docker exec finance_ai_assistant_app python tests/bench_retrieve.py`)。Mock 一律用 pytest 內建的 `monkeypatch`/`caplog` 搭配標準庫 `unittest.mock`,不引入 pytest-mock;測試不得呼叫真實 Ollama 或網路。
 
 ### 環境變數(資料/token 控制)
 

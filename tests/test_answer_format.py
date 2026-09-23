@@ -1,12 +1,5 @@
-"""最小 self-check：check_answer_format 的規則覆蓋與 i18n 欄名格式保護。
-執行：python tests/test_answer_format.py
-"""
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from src.graph import append_disclaimer, check_answer_format, _ALL_FIELDS, _FIELD_LINE_RE
+"""check_answer_format 的規則覆蓋與 i18n 欄名格式保護。"""
+from src.graph import _ALL_FIELDS, _FIELD_LINE_RE, append_disclaimer, check_answer_format
 from src.i18n import t
 
 FIELDS = ["conclusion", "facts", "inference", "upside", "risk"]
@@ -25,54 +18,6 @@ GOOD_ZH = """結論在這裡。
 以上非投資建議，僅為資料解讀，投資請自行判斷。
 """
 
-
-def _rule_names(violations):
-    return {v["rule"] for v in violations}
-
-
-# 1: 全合格 -> []
-assert check_answer_format(GOOD_ZH, FIELDS, 3, "zh") == []
-
-# 2: 缺免責聲明 -> 只報 missing_disclaimer（09-17 迴歸）
-no_disclaimer = GOOD_ZH.replace("以上非投資建議，僅為資料解讀，投資請自行判斷。\n", "")
-violations = check_answer_format(no_disclaimer, FIELDS, 3, "zh")
-assert _rule_names(violations) == {"missing_disclaimer"}, violations
-
-# 3: 少一欄 -> missing_fields
-missing_risk = GOOD_ZH.replace("- **風險**：庫存高\n", "")
-violations = check_answer_format(missing_risk, FIELDS, 3, "zh")
-assert "missing_fields" in _rule_names(violations)
-detail = next(v["detail"] for v in violations if v["rule"] == "missing_fields")
-assert "風險" in detail
-
-# 4: 多一欄 -> unexpected_fields
-extra_field = GOOD_ZH.replace(
-    "- **風險**：庫存高\n", "- **風險**：庫存高\n- **多餘欄**：不該出現\n")
-violations = check_answer_format(extra_field, FIELDS, 3, "zh")
-assert "unexpected_fields" in _rule_names(violations)
-detail = next(v["detail"] for v in violations if v["rule"] == "unexpected_fields")
-assert "多餘欄" in detail
-
-# 5: [來源9] 但只有 3 個來源 -> citation_out_of_range
-out_of_range = GOOD_ZH.replace("[來源2]", "[來源9]")
-violations = check_answer_format(out_of_range, FIELDS, 3, "zh")
-assert "citation_out_of_range" in _rule_names(violations)
-detail = next(v["detail"] for v in violations if v["rule"] == "citation_out_of_range")
-assert detail == [9]
-
-# 6: [即時市場數據] -> unknown_citation_marker（待辦「[即時市場數據] 被當成引用標記」迴歸）
-unknown_marker = GOOD_ZH.replace("需求強", "需求強 [即時市場數據]")
-violations = check_answer_format(unknown_marker, FIELDS, 3, "zh")
-assert "unknown_citation_marker" in _rule_names(violations)
-detail = next(v["detail"] for v in violations if v["rule"] == "unknown_citation_marker")
-assert "即時市場數據" in detail
-
-# 7: markdown 連結 [看這裡](http://x) -> 不誤報 unknown_citation_marker
-md_link = GOOD_ZH.replace("需求強", "需求強 [看這裡](http://x)")
-violations = check_answer_format(md_link, FIELDS, 3, "zh")
-assert "unknown_citation_marker" not in _rule_names(violations), violations
-
-# 8: 英文 lang -> 欄名與 [Source 1]（label 尾端空格）都要過
 GOOD_EN = """Conclusion here.
 
 ## 📈 Investment Decision Reference
@@ -86,67 +31,138 @@ GOOD_EN = """Conclusion here.
 
 This is not investment advice — data interpretation only. Invest at your own discretion.
 """
-assert check_answer_format(GOOD_EN, FIELDS, 3, "en") == []
 
-# 9: 縮排子條列 "  - **xxx**：" 不被當成欄位
-indented = GOOD_ZH.replace(
-    "  - 營收成長 [來源1]\n", "  - 營收成長 [來源1]\n  - **子項**：不是欄位\n")
-violations = check_answer_format(indented, FIELDS, 3, "zh")
-assert violations == [], violations
 
-# 10: 格式保護測試——_ALL_FIELDS × ["zh", "en"]，每個 trend_field_* 都抽得出非空欄名
-for field_id in _ALL_FIELDS:
+def _rule_names(violations):
+    return {v["rule"] for v in violations}
+
+
+def test_fully_compliant_answer():
+    assert check_answer_format(GOOD_ZH, FIELDS, 3, "zh") == []
+
+
+def test_missing_disclaimer():
+    # 缺免責聲明 -> 只報 missing_disclaimer（09-17 迴歸）
+    no_disclaimer = GOOD_ZH.replace("以上非投資建議，僅為資料解讀，投資請自行判斷。\n", "")
+    violations = check_answer_format(no_disclaimer, FIELDS, 3, "zh")
+    assert _rule_names(violations) == {"missing_disclaimer"}, violations
+
+
+def test_missing_field():
+    missing_risk = GOOD_ZH.replace("- **風險**：庫存高\n", "")
+    violations = check_answer_format(missing_risk, FIELDS, 3, "zh")
+    assert "missing_fields" in _rule_names(violations)
+    detail = next(v["detail"] for v in violations if v["rule"] == "missing_fields")
+    assert "風險" in detail
+
+
+def test_unexpected_field():
+    extra_field = GOOD_ZH.replace(
+        "- **風險**：庫存高\n", "- **風險**：庫存高\n- **多餘欄**：不該出現\n")
+    violations = check_answer_format(extra_field, FIELDS, 3, "zh")
+    assert "unexpected_fields" in _rule_names(violations)
+    detail = next(v["detail"] for v in violations if v["rule"] == "unexpected_fields")
+    assert "多餘欄" in detail
+
+
+def test_citation_out_of_range():
+    out_of_range = GOOD_ZH.replace("[來源2]", "[來源9]")
+    violations = check_answer_format(out_of_range, FIELDS, 3, "zh")
+    assert "citation_out_of_range" in _rule_names(violations)
+    detail = next(v["detail"] for v in violations if v["rule"] == "citation_out_of_range")
+    assert detail == [9]
+
+
+def test_unknown_citation_marker():
+    # [即時市場數據] -> unknown_citation_marker（待辦「[即時市場數據] 被當成引用標記」迴歸）
+    unknown_marker = GOOD_ZH.replace("需求強", "需求強 [即時市場數據]")
+    violations = check_answer_format(unknown_marker, FIELDS, 3, "zh")
+    assert "unknown_citation_marker" in _rule_names(violations)
+    detail = next(v["detail"] for v in violations if v["rule"] == "unknown_citation_marker")
+    assert "即時市場數據" in detail
+
+
+def test_markdown_link_not_misreported():
+    # markdown 連結 [看這裡](http://x) -> 不誤報 unknown_citation_marker
+    md_link = GOOD_ZH.replace("需求強", "需求強 [看這裡](http://x)")
+    violations = check_answer_format(md_link, FIELDS, 3, "zh")
+    assert "unknown_citation_marker" not in _rule_names(violations), violations
+
+
+def test_english_lang_passes():
+    # 英文 lang -> 欄名與 [Source 1]（label 尾端空格）都要過
+    assert check_answer_format(GOOD_EN, FIELDS, 3, "en") == []
+
+
+def test_indented_sub_bullet_not_treated_as_field():
+    indented = GOOD_ZH.replace(
+        "  - 營收成長 [來源1]\n", "  - 營收成長 [來源1]\n  - **子項**：不是欄位\n")
+    violations = check_answer_format(indented, FIELDS, 3, "zh")
+    assert violations == [], violations
+
+
+def test_all_field_labels_extractable():
+    # 格式保護測試——_ALL_FIELDS × ["zh", "en"]，每個 trend_field_* 都抽得出非空欄名
+    for field_id in _ALL_FIELDS:
+        for lang in ("zh", "en"):
+            raw = t(lang, f"trend_field_{field_id}")
+            m = _FIELD_LINE_RE.match(raw)
+            assert m is not None, (field_id, lang, raw)
+            assert m.group(1).strip(), (field_id, lang, raw)
+
+
+def test_fullwidth_brackets():
+    # 全形【】。實測模型在中文語境輸出的是【來源1】【即時市場數據】而非半形，
+    # 只認半形的話這三種違規全都靜悄悄地漏掉。
+    full_ok = GOOD_ZH.replace("[來源1]", "【來源1】").replace("[來源2]", "【來源2】")
+    assert check_answer_format(full_ok, FIELDS, 3, "zh") == [], full_ok
+
+    full_unknown = full_ok.replace("需求強", "需求強【即時市場數據】")
+    violations = check_answer_format(full_unknown, FIELDS, 3, "zh")
+    detail = next(v["detail"] for v in violations if v["rule"] == "unknown_citation_marker")
+    assert "即時市場數據" in detail
+
+    full_oor = full_ok.replace("【來源2】", "【來源9】")
+    violations = check_answer_format(full_oor, FIELDS, 3, "zh")
+    detail = next(v["detail"] for v in violations if v["rule"] == "citation_out_of_range")
+    assert detail == [9]
+
+
+def test_append_disclaimer_idempotent():
+    # append_disclaimer：補上、冪等、不動空字串，且補完必須讓 missing_disclaimer 消失。
+    # 最後一條是這個改動的重點——免責聲明不再靠模型複誦，驗證層據此應永遠不再報這條。
     for lang in ("zh", "en"):
-        raw = t(lang, f"trend_field_{field_id}")
-        m = _FIELD_LINE_RE.match(raw)
-        assert m is not None, (field_id, lang, raw)
-        assert m.group(1).strip(), (field_id, lang, raw)
+        disclaimer = t(lang, "disclaimer")
 
-# 11-13: 全形【】。實測模型在中文語境輸出的是【來源1】【即時市場數據】而非半形，
-# 只認半形的話這三種違規全都靜悄悄地漏掉。
-full_ok = GOOD_ZH.replace("[來源1]", "【來源1】").replace("[來源2]", "【來源2】")
-assert check_answer_format(full_ok, FIELDS, 3, "zh") == [], full_ok
+        appended = append_disclaimer("回答本體。", lang)
+        assert appended.endswith(disclaimer)
+        assert append_disclaimer(appended, lang) == appended, "重複呼叫不得補第二句"
+        assert append_disclaimer("", lang) == ""
+        assert append_disclaimer("   ", lang) == "   "
 
-full_unknown = full_ok.replace("需求強", "需求強【即時市場數據】")
-violations = check_answer_format(full_unknown, FIELDS, 3, "zh")
-detail = next(v["detail"] for v in violations if v["rule"] == "unknown_citation_marker")
-assert "即時市場數據" in detail
+        # 模型自己有寫時不重複，且位置維持原樣
+        already = f"回答本體。\n\n{disclaimer}"
+        assert append_disclaimer(already, lang) == already
 
-full_oor = full_ok.replace("【來源2】", "【來源9】")
-violations = check_answer_format(full_oor, FIELDS, 3, "zh")
-detail = next(v["detail"] for v in violations if v["rule"] == "citation_out_of_range")
-assert detail == [9]
 
-# append_disclaimer：補上、冪等、不動空字串，且補完必須讓 missing_disclaimer 消失。
-# 最後一條是這個改動的重點——免責聲明不再靠模型複誦，驗證層據此應永遠不再報這條。
-for lang in ("zh", "en"):
-    disclaimer = t(lang, "disclaimer")
+def test_append_disclaimer_clears_missing_disclaimer_violation():
+    no_disc = GOOD_ZH.replace("\n以上非投資建議，僅為資料解讀，投資請自行判斷。\n", "\n")
+    assert "missing_disclaimer" in _rule_names(check_answer_format(no_disc, FIELDS, 3, "zh"))
+    assert "missing_disclaimer" not in _rule_names(
+        check_answer_format(append_disclaimer(no_disc, "zh"), FIELDS, 3, "zh"))
 
-    appended = append_disclaimer("回答本體。", lang)
-    assert appended.endswith(disclaimer)
-    assert append_disclaimer(appended, lang) == appended, "重複呼叫不得補第二句"
-    assert append_disclaimer("", lang) == ""
-    assert append_disclaimer("   ", lang) == "   "
 
-    # 模型自己有寫時不重複，且位置維持原樣
-    already = f"回答本體。\n\n{disclaimer}"
-    assert append_disclaimer(already, lang) == already
+def test_field_label_used_inline_not_misreported():
+    # 欄名被當行內標籤用不算自創引用標記。prompt 明文要「明確標示為推論」，模型就寫
+    # 【推論】——2026-09-20/21 正式環境 17 筆 unknown_citation_marker 有 13 筆是這種假警報。
+    inline_label = GOOD_ZH.replace("  - 動能延續 [來源2]", "  - 動能延續 [來源2]（【推論】非事實）")
+    assert "unknown_citation_marker" not in _rule_names(
+        check_answer_format(inline_label, FIELDS, 3, "zh")), "欄名行內標籤不得誤報"
 
-no_disc = GOOD_ZH.replace("\n以上非投資建議，僅為資料解讀，投資請自行判斷。\n", "\n")
-assert "missing_disclaimer" in _rule_names(check_answer_format(no_disc, FIELDS, 3, "zh"))
-assert "missing_disclaimer" not in _rule_names(
-    check_answer_format(append_disclaimer(no_disc, "zh"), FIELDS, 3, "zh"))
 
-# 欄名被當行內標籤用不算自創引用標記。prompt 明文要「明確標示為推論」，模型就寫
-# 【推論】——2026-09-20/21 正式環境 17 筆 unknown_citation_marker 有 13 筆是這種假警報。
-inline_label = GOOD_ZH.replace("  - 動能延續 [來源2]", "  - 動能延續 [來源2]（【推論】非事實）")
-assert "unknown_citation_marker" not in _rule_names(
-    check_answer_format(inline_label, FIELDS, 3, "zh")), "欄名行內標籤不得誤報"
-
-# 但真的自創標記仍要抓到（這條規則存在的理由）
-rogue = GOOD_ZH.replace("- **利多**：需求強", "- **利多**：需求強 [即時市場數據]")
-assert "即時市場數據" in next(
-    v["detail"] for v in check_answer_format(rogue, FIELDS, 3, "zh")
-    if v["rule"] == "unknown_citation_marker")
-
-print("check_answer_format self-check OK")
+def test_rogue_citation_marker_still_caught():
+    # 但真的自創標記仍要抓到（這條規則存在的理由）
+    rogue = GOOD_ZH.replace("- **利多**：需求強", "- **利多**：需求強 [即時市場數據]")
+    assert "即時市場數據" in next(
+        v["detail"] for v in check_answer_format(rogue, FIELDS, 3, "zh")
+        if v["rule"] == "unknown_citation_marker")

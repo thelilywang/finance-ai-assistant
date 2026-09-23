@@ -1,21 +1,16 @@
-"""最小 self-check：assemble 把 tool-calling 結果還原成下游節點要的既有欄位，
+"""assemble 把 tool-calling 結果還原成下游節點要的既有欄位，
 以及 agent_route 的分支與輪數上限。
 
 assemble 還原的 retrieved 結構若與 retrieve_context 原本回傳的不一致，
 generate 的來源編號與 app.py 的引用連結都會壞掉，所以這裡固定住格式。
-執行：python tests/test_assemble.py
 """
 import json
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.graph import agent_route, assemble
 
-chunks = [
+CHUNKS = [
     {"id": 1, "source": "EDGAR:AAPL:x", "title": None, "doc_type": "financial_report",
      "company": "AAPL", "published_at": "2026-08-01", "content": "財報內容"},
     {"id": 2, "source": "https://news/1", "title": "新聞標題", "doc_type": "news",
@@ -27,90 +22,104 @@ def _tool_call(name, cid):
     return AIMessage(content="", tool_calls=[{"name": name, "args": {}, "id": cid}])
 
 
-# 檢索 + 補抓都跑過：retrieved 還原、fetched/fetch_results 供 no_result 使用
-out = assemble({"messages": [
-    HumanMessage(content="seed"),
-    _tool_call("search_knowledge_base", "1"),
-    ToolMessage(content=json.dumps({"summary_for_llm": "...", "chunks": chunks}),
-                name="search_knowledge_base", tool_call_id="1"),
-    _tool_call("fetch_company_data", "2"),
-    ToolMessage(content="已匯入 AAPL 財報", name="fetch_company_data", tool_call_id="2"),
-]})
-assert out["retrieved"] == chunks
-assert out["fetched"] is True
-assert out["fetch_results"] == ["已匯入 AAPL 財報"]
+def test_assemble_retrieval_and_fetch():
+    # 檢索 + 補抓都跑過：retrieved 還原、fetched/fetch_results 供 no_result 使用
+    out = assemble({"messages": [
+        HumanMessage(content="seed"),
+        _tool_call("search_knowledge_base", "1"),
+        ToolMessage(content=json.dumps({"summary_for_llm": "...", "chunks": CHUNKS}),
+                    name="search_knowledge_base", tool_call_id="1"),
+        _tool_call("fetch_company_data", "2"),
+        ToolMessage(content="已匯入 AAPL 財報", name="fetch_company_data", tool_call_id="2"),
+    ]})
+    assert out["retrieved"] == CHUNKS
+    assert out["fetched"] is True
+    assert out["fetch_results"] == ["已匯入 AAPL 財報"]
 
-# 只檢索沒補抓：fetched 為 False，no_result 才會用「查無資料」而非「抓過仍查無」的說法
-out = assemble({"messages": [
-    _tool_call("search_knowledge_base", "1"),
-    ToolMessage(content=json.dumps({"summary_for_llm": "...", "chunks": chunks}),
-                name="search_knowledge_base", tool_call_id="1"),
-]})
-assert out["fetched"] is False
-assert out["fetch_results"] == []
 
-# 補抓後又檢索一次：結果要累積（補抓前查無、補抓後查到，兩次結果疊加）
-out = assemble({"messages": [
-    _tool_call("search_knowledge_base", "1"),
-    ToolMessage(content=json.dumps({"summary_for_llm": "查無", "chunks": []}),
-                name="search_knowledge_base", tool_call_id="1"),
-    _tool_call("fetch_company_data", "2"),
-    ToolMessage(content="已匯入", name="fetch_company_data", tool_call_id="2"),
-    _tool_call("search_knowledge_base", "3"),
-    ToolMessage(content=json.dumps({"summary_for_llm": "...", "chunks": chunks}),
-                name="search_knowledge_base", tool_call_id="3"),
-]})
-assert out["retrieved"] == chunks
+def test_assemble_retrieval_only():
+    # 只檢索沒補抓：fetched 為 False，no_result 才會用「查無資料」而非「抓過仍查無」的說法
+    out = assemble({"messages": [
+        _tool_call("search_knowledge_base", "1"),
+        ToolMessage(content=json.dumps({"summary_for_llm": "...", "chunks": CHUNKS}),
+                    name="search_knowledge_base", tool_call_id="1"),
+    ]})
+    assert out["fetched"] is False
+    assert out["fetch_results"] == []
 
-# MCP tool 經 langchain-mcp-adapters 回來的是 content block 陣列，不是純字串
-out = assemble({"messages": [
-    ToolMessage(
-        content=[{"type": "text",
-                  "text": json.dumps({"summary_for_llm": "...", "chunks": chunks})}],
-        name="search_knowledge_base", tool_call_id="1"),
-    ToolMessage(content=[{"type": "text", "text": "已匯入 AAPL 財報"}],
-                name="fetch_company_data", tool_call_id="2"),
-]})
-assert out["retrieved"] == chunks
-assert out["fetch_results"] == ["已匯入 AAPL 財報"]  # 補抓訊息也要脫殼，否則 no_result 顯示出 dict
 
-# tool 回傳非 JSON（server 異常）時降級成查無資料，不炸掉整個對話
-out = assemble({"messages": [
-    ToolMessage(content="not-json", name="search_knowledge_base", tool_call_id="x"),
-]})
-assert out["retrieved"] == []
+def test_assemble_accumulates_after_fetch_then_retrieve():
+    # 補抓後又檢索一次：結果要累積（補抓前查無、補抓後查到，兩次結果疊加）
+    out = assemble({"messages": [
+        _tool_call("search_knowledge_base", "1"),
+        ToolMessage(content=json.dumps({"summary_for_llm": "查無", "chunks": []}),
+                    name="search_knowledge_base", tool_call_id="1"),
+        _tool_call("fetch_company_data", "2"),
+        ToolMessage(content="已匯入", name="fetch_company_data", tool_call_id="2"),
+        _tool_call("search_knowledge_base", "3"),
+        ToolMessage(content=json.dumps({"summary_for_llm": "...", "chunks": CHUNKS}),
+                    name="search_knowledge_base", tool_call_id="3"),
+    ]})
+    assert out["retrieved"] == CHUNKS
 
-# 完全沒呼叫過 tool
-out = assemble({"messages": [HumanMessage(content="seed"), AIMessage(content="不需要工具")]})
-assert out["retrieved"] == [] and out["fetched"] is False
 
-# 多標的／雙掛牌：分次檢索的結果要累積，不可被最後一次蓋掉
-a = [{"id": 1, "source": "s-aapl", "doc_type": "news", "company": "AAPL", "content": "a"}]
-b = [{"id": 2, "source": "s-tsla", "doc_type": "news", "company": "TSLA", "content": "b"}]
-out = assemble({"messages": [
-    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a}),
-                name="search_knowledge_base", tool_call_id="1"),
-    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": b}),
-                name="search_knowledge_base", tool_call_id="2"),
-]})
-assert out["retrieved"] == a + b
+def test_assemble_handles_mcp_content_blocks():
+    # MCP tool 經 langchain-mcp-adapters 回來的是 content block 陣列，不是純字串
+    out = assemble({"messages": [
+        ToolMessage(
+            content=[{"type": "text",
+                      "text": json.dumps({"summary_for_llm": "...", "chunks": CHUNKS})}],
+            name="search_knowledge_base", tool_call_id="1"),
+        ToolMessage(content=[{"type": "text", "text": "已匯入 AAPL 財報"}],
+                    name="fetch_company_data", tool_call_id="2"),
+    ]})
+    assert out["retrieved"] == CHUNKS
+    assert out["fetch_results"] == ["已匯入 AAPL 財報"]  # 補抓訊息也要脫殼，否則 no_result 顯示出 dict
 
-# 重複 id（補抓後重查同一批）只留一份，否則 generate 的 context 會有整段重複
-out = assemble({"messages": [
-    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a}),
-                name="search_knowledge_base", tool_call_id="1"),
-    ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a + b}),
-                name="search_knowledge_base", tool_call_id="2"),
-]})
-assert out["retrieved"] == a + b
 
-print("assemble self-check OK")
+def test_assemble_degrades_on_non_json():
+    # tool 回傳非 JSON（server 異常）時降級成查無資料，不炸掉整個對話
+    out = assemble({"messages": [
+        ToolMessage(content="not-json", name="search_knowledge_base", tool_call_id="x"),
+    ]})
+    assert out["retrieved"] == []
 
-# --- agent_route ---
-assert agent_route({"messages": [_tool_call("search_knowledge_base", "1")]}) == "tools"
-assert agent_route({"messages": [AIMessage(content="查完了")]}) == "assemble"
-# 達輪數上限強制收工，避免 LLM 反覆補抓一直打外部網站
-over_limit = [_tool_call("fetch_company_data", str(i)) for i in range(4)]
-assert agent_route({"messages": over_limit}) == "assemble"
 
-print("agent_route self-check OK")
+def test_assemble_no_tool_calls():
+    # 完全沒呼叫過 tool
+    out = assemble({"messages": [HumanMessage(content="seed"), AIMessage(content="不需要工具")]})
+    assert out["retrieved"] == [] and out["fetched"] is False
+
+
+def test_assemble_accumulates_across_companies():
+    # 多標的／雙掛牌：分次檢索的結果要累積，不可被最後一次蓋掉
+    a = [{"id": 1, "source": "s-aapl", "doc_type": "news", "company": "AAPL", "content": "a"}]
+    b = [{"id": 2, "source": "s-tsla", "doc_type": "news", "company": "TSLA", "content": "b"}]
+    out = assemble({"messages": [
+        ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a}),
+                    name="search_knowledge_base", tool_call_id="1"),
+        ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": b}),
+                    name="search_knowledge_base", tool_call_id="2"),
+    ]})
+    assert out["retrieved"] == a + b
+
+
+def test_assemble_dedups_repeated_ids():
+    # 重複 id（補抓後重查同一批）只留一份，否則 generate 的 context 會有整段重複
+    a = [{"id": 1, "source": "s-aapl", "doc_type": "news", "company": "AAPL", "content": "a"}]
+    b = [{"id": 2, "source": "s-tsla", "doc_type": "news", "company": "TSLA", "content": "b"}]
+    out = assemble({"messages": [
+        ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a}),
+                    name="search_knowledge_base", tool_call_id="1"),
+        ToolMessage(content=json.dumps({"summary_for_llm": "", "chunks": a + b}),
+                    name="search_knowledge_base", tool_call_id="2"),
+    ]})
+    assert out["retrieved"] == a + b
+
+
+def test_agent_route():
+    assert agent_route({"messages": [_tool_call("search_knowledge_base", "1")]}) == "tools"
+    assert agent_route({"messages": [AIMessage(content="查完了")]}) == "assemble"
+    # 達輪數上限強制收工，避免 LLM 反覆補抓一直打外部網站
+    over_limit = [_tool_call("fetch_company_data", str(i)) for i in range(4)]
+    assert agent_route({"messages": over_limit}) == "assemble"

@@ -1,0 +1,41 @@
+# Ruff 設定。只放 lint 設定，套件安裝仍走 requirements.txt。
+# 執行：uvx ruff@latest check src tests
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "SIM", "UP", "C4", "T20", "G", "S"]
+# I（isort）未納入：既有的多名稱折行風格超過 line-length 時，--fix 會改寫成一個
+# 名稱一行，製造與功能無關的大 diff。排序目前已正確，需要時手動跑：
+#   uvx ruff check --select I --fix src
+ignore = [
+    # 中文全角標點（，。「」）會被判成 ambiguous unicode。本專案註解與字串大量用中文，
+    # 開著會有三千多筆噪音淹掉真訊號。
+    "RUF001", "RUF002", "RUF003",
+    # 「今天」刻意用本地時間：三個 service 都設了 TZ=Asia/Taipei（docker-compose.yml），
+    # 改成 aware/UTC 會讓台北早上 8 點前退回前一天，且 vectorstore.py 的 thread 清理
+    # 要對齊 Chainlit 寫入的 naive 本地時間字串，改了會寫壞字典序比較。
+    # 詳見 src/logging_setup.py 的 ts 欄位註解。
+    "DTZ",
+    # 專案原本就沒有行寬慣例，現存 115 筆多是 i18n.py 的翻譯字串與中文說明註解，
+    # 折行反而難讀。line-length 仍設 100 供日後 ruff format 參考，但不當成錯誤擋。
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest 的 assert 就是正確寫法；bench_/eval_ 腳本的輸出本來就該印在終端。
+# E402 是測試檔常見的「先 sys.path/環境設定再 import」順序，刻意如此。
+"tests/**" = ["S101", "T20", "E402"]
+# 以下都是給人看的終端輸出，不是日誌：CLI 入口與 __main__ 區塊，
+# 以及 update.py 的 inventory() 報表與 MOPS 手動下載指引。
+# AI 執行路徑上的紀錄一律走 logging（見 logging_setup.py），不在此列。
+"src/cli.py" = ["T20"]
+"src/update.py" = ["T20"]
+"src/charts.py" = ["T20"]
+# __main__ 區塊是 assert 自我檢查，與 tests/ 同性質
+"src/i18n.py" = ["T20", "S101"]
+"src/market.py" = ["T20"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
