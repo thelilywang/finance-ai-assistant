@@ -801,10 +801,13 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
             log.warning(f"新聞處理失敗（{link}）：{e}", extra={"fields": {
                 "company": company, "source": "yahoo_rss", "reason": "news_failed",
                 "error": str(e)}})
-    msg = f"新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
+    ok = total > 0 or skipped > 0
+    # 全部來源都失敗時不能說「更新完成」：LLM 只讀得到 detail，看到「完成」就不會改走其他路
+    msg = (f"新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。" if ok
+           else "新聞抓取失敗：沒有取得任何文章（來源無回應、改版或內文抽取失敗）。")
     log.info(msg, extra={"fields": {
         "company": company, "source": "yahoo_rss", "chunks": total, "skipped": skipped}})
-    return FetchResult(total > 0 or skipped > 0, msg)
+    return FetchResult(ok, msg)
 
 
 def fetch_tw_stock_news(company: str, limit: int = 10) -> FetchResult:
@@ -869,10 +872,13 @@ def fetch_tw_stock_news(company: str, limit: int = 10) -> FetchResult:
             log.warning(f"個股頁文章處理失敗（{link}）：{e}", extra={"fields": {
                 "company": company, "source": "yahoo_tw_stock", "reason": "news_failed",
                 "error": str(e)}})
-    msg = f"個股頁新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
+    ok = total > 0 or skipped > 0
+    # 全部來源都失敗時不能說「更新完成」：LLM 只讀得到 detail，看到「完成」就不會改走其他路
+    msg = (f"個股頁新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。" if ok
+           else "個股頁新聞抓取失敗：沒有取得任何文章（來源無回應、改版或內文抽取失敗）。")
     log.info(msg, extra={"fields": {
         "company": company, "source": "yahoo_tw_stock", "chunks": total, "skipped": skipped}})
-    return FetchResult(total > 0 or skipped > 0, msg)
+    return FetchResult(ok, msg)
 
 
 def _company_from_title(title: str) -> str | None:
@@ -938,9 +944,12 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
                 log.warning(f"{name} 文章處理失敗（{url}）：{e}", extra={"fields": {
                     "source": name, "reason": "news_failed", "error": str(e)}})
 
-    msg = f"市場新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。"
+    ok = total > 0 or skipped > 0
+    # 全部來源都失敗時不能說「更新完成」：LLM 只讀得到 detail，看到「完成」就不會改走其他路
+    msg = (f"市場新聞更新完成，共寫入 {total} 筆 chunk，跳過 {skipped} 篇已入庫。" if ok
+           else "市場新聞抓取失敗：沒有取得任何文章（來源無回應、改版或內文抽取失敗）。")
     log.info(msg, extra={"fields": {"chunks": total, "skipped": skipped}})
-    return FetchResult(total > 0 or skipped > 0, msg)
+    return FetchResult(ok, msg)
 
 
 # 財報的軌別：每個市場正常該有「全文」與「數字」兩軌，決定「0 塊」算不算缺口。
