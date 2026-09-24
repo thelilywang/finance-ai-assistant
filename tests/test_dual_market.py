@@ -2,6 +2,7 @@
 import src.graph as _g
 from src.graph import (
     _last_dual_listed,
+    _side_by_side,
     cross_market_split,
     resolve_market,
     route_after_resolve_market,
@@ -160,3 +161,14 @@ def test_cross_market_split():
     assert cross_market_split({"companies": ["TSM"], "peer_company": "2330", "market": "us"}) is None
     # 沒指名公司不得炸掉
     assert cross_market_split({}) is None
+
+
+def test_side_by_side_merges_peer_only_when_both():
+    # --- generate() 的行情抓取清單也靠這份判斷，peer 沒併進來就會漏抓 ADR 行情 ---
+    assert _side_by_side({"companies": ["2330"], "peer_company": "TSM",
+                           "market": "both"}) == ["2330", "TSM"]
+    # 市場已確定（非 both）：不併，行情只抓已確定的那一邊
+    assert _side_by_side({"companies": ["TSM"], "peer_company": "2330",
+                           "market": "us"}) == ["TSM"]
+    assert _side_by_side({"companies": ["2330", "2454"]}) == ["2330", "2454"]
+    assert _side_by_side({}) == []

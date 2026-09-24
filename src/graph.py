@@ -449,13 +449,16 @@ def resolve_market(state: GraphState) -> GraphState:
     # ponytail: 多標的比較時不卡市場反問——兩家公司比較還要先選市場體感很差，
     # 且雙掛牌 + 多標的是罕見交集。要逐家各問一次市場再說。
     if len(state.get("companies") or []) > 1:
-        return {**state, "ask_market": False, "peer_company": None,
-                "off_topic": False}
+        out = {**state, "ask_market": False, "peer_company": None, "off_topic": False}
+        _log_resolve_market(state, out)
+        return out
 
     peer = dual_listed_peer(company) if company else None
     if peer is None:
-        return {**state, "companies": [company] if company else [], "ask_market": False,
-                "off_topic": _is_off_topic({**state, "companies": [company] if company else []})}
+        out = {**state, "companies": [company] if company else [], "ask_market": False,
+               "off_topic": _is_off_topic({**state, "companies": [company] if company else []})}
+        _log_resolve_market(state, out)
+        return out
 
     # ponytail: 不信任 LLM 抽出的 market 值，只信任問句本身。模型會違反 prompt 第 5 點
     # 自己猜一邊（實測「2330 的營收多少？」抽出 tw），猜了就跳過反問＝替使用者選邊；
@@ -471,18 +474,33 @@ def resolve_market(state: GraphState) -> GraphState:
 
     if market is None:
         # 沒講市場：停下來問，不要替使用者猜一邊
-        return {**state, "companies": [company] if company else [], "ask_market": True,
-                "peer_company": peer, "off_topic": False}
+        out = {**state, "companies": [company] if company else [], "ask_market": True,
+               "peer_company": peer, "off_topic": False}
+        _log_resolve_market(state, out)
+        return out
 
     if market == "both":
-        return {**state, "companies": [company] if company else [], "ask_market": False,
-                "peer_company": peer, "off_topic": False}
+        out = {**state, "companies": [company] if company else [], "ask_market": False,
+               "peer_company": peer, "off_topic": False}
+        _log_resolve_market(state, out)
+        return out
 
     # 講了市場：把 company 對齊到該市場的代號（問「台積電美股」會抽到 2330，要換成 TSM）
     want_tw = market == "tw"
     company = company if is_tw_ticker(company) == want_tw else peer
-    return {**state, "companies": [company] if company else [], "ask_market": False,
-            "peer_company": None, "off_topic": False}
+    out = {**state, "companies": [company] if company else [], "ask_market": False,
+           "peer_company": None, "off_topic": False}
+    _log_resolve_market(state, out)
+    return out
+
+
+def _log_resolve_market(state: GraphState, out: GraphState) -> None:
+    """統一在此記錄各分支的判定結果，取代 5 個 return 各寫一次 log。"""
+    log.info("resolve_market", extra={"fields": {
+        "node": "resolve_market", "qid": _qid(state.get("question", "")),
+        "companies": out.get("companies"), "market": out.get("market"),
+        "peer_company": out.get("peer_company"), "ask_market": out.get("ask_market"),
+    }})
 
 
 # 補給決策卡當市場脈絡的新聞條數；候選要多撈幾倍，去重後才補得滿
@@ -1238,6 +1256,18 @@ def unique_sources(retrieved: list[dict]) -> list[str]:
     return ordered
 
 
+def _side_by_side(state: GraphState) -> list[str]:
+    """本題要併陳的代號清單：market 為 both 且有 peer 時，把 peer_company 併入 companies。
+
+    行情抓取、跨市場判斷、missing 清單三處都要看同一份清單，只有其中一處漏併 peer
+    就會出現「判定成 both 卻只抓到一邊行情」的落差。
+    """
+    codes = list(state.get("companies") or [])
+    if state.get("peer_company") and state.get("market") == "both":
+        codes.append(state["peer_company"])
+    return codes
+
+
 def cross_market_split(state: GraphState) -> tuple[list[str], list[str]] | None:
     """本題要並排的代號是否橫跨台美兩市場；是則回 (台股代號, 美股代號)，否則 None。
 
@@ -1245,9 +1275,7 @@ def cross_market_split(state: GraphState) -> tuple[list[str], list[str]] | None:
     才是最需要幣別提醒的場合，而它沒有 peer_company。雙掛牌併陳是其中一個特例，
     peer_company 併進來一起判斷。
     """
-    cross = list(state.get("companies") or [])
-    if state.get("peer_company") and state.get("market") == "both":
-        cross.append(state["peer_company"])
+    cross = _side_by_side(state)
     tw = [c for c in cross if is_tw_ticker(c)]
     us = [c for c in cross if not is_tw_ticker(c)]
     return (tw, us) if tw and us else None
@@ -1280,19 +1308,21 @@ def generate(state: GraphState) -> GraphState:
     # (實測 2.50-3.55s)，擋在 first token 前面，抓來沒人用純屬浪費。
     needs_market = bool({"valuation", "consensus", "scenario"} & set(candidate))
     # 行情逐家併陳；抓失敗的家數在 prompt 中明講，不靜默留白
+    # market=both 時要把 peer_company 併入，否則雙掛牌併陳只抓得到台股那一邊
+    quote_codes = _side_by_side(state)
     snapshots: dict[str, str] = {}
-    if needs_market and companies:
+    if needs_market and quote_codes:
         market_started = time.monotonic()
-        snapshots = get_market_snapshots(companies)
+        snapshots = get_market_snapshots(quote_codes)
         # node 標 market 而非 generate：這是 generate 節點內的行情抓取，不是生成呼叫，
         # 兩者混在同一個 node 值會讓耗時彙總把 3-7 秒的抓取算進生成中位數。
         log_duration(log, "market_snapshots", market_started, node="market",
-                     requested=len(companies), succeeded=len(snapshots),
-                     failed=len(companies) - len(snapshots))
+                     requested=len(quote_codes), succeeded=len(snapshots),
+                     failed=len(quote_codes) - len(snapshots))
     if snapshots:
         blocks = "\n\n".join(f"### {c}\n{text}" for c, text in snapshots.items())
         note = ""
-        missing = [c for c in companies if c not in snapshots]
+        missing = [c for c in quote_codes if c not in snapshots]
         if missing:
             note = t(lang, "market_partial_note",
                      shown="、".join(snapshots), others="、".join(missing)) + "\n"
