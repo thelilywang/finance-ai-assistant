@@ -57,6 +57,16 @@ def test_long_financial_report_does_not_warn(caplog):
     assert not _warned(caplog.records)
 
 
+def test_ingest_text_logs_delete_and_insert_duration(caplog):
+    # 補抓變慢排查缺這兩個欄位：delete/insert 各花多久，之前只能靠 log 空白反推
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        ingest.ingest_text(LONG_TEXT, source="s4", company="2330",
+                            doc_type="financial_report", published_at=None)
+    written = next(r for r in caplog.records if r.getMessage() == "已寫入 pgvector")
+    assert "delete_ms" in written.fields
+    assert "insert_ms" in written.fields
+
+
 class _RecordingEmbeddings:
     """記下每批大小；fail_first_n 指定前幾次呼叫要拋錯（模擬資源型失敗）。"""
 

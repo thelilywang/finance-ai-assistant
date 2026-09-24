@@ -20,6 +20,7 @@ import html as html_lib
 import logging
 import re
 import sys
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from functools import lru_cache
@@ -29,7 +30,7 @@ import trafilatura
 
 from . import config
 from .ingest import ingest_file, ingest_text
-from .logging_setup import setup_logging
+from .logging_setup import log_duration, setup_logging
 from .tickers import is_tw_ticker
 
 log = logging.getLogger("update")
@@ -286,10 +287,13 @@ def _fetch_edgar(ticker: str, form: str, headers: dict) -> FetchResult:
     resp = requests.get(url, headers=headers, timeout=TIMEOUT)
     resp.raise_for_status()
 
+    parse_started = time.monotonic()
     text = trafilatura.extract(resp.text)
     if not text:
         # ponytail: trafilatura 抽不到就整包去 tag 粗抽 + 解 HTML entities（€ 等符號），財報 HTML 幾乎都抽得到
         text = html_lib.unescape(re.sub(r"<[^>]+>", " ", resp.text))
+    log_duration(log, "EDGAR 解析完成", parse_started, company=ticker.upper(),
+                 source="edgar", chars=len(text))
 
     # SEC 節流頁與維護頁都是 HTTP 200，raise_for_status 攔不住；不檢查會把那一句
     # 警告文字當成財報寫進向量庫並回報成功，靜默污染檢索結果。財報全文遠長於此
@@ -668,6 +672,7 @@ def fetch_mops(co_id: str) -> FetchResult:
     當前頁面結構、隨時可能失效；掛掉時印手動下載指引並回傳失敗，不 raise。
     """
     try:
+        download_started = time.monotonic()
         endpoint = "https://doc.twse.com.tw/server-java/t57sb01"
         filename = None
         for year in (dt.date.today().year - 1911, dt.date.today().year - 1912):
@@ -727,7 +732,9 @@ def fetch_mops(co_id: str) -> FetchResult:
         path = f"data/{filename}"
         with open(path, "wb") as f:
             f.write(resp.content)
-        print(f"[update] 已下載 {path}")
+        log.info("MOPS 下載完成", extra={"fields": {
+            "company": co_id, "source": "mops", "bytes": len(resp.content),
+            "elapsed_ms": round((time.monotonic() - download_started) * 1000)}})
 
         # 檔名開頭為西元 YYYYMM（如 202601_2330_AI1.pdf），推出發布日期
         published_at = f"{filename[:4]}-{filename[4:6]}-01"

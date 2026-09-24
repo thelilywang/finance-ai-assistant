@@ -17,6 +17,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
 from . import config
+from .logging_setup import log_duration
 from .tickers import is_tw_ticker
 from .vectorstore import delete_by_source, insert_chunks
 
@@ -25,8 +26,14 @@ log = logging.getLogger("ingest")
 
 def load_text(path: str) -> str:
     if path.lower().endswith(".pdf"):
+        started = time.monotonic()
         reader = PdfReader(path)
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        # pypdf 解析是純 Python、CPU 密集，疑似佔住 GIL 拖慢同 process 其他補抓執行緒，
+        # 先留耗時觀測點，修法待實測數據出來再決定
+        log_duration(log, "PDF 解析完成", started, source=path,
+                     pages=len(reader.pages), chars=len(text))
+        return text
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
@@ -138,7 +145,9 @@ def ingest_text(
             "source": source, "company": company, "reason": "short_report",
             "chars": len(text.strip()), "min_chars": _MIN_FINANCIAL_REPORT_CHARS}})
 
+    delete_started = time.monotonic()
     delete_by_source(source)
+    delete_ms = round((time.monotonic() - delete_started) * 1000)
 
     embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
     chunks = chunk_text(text)
@@ -162,9 +171,12 @@ def ingest_text(
         for i, (chunk, vec) in enumerate(zip(chunks, vectors))
     ]
 
+    insert_started = time.monotonic()
     insert_chunks(rows)
+    insert_ms = round((time.monotonic() - insert_started) * 1000)
     log.info("已寫入 pgvector", extra={"fields": {
-        "source": source, "company": company, "rows": len(rows)}})
+        "source": source, "company": company, "rows": len(rows),
+        "delete_ms": delete_ms, "insert_ms": insert_ms}})
     return len(rows)
 
 
