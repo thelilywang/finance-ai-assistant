@@ -45,7 +45,7 @@ STRINGS = {
             "且 1 股 ADR 對應多股台股普通股，原始數字不可直接比較。比較兩邊的股價或 EPS 時，"
             "一律引用上方「ADR 換算」區塊算好的台幣等值與差距百分比，不得拿不同幣別的原始數字"
             "直接比大小，也不得自行重算。區塊裡沒有 EPS 等值時，兩邊的 EPS 只能分開陳述、"
-            "標明幣別，不得判斷誰高誰低。幣別一律取自「即時市場數據」的 currency 欄，"
+            "標明幣別與公布日期，不得判斷誰高誰低。幣別一律取自「即時市場數據」的 currency 欄，"
             "不得由代號推測。"
         ),
         "no_result_plain": (
@@ -192,8 +192,8 @@ STRINGS = {
             "numbers are not directly comparable. When comparing price or EPS across the two, always cite the "
             "TWD-equivalent value and the percentage gap already computed in the \"ADR conversion\" block above; "
             "never compare the raw numbers across currencies, and never recompute it yourself. When the block has "
-            "no EPS-equivalent value, state the two sides' EPS separately with their currencies and do not judge "
-            "which is higher. Take each currency from the `currency` field in the \"real-time market data\", "
+            "no EPS-equivalent value, state the two sides' EPS separately with their currencies and reporting dates "
+            "and do not judge which is higher. Take each currency from the `currency` field in the \"real-time market data\", "
             "never from the ticker symbol."
         ),
         "no_result_plain": (
