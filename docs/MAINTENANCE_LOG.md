@@ -6,14 +6,16 @@
 
 ## 專案狀態
 
-核心問答流程（檢索＋補抓＋生成，涵蓋台股／美股雙市場、雙掛牌比較、決策卡格式驗證、AI 執行可觀測性）已完成並通過端到端驗證，功能面已足以作為 demo。目前進入收尾階段，待辦收斂為對外呈現與一個尚未跑完的效能 A/B，其餘已知限制與評估過的優化候選見下方對應區塊。
+核心問答流程（檢索＋補抓＋生成，涵蓋台股／美股雙市場、雙掛牌比較、決策卡格式驗證、AI 執行可觀測性）已完成並通過端到端驗證，功能面已足以作為 demo。目前進入收尾階段，待辦收斂為對外呈現與雙掛牌引用／換算判定的修正，其餘已知限制與評估過的優化候選見下方對應區塊。
 
 ## 待辦
 
 1. **靜態互動式 demo 重播頁**（`README.md:12-13`、`:136-137` 目前為 TODO）
    挑 3-5 題真實問答做成可點選重播的單頁（節點進度、答案、`[來源N]`、圖表），完成後補上 README 的 Demo／Screenshot 區塊。對外門面缺漏、零前置條件、做完就結束。
-2. **`OLLAMA_NUM_CTX` A/B 補跑 16384／32768，依實測定預設值**（`src/config.py` 的 `OLLAMA_NUM_CTX`）
-   目前只跑了 4096 這一臂（`data/bench/numctx_ab.jsonl` 4 筆），確認該值下長 prompt 會被截斷；16384／32768 未跑，預設值尚未定案。詳見 2026-10-07 章節第三節。
+2. **11k token 的 prompt 光讀就要約 130～143 秒，下一步是量化各段 prompt 的 token 數**
+   先記錄 prompt 各段落的 token 數，再決定縮短哪段，不接受不量測直接動手砍；KV cache 是否有幫助也要實測驗證，另寫計畫。詳見 2026-10-07 章節第三節。
+3. **雙掛牌比較題的日期對齊、共識預估誤用、換算方向說錯需查**
+   eps2 回答期間台股 EPS 取檢索文件、ADR EPS 取行情快照，兩者可能不同期；曾把下一季共識預估當實際 EPS；曾把換算方向說反（講成「ADR EPS 乘以 5」，應除以 5 再乘匯率）；eps3 把 ADR 股價的台幣等值講得像 EPS。詳見 2026-10-07 章節第四節。
 
 ## 已知限制
 
@@ -1351,9 +1353,9 @@ isort（I）刻意未納入 select：既有風格是一行塞多個名稱靠 lin
 
 ---
 
-## 2026-10-07　雙掛牌比較補上系統計算的溢價與 EPS 換算、Ollama context 截斷查證
+## 2026-10-07　雙掛牌比較補上系統計算的溢價與 EPS 換算、Ollama context 截斷查證、eps2 跨幣別直接比修正
 
-同一條調查線：雙掛牌比較題（「台積電的 ADR 與台股表現有什麼差異」「EPS 差多少」）讓模型自己換算幣別與股數比，結果不是算錯就是拒答，改為程式先算好、模型只需引用。過程中用 A/B 驗證時發現答案常在固定字數斷句，查出根因是 Ollama 以 4096 context 載入模型、長 prompt 被靜默截斷，於是補上 token 用量觀測並讓 context 大小可調，但只來得及跑完 4096 這一臂，16384／32768 兩臂與預設值定案都留待下一步。
+同一條調查線：雙掛牌比較題（「台積電的 ADR 與台股表現有什麼差異」「EPS 差多少」）讓模型自己換算幣別與股數比，結果不是算錯就是拒答，改為程式先算好、模型只需引用。過程中用 A/B 驗證時發現答案常在固定字數斷句，查出根因是 Ollama 以 4096 context 載入模型、長 prompt 被靜默截斷，於是補上 token 用量觀測、讓 context 大小可調，並補跑 16384／32768 兩臂定下預設值。驗收時發現的兩個既有誤判，一個已修（bench 的 `cites_premium` 判定方式），另一個（eps2 跨幣別直接比較）查出根因並修正，收在第四節。
 
 ### 一、雙掛牌比較加上系統計算的 ADR 溢價
 
@@ -1371,11 +1373,37 @@ isort（I）刻意未納入 select：既有風格是一行塞多個名稱靠 lin
 
 驗證第二節時發現部分回答固定在某個字數斷句，查出根因是 Ollama 用 4096 context 載入 `qwen3.5:9b`，超出的 prompt 被靜默截到約 2050 token（`num_ctx` 一半再扣幾碼 keep），模型看不到被截掉的那段輸入卻不會報錯。
 
-**修法先只做觀測＋開關，不改預設值**：`rewrite_question`／`agent`／`generate` 三個節點記錄 Ollama 回報的 `prompt_tokens`／`output_tokens`／`done_reason`／`prefill_ms`／`decode_ms`／`load_ms`（取自 `response_metadata`，缺欄位就不放進 log，不補假值），`prompt_tokens` 貼近截斷門檻時另記一筆 warning。新增 `OLLAMA_NUM_CTX`（預設 4096，等同現狀不變），三個 `ChatOllama` 實例務必帶同一個值——Ollama 收到不同 `num_ctx` 會重新載入模型，節點間輪流呼叫若值不一致，等於每次切換都多付一次載入時間。
+`rewrite_question`／`agent`／`generate` 三個節點記錄 Ollama 回報的 `prompt_tokens`／`output_tokens`／`done_reason`／`prefill_ms`／`decode_ms`／`load_ms`（取自 `response_metadata`，缺欄位就不放進 log，不補假值），`prompt_tokens` 貼近截斷門檻時另記一筆 warning。新增 `OLLAMA_NUM_CTX` 並讓三個 `ChatOllama` 實例共用同一個值——Ollama 收到不同 `num_ctx` 會重新載入模型，節點間輪流呼叫若值不一致，等於每次切換都多付一次載入時間。
 
-**已知限制**：截斷偵測門檻本身是間接訊號，不是直接量到的事實——Ollama 回報的 `prompt_eval_count` 是「截斷後」的值，程式端看不到原始 prompt 真正有多長，門檻偵測到的其實是「`prompt_tokens` 貼著已知的截斷上限」，這個偵測方式在其他 `num_ctx` 值下是否仍成立，要等下面的 A/B 補完才能確認。
+**num_ctx A/B 結果：預設值定為 32768。** `data/bench/numctx_ab.jsonl`（`adr`／`eps`／`eps2`／`invest` 四題 × 4096／16384／32768 三組）：
 
-**num_ctx A/B 現況：只跑了 4096 這一臂，16384／32768 未跑，預設值尚未定案**。`data/bench/numctx_ab.jsonl` 累積 4 筆（`adr`／`eps`／`eps2`／`invest` 各一次，`arm=eps`、`num_ctx=4096`），四筆 `prompt_tokens` 皆為 2050——貼齊截斷門檻，代表這四題的 prompt 在 4096 context 下全數被截斷。單題耗時（`secs`）分別為 191.6／123.0／190.5／206.0 秒。**該選多大的 `num_ctx` 需等 16384／32768 兩臂實測記憶體與速度後才能定案，列入待辦，不接受推導值。**
+| `num_ctx` | 截斷 | 決策卡欄位 | `[來源N]` 引用 | SIZE | GPU |
+|---|---|---|---|---|---|
+| 4096 | 4/4 題皆截到 2050 token | 0～1 欄 | 0/4 | 5.5 GB | — |
+| 16384 | 0/4 | 9 欄 | 4/4 | 5.9 GB | 100% |
+| 32768 | 0/4 | 9 欄 | 4/4 | 6.6 GB | 100% |
+
+16384 與 32768 兩組結果幾乎相同；選 32768 是因為歷史紀錄最長 prompt 達 22048 token，16384 裝不下，代價是多付約 0.7 GB 記憶體，兩組讀 prompt 的速度相同（約 80 tok/s）。
+
+截斷規則已實測確認：原始 prompt 達到 `num_ctx` 才會截斷，截完固定剩 `num_ctx // 2 + 2` token（4096→2050、32768→16386）；未截斷的 prompt，`prompt_tokens` 可以落在 0 到 `num_ctx` 之間任何值。原本的門檻「`prompt_tokens >= num_ctx // 2 - 8`」在 16384 下會把沒截斷的 11338 token 誤報成截斷，改為「`prompt_tokens` 落在 `num_ctx // 2 + 2` 的 ±8 以內才判定截斷」。
+
+**已知限制**：Ollama 回報的 `prompt_eval_count` 是「截斷後」的值，程式端看不到原始 prompt 真正有多長，這個門檻偵測到的其實是「`prompt_tokens` 貼著已知的截斷上限」而非「原始 prompt 遠大於 `num_ctx`」；若原始 prompt 剛好落在 limit ±8 以內、其實沒被截斷，仍會被誤報。
+
+驗證：正式改用 32768 後，容器內 adr 題的 `prompt_tokens` 為 11338，未觸發截斷警告；該題讀 prompt 約 130 秒，總耗時 306 秒——11k token 的 prompt 光讀就要上百秒，是下一個待辦的量測對象（見上方待辦第 2 項）。
+
+跑 A/B 時 bench 本身也補強：新增 `invest`（單一公司投資題，看決策卡欄位完整度）、`--q` 改為逗號分隔可跑多題、`--out` 可指定結果路徑，並新增 `cites_source` 檢查 `[來源N]` 格式引用。`_llms` 的 `lru_cache` key 不含 `num_ctx`，建 fixture 或切換 `num_ctx` 前後都要呼叫 `cache_clear()`，否則會沿用舊 `num_ctx` 建出的 `ChatOllama` 實例。
+
+驗收不截斷的兩組時另發現兩個既有誤判：adr 題的 `cites_premium` 判定用 regex 只認「溢價」兩字，模型其實已寫成「高於台股現價 19.03%」這種帶數字的句子卻被判未引用；eps2 題模型並未使用程式算好的換算值，直接比較 27.25 元與 4.31 美元，得出「台股 EPS 較高」的錯誤結論（換算後約 27.4 元，其實是 ADR 較高）。前者已於本節修好（見下），後者查出根因並修正，見第四節。
+
+### 四、bench 改依數值比對引用；eps2 跨幣別直接比較修正
+
+**bench 判定方式修正**：`cites_premium`／`cites_eps` 改成從 bench 實際擷取的 ADR 換算區塊文字裡取出溢價率與換算後 EPS 的數值，再比對答案是否引用了同一個數值，不再用「溢價」「換算」這類固定字眼配 regex 找句子——固定字眼配不到模型自行改寫的說法，數值比對不受措辭影響。
+
+**eps2 的根因是兩份跨市場指示互相衝突**：`dual_market_warning` 要求「不得換算成同一數字比較」，是為了擋模型自行亂換算；但雙掛牌且有 ADR 換算區塊時，程式已經算好換算值、區塊本身就是在告訴模型「這個數字你可以直接引用」，兩句指示同時出現在 prompt 裡，模型選擇遵守了前者、跳過换算區塊，直接拿台股 27.25 元與 ADR 4.31 美元比大小。
+
+**修法**：有 ADR 換算區塊時，`generate` 改用新增的 `dual_market_warning_adr`（i18n）——要求引用區塊算好的台幣等值與差距百分比，禁止跨幣別直接比較原始數字；區塊沒有 EPS 等值那一行時（見下方重現實驗），只能把兩邊 EPS 分開陳述、不得判斷誰高誰低。沒有換算區塊、或開關關閉時，仍用舊版 `dual_market_warning`。新開關 `config.ADR_COMPARE_RULE`（預設 `on`），`off` 為舊行為，供 A/B 對照；新增 3 個測試覆蓋「有區塊＋on」「有區塊＋off」「無區塊」三種組合，全套 **276 passed、4 skipped**。
+
+**重現實驗**：凍結行情（固定報價、固定匯率），在換算區塊有 EPS 等值行的情況下，匯率 31.70～31.95 共跑 6 次，舊規則（`dual_market_warning`）在這 6 次都正確引用了換算值——換算區塊本身已經夠清楚，匯率數值不是觸發誤判的原因。把 EPS 等值行拿掉後（模擬 `yfinance` 的 `earnings_dates` 抓取失敗，或台美兩邊公布日相差超過 3 天、系統判定不算同一季），舊規則立即重現本節一開始的誤判（答「台股 27.25 元 vs ADR 4.48 美元，台股較高」，兩次都把下一季共識預估的 4.48 美元當成了實際 EPS）；改用新規則後同一情境下改為分開陳述兩邊數字、不判斷高低。各情境只跑 1 次，樣本小，不是嚴謹 A/B，但足以定位觸發條件：**換算區塊缺 EPS 等值行**才會重現跨幣別直接比，保留 `ADR_COMPARE_RULE` 開關供日後正式 A/B。
 
 ### 改動內容
 
@@ -1384,3 +1412,9 @@ isort（I）刻意未納入 select：既有風格是一行塞多個名稱靠 lin
 | ADR 溢價計算與引用區塊 | `src/market.py`：新增溢價計算（`ADR_RATIO` × `USD/TWD`）；`src/graph.py`：並行抓取 ADR 匯率與行情快照，兩邊成功才附區塊；`src/tickers.py`：新增 `ADR_RATIO`；`src/config.py`：新增 `ADR_PREMIUM` 開關；`src/i18n.py`：溢價區塊文案；`tests/bench_adr_premium.py` 新增、`tests/test_dual_market.py`／`tests/test_market.py` 補測試 | `a91086e` |
 | ADR EPS 換算值 | `src/market.py`：`format_adr_premium` 改回傳 `(text, metrics)`，新增 EPS 換算（同季判定 3 天內、`ADR EPS ÷ ratio × USD/TWD`）；`src/config.py`／`src/i18n.py`：`ADR_PREMIUM` 新增 `eps` 臂並設為預設；`tests/bench_adr_premium.py` 改為多問法 A/B 並改用 `setup_logging` 落地到 `data/logs`，拿掉不可靠的 `self_convert` regex 判定 | `7feaed4` |
 | Ollama token 用量記錄與 `OLLAMA_NUM_CTX` | `src/graph.py`：新增 `_ollama_usage()`（從 `response_metadata` 取 token 數與耗時）、`_warn_if_truncated()`（`prompt_tokens` 貼近截斷門檻時記 warning），`rewrite_question`／`agent`／`generate` 併入記錄；`src/config.py`：新增 `OLLAMA_NUM_CTX`（預設 4096），三個 `ChatOllama` 實例共用；`tests/test_ollama_usage.py` 新增 | `f45088d` |
+| `OLLAMA_NUM_CTX` 預設值改為 32768、截斷門檻修正 | `src/config.py`：預設 4096 → 32768，註解記錄 A/B 數據；`src/graph.py`：`_warn_if_truncated` 門檻由「`>= num_ctx//2 - 8`」改為「貼齊 `num_ctx//2 + 2` 的 ±8 以內」；`tests/test_ollama_usage.py` 補 32768 情境與 11338 不誤報的斷言 | `088c0d2` |
+| bench 新增 invest 題與 num_ctx A/B 支援 | `tests/bench_adr_premium.py`：新增 `invest` 題與 `INVEST_FIXTURE_NUM_CTX`、`--q` 改逗號分隔、新增 `--out`、新增 `cites_source()` 與 `_generate_with_usage()`（monkeypatch `_ollama_usage` 取回每次呼叫的 token 用量）；記錄 10-07 三組 A/B 結果 | `2bd910f` |
+| bench 改依數值比對引用 | `tests/bench_adr_premium.py`：`cites_premium`／`cites_eps` 改成從實際擷取的換算區塊文字取出溢價率與換算 EPS 數值後比對，取代固定字眼 regex | `aff6720` |
+| eps2 跨幣別直接比較修正 | `src/i18n.py`：新增 `dual_market_warning_adr`（中英各一）；`src/graph.py` 的 `generate`：有 ADR 換算區塊且 `ADR_COMPARE_RULE=on` 時改用該字串；`src/config.py`：新增 `ADR_COMPARE_RULE` 開關（預設 `on`）；`tests/test_dual_market.py` 新增 3 個測試覆蓋三種開關／區塊組合 | `—` |
+
+待辦（本節新增，詳見上方待辦第 3 項）：eps2 回答期間台股 EPS 與 ADR EPS 可能取自不同期（檢索文件 vs 行情快照）；曾把下一季共識預估誤當實際 EPS；曾把換算方向說反（「ADR EPS 乘以 5」，應除以 5 再乘匯率，新規則那次重現 log 另有一筆「決策卡格式違規」警告尚未查）；eps3 把 ADR 股價的台幣等值講得像 EPS；bench 可考慮存下換算區塊全文方便追查；`ADR_COMPARE_RULE` 開關的 A/B 結束後評估是否移除。
