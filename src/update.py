@@ -598,10 +598,16 @@ def _format_rows(rows: list[dict], co_id: str) -> tuple[str, str, str] | None:
         ]
         if not lines:
             continue
-        # 綜合損益表是年初至當季累計（Q2 = 1～6 月），標明才不會被讀成單季；資產負債表是時點數
+        # 綜合損益表是年初至當季累計（Q2 = 1～6 月）：把累計期間放最前面（上半年／前三季／全年），
+        # LLM 才不會丟掉括號而把累計 EPS 讀成單季；資產負債表是時點數，維持「第 N 季」
         period = f"第 {season} 季"
         if title == "綜合損益表":
-            period += f"（1～{int(season) * 3} 月累計）"
+            period = {
+                "1": "第 1 季（1～3 月）",
+                "2": "上半年（1～6 月累計，第 2 季財報）",
+                "3": "前三季（1～9 月累計，第 3 季財報）",
+                "4": "全年（1～12 月累計，第 4 季財報）",
+            }[str(int(season))]
         blocks.append(
             f"{name}（{co_id}）{year} 年{period} {title}"
             f"（單位：仟元，每股盈餘為元；資料來源：公開資訊觀測站 OpenAPI）\n"
