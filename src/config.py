@@ -97,6 +97,17 @@ ADR_PREMIUM = os.getenv("ADR_PREMIUM", "eps").lower()
 # 供同程式碼同容器 A/B 切換臂。
 FILTERS_MODEL = os.getenv("FILTERS_MODEL", "")
 
+# Ollama context 視窗（token）。`ollama ps` 顯示現行模型以 4096 載入，三個 ChatOllama
+# （llm／filters／tool）原本都沒帶 num_ctx，一律吃 Ollama 預設值。0.34.0 的 server log
+# 掃到 125 次截斷，一律截到 limit=2050（4096 的一半再扣 4 碼 keep）：原 prompt token 數
+# p50 6,034、p90 11,037、最大 22,048——換算下來模型平均看不到 50% 到 75% 的輸入，
+# 這解釋了決策卡 13 欄全缺、回答開頭斷章取義等一連串現象（見 MAINTENANCE_LOG）。
+# 這裡先只補觀測＋開關，預設值維持 4096（等同現狀）；開多大要等 A/B（第二步）量完
+# 記憶體與速度才能定案，不接受純推導的數字。
+# 三個 ChatOllama 務必帶同一個值：Ollama 收到不同 num_ctx 會重新載入模型，
+# 在節點間來回切換等於每次都多付一次載入時間。
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+
 # tool 呼叫輪數上限。最後一輪常是模型只回一句「我查完了」（tool_calls 0），
 # 實測單輪可達 93 至 290 秒，佔單題三到六成。收緊到 3 能否在不損答案品質的
 # 前提下省下那一輪，須同程式碼同容器 A/B，故拉成可調參數而非改常數。
