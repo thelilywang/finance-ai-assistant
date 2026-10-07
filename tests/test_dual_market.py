@@ -193,12 +193,13 @@ class _StubLLM:
         return AIMessage(content="stub answer")
 
 
-def _drive_generate(monkeypatch, arm: str) -> str:
+def _drive_generate(monkeypatch, arm: str, compare_rule: str = "on") -> str:
     """跑一次 generate()（market=both、雙掛牌併陳），回傳送進 LLM 的完整 prompt。"""
     import src.config as _cfg
 
     stub = _StubLLM()
     monkeypatch.setattr(_cfg, "ADR_PREMIUM", arm)
+    monkeypatch.setattr(_cfg, "ADR_COMPARE_RULE", compare_rule)
     monkeypatch.setattr(_g, "_llms", lambda model: {"llm": stub})
     monkeypatch.setattr(_g, "get_market_snapshots",
                          lambda codes: {c: f"currentPrice: 1\ncurrency: USD" for c in codes})
@@ -224,6 +225,25 @@ def test_adr_premium_block_has_block(monkeypatch):
     prompt = _drive_generate(monkeypatch, "block")
     assert "ADR 換算" in prompt
     assert "ADR premium stub text" in prompt
+
+
+def test_dual_market_warning_adr_used_when_block_and_compare_rule_on(monkeypatch):
+    # --- 有換算區塊、compare_rule=on：改用允許引用換算值的 _adr 版 ---
+    prompt = _drive_generate(monkeypatch, "block", compare_rule="on")
+    assert "一律引用" in prompt
+    assert "不得直接相除" not in prompt
+
+
+def test_dual_market_warning_plain_when_compare_rule_off(monkeypatch):
+    # --- 有換算區塊但 compare_rule=off：維持舊版（A/B 對照臂） ---
+    prompt = _drive_generate(monkeypatch, "block", compare_rule="off")
+    assert "不得直接相除" in prompt
+
+
+def test_dual_market_warning_plain_when_no_block(monkeypatch):
+    # --- 沒有換算區塊（arm=off）：即使 compare_rule=on 也用舊版 ---
+    prompt = _drive_generate(monkeypatch, "off", compare_rule="on")
+    assert "不得直接相除" in prompt
 
 
 def test_adr_premium_block_gating():
