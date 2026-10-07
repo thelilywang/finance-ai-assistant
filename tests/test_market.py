@@ -1,4 +1,6 @@
 """format_snapshot / format_adr_premium 純函式，不碰網路。"""
+from datetime import date
+
 from src.market import format_adr_premium, format_snapshot
 
 
@@ -56,25 +58,58 @@ _TW_INFO = {"currentPrice": 2480.0}
 _US_INFO = {"currentPrice": 446.57}
 _FX_INFO = {"regularMarketPrice": 31.802}  # TWD=X 只有 regularMarketPrice，沒有 currentPrice
 
+# --- EPS 等值：計畫附的容器內實測值（10-07），同一天公布同一季 ---
+_TW_EPS = (date(2026, 7, 16), 27.25)
+_US_EPS = (date(2026, 7, 16), 4.31)
+
 
 def test_format_adr_premium_known_values():
     # 446.57 * 31.802 / 5 = 2840.36；2840.36 / 2480.0 - 1 = +14.53%
-    result = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5)
-    assert result is not None
-    assert "2840.36 TWD" in result
-    assert "+14.53%" in result
-    assert "1 TSM = 5 shares of 2330" in result
+    text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5)
+    assert text is not None
+    assert "2840.36 TWD" in text
+    assert "+14.53%" in text
+    assert "1 TSM = 5 shares of 2330" in text
+    assert metrics == {"premium_pct": 14.53}
 
 
 def test_format_adr_premium_fx_regular_market_price_only():
     # TWD=X 只有 regularMarketPrice（currentPrice 為 None）也要能算，不能因此回 None
-    result = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO,
-                                 {"currentPrice": None, "regularMarketPrice": 31.802}, ratio=5)
-    assert result is not None
-    assert "31.802" in result
+    text, _ = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO,
+                                  {"currentPrice": None, "regularMarketPrice": 31.802}, ratio=5)
+    assert text is not None
+    assert "31.802" in text
 
 
 def test_format_adr_premium_missing_price_returns_none():
-    assert format_adr_premium("2330", "TSM", {}, _US_INFO, _FX_INFO, ratio=5) is None
-    assert format_adr_premium("2330", "TSM", _TW_INFO, {}, _FX_INFO, ratio=5) is None
-    assert format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, {}, ratio=5) is None
+    assert format_adr_premium("2330", "TSM", {}, _US_INFO, _FX_INFO, ratio=5) == (None, {})
+    assert format_adr_premium("2330", "TSM", _TW_INFO, {}, _FX_INFO, ratio=5) == (None, {})
+    assert format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, {}, ratio=5) == (None, {})
+
+
+def test_format_adr_premium_eps_equiv_same_quarter():
+    # 4.31 / 5 * 31.802 = 27.41；27.41 / 27.25 - 1 = +0.60%
+    text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
+                                        tw_eps=_TW_EPS, us_eps=_US_EPS)
+    assert text is not None
+    assert "27.25 TWD" in text and "4.31 USD" in text
+    assert "27.41 TWD" in text
+    assert metrics["eps_equiv_diff_pct"] == 0.6
+
+
+def test_format_adr_premium_eps_different_quarter_no_eps_line():
+    # 公布日相差 5 天：視為不同季，不附 EPS 等值行
+    us_eps_other_quarter = (date(2026, 7, 21), 4.31)
+    text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
+                                        tw_eps=_TW_EPS, us_eps=us_eps_other_quarter)
+    assert text is not None
+    assert "EPS" not in text
+    assert "eps_equiv_diff_pct" not in metrics
+
+
+def test_format_adr_premium_eps_missing_one_side_no_eps_line():
+    text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
+                                        tw_eps=_TW_EPS, us_eps=None)
+    assert text is not None
+    assert "EPS" not in text
+    assert "eps_equiv_diff_pct" not in metrics
