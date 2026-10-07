@@ -59,8 +59,11 @@ fixture（adr/eps/eps2）沿用 4096 時期建的，不重建。
     16384  截斷 0/4、決策卡 9 欄、cites_source 4/4、100% GPU、SIZE 5.9 GB
     32768  截斷 0/4、決策卡 9 欄、cites_source 4/4、100% GPU、SIZE 6.6 GB
 16384 與 32768 兩組結果幾乎相同（回答內容、決策卡欄位、引用情況）。adr 題的
-cites_premium 與 eps2 題的 cites_eps_equiv，在不截斷的兩組都是 False，待重新
-驗證 ADR_PREMIUM=eps（不在本次範圍）。
+cites_premium 當時用舊判斷規則（要求回答裡同時出現「溢價」兩字與百分比）在
+16384／32768 兩組判成 False，但回答其實寫了「高於台股現價 19.03%」這類沒有
+「溢價」兩字的句子——已改成比對數值（見 cites_premium）。eps2 題的
+cites_eps_equiv 是模型真的沒用 EPS 等值（直接比較 27.25 TWD 與 4.31 USD），
+待改 generate 指示（不在本次範圍）。
 
 `_llms` 用 lru_cache，key 不含 num_ctx，同一程序內切換 OLLAMA_NUM_CTX 不會重建
 ChatOllama 實例；建 fixture 前後都要呼叫 `_llms.cache_clear()`。
@@ -82,7 +85,6 @@ ChatOllama 實例；建 fixture 前後都要呼叫 `_llms.cache_clear()`。
 import argparse
 import asyncio
 import json
-import math
 import re
 import sys
 import time
@@ -116,9 +118,17 @@ FIELD_PATTERNS = {
 
 EPS_Q_KEYS = {"eps", "eps2", "eps3"}
 
-# ADR 題：回答中有「溢價」且同段（同一行或鄰近行）有百分比數字，代表確實引用了
-# 系統算好的溢價率，而不是空泛提到「溢價」兩字卻沒有數字支撐。
-_PREMIUM_RE = re.compile(r"溢價[^\n]{0,30}[\d.]+\s*%|[\d.]+\s*%[^\n]{0,30}溢價")
+# ADR 題：回答裡任一「數字%」與區塊算出的溢價率（取絕對值）相差 ≤0.5 個百分點即算引用。
+# 不看用詞：模型會寫「溢價 19.03%」「高於台股 19.03%」「約 19%」。0.5 只留給模型四捨五入
+# 到整數（如 19.03 寫成「約 19%」）——比對值已是 generate 實際拿到的區塊，沒有行情差距。
+# ponytail: 只看「有沒有一個接近溢價率的百分比」，不看那個數字在講什麼。溢價接近 0
+# （漲跌幅 0.19%／0.72% 會落入 ±0.5）或接近同篇其他百分比（如營收年增 19.3%）時會
+# 誤判為引用；目前只測 2330/TSM、溢價約 19%，與同篇其他百分比差很遠。換標的前要改成
+# 比對數字前後的用詞。
+_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+# 區塊文字裡「ADR premium vs 2330: +19.03%」這一行抓出溢價率，供 cites_premium 比對。
+_PREMIUM_BLOCK_RE = re.compile(r"ADR premium vs \S+: ([+-]?[\d.]+)%")
 
 # 是否引用了 [來源N] 格式的出處編號，不管引用幾個或第幾號。
 _CITATION_RE = re.compile(r"\[來源\d+\]")
@@ -131,22 +141,30 @@ def cites_source(answer: str) -> bool:
 _EPS_BLOCK_RE = re.compile(r"=\s*([\d.]+)\s*TWD\s*\(vs")
 
 
-def cites_premium(answer: str) -> bool:
-    return bool(_PREMIUM_RE.search(answer))
+def cites_premium(answer: str, premium_pct: float | None) -> bool:
+    """回答中是否出現與區塊算出的溢價率相近的百分比數字（見上方 _PCT_RE 註解）。
+
+    premium_pct 為 None（off 臂沒有溢價區塊）一律回 False：沒有區塊時模型寫出的
+    溢價數字只可能是自己算的，不算引用。
+    """
+    if premium_pct is None:
+        return False
+    target = abs(premium_pct)
+    return any(abs(float(m) - target) <= 0.5 for m in _PCT_RE.findall(answer))
+
+
+_DECIMAL_RE = re.compile(r"\d+\.\d+")
 
 
 def cites_eps_equiv(answer: str, eps_equiv: float | None) -> bool:
-    """回答中是否出現區塊算出的 EPS 等值數字（只比對整數+1位小數，不管模型抄幾位）。
+    """回答中是否出現與區塊算出的 EPS 等值相近的小數數字。
 
-    用截斷而非四捨五入：這個比對值是另外呼叫一次 get_adr_premium 現場算的，
-    與 generate() 內部那次抓到的即時匯率可能有秒級誤差（如 31.869 vs 31.851），
-    四捨五入在小數交界處（27.47 vs 27.46）會判成不同值而誤判未命中，截斷後
-    兩者都落在同一個 27.4，才是這個誤差量級下該有的寬容度。
+    比對值是 generate 實際拿到的區塊（區塊印到小數兩位），0.05 容許模型四捨五入到
+    小數一位（27.46 寫成 27.5、27.41 寫成 27.4）。
     """
     if eps_equiv is None:
         return False
-    needle = f"{math.floor(eps_equiv * 10) / 10:.1f}"
-    return needle in answer
+    return any(abs(float(m) - eps_equiv) <= 0.05 for m in _DECIMAL_RE.findall(answer))
 
 
 def count_card_fields(answer: str) -> int:
@@ -231,49 +249,63 @@ async def _load_or_build_fixture(q_key: str) -> dict:
     return state
 
 
-def _eps_equiv_from_block() -> float | None:
-    """ADR_PREMIUM=eps 時算一次 EPS 等值供比對；非 eps 臂或算不出來回 None。"""
-    if config.ADR_PREMIUM != "eps":
-        return None
-    from src.market import get_adr_premium
+def _parse_block(text: str | None) -> tuple[float | None, float | None]:
+    """從溢價區塊文字抓 (premium_pct, eps_equiv)，見 _PREMIUM_BLOCK_RE / _EPS_BLOCK_RE。
 
-    text = get_adr_premium("2330", "TSM")
+    text 是 None（off 臂沒有區塊）或 regex 沒命中都回 None，不當例外處理。
+    """
     if text is None:
-        return None
-    m = _EPS_BLOCK_RE.search(text)
-    return float(m.group(1)) if m else None
+        return None, None
+    m_premium = _PREMIUM_BLOCK_RE.search(text)
+    premium_pct = float(m_premium.group(1)) if m_premium else None
+    m_eps = _EPS_BLOCK_RE.search(text)
+    eps_equiv = float(m_eps.group(1)) if m_eps else None
+    return premium_pct, eps_equiv
 
 
-def _generate_with_usage(state: dict) -> tuple[dict, dict]:
-    """呼叫 generate 並連帶拿到該次呼叫的 _ollama_usage 結果。
+def _generate_capturing(state: dict) -> tuple[dict, dict, str | None]:
+    """呼叫 generate，連帶拿到該次呼叫實際用到的 _ollama_usage 與溢價區塊文字。
 
-    不改 src/：generate 內部已經呼叫 _ollama_usage(resp) 算出 usage dict 再送進
-    log_duration，但沒有回傳給呼叫端。這裡 monkeypatch _ollama_usage 本身，讓它
-    照常運作、只是順手把回傳值記一份下來，比改 src/graph.py 的回傳介面更省事。
+    不改 src/：generate 內部已經呼叫 _ollama_usage(resp) 算出 usage dict、
+    以及（market=both 時）呼叫 get_adr_premium 算出溢價區塊字串，兩者都沒有
+    回傳給呼叫端。這裡 monkeypatch 這兩個 src.graph 模組全域名稱，讓它們照常
+    運作、只是順手把回傳值記一份下來——比對值因此是模型實際看到的那份區塊，
+    不是 bench 另外算一次（另算一次會有秒級行情差距）。get_adr_premium 是在
+    executor 的 thread pool 裡被呼叫的，用 dict 存結果即可，不需要鎖。
     """
     import src.graph as _g
 
-    captured: dict = {}
-    orig = _g._ollama_usage
+    usage: dict = {}
+    block_text: dict = {"value": None}
+    orig_usage = _g._ollama_usage
+    orig_premium = _g.get_adr_premium
 
-    def _wrapped(msg):
-        usage = orig(msg)
-        captured.update(usage)
-        return usage
+    def _wrapped_usage(msg):
+        result = orig_usage(msg)
+        usage.update(result)
+        return result
 
-    _g._ollama_usage = _wrapped
+    def _wrapped_premium(tw_code, us_code):
+        text = orig_premium(tw_code, us_code)
+        block_text["value"] = text
+        return text
+
+    _g._ollama_usage = _wrapped_usage
+    _g.get_adr_premium = _wrapped_premium
     try:
         out = _g.generate(state)
     finally:
-        _g._ollama_usage = orig
-    return out, captured
+        _g._ollama_usage = orig_usage
+        _g.get_adr_premium = orig_premium
+    return out, usage, block_text["value"]
 
 
-async def _run_one(q_key: str, state: dict, run_idx: int, eps_equiv: float | None) -> dict:
+async def _run_one(q_key: str, state: dict, run_idx: int) -> dict:
     started = time.monotonic()
-    out, usage = _generate_with_usage(dict(state))
+    out, usage, block_text = _generate_capturing(dict(state))
     secs = round(time.monotonic() - started, 1)
     answer = out.get("answer") or ""
+    premium_pct, eps_equiv = _parse_block(block_text)
 
     row = {
         "arm": config.ADR_PREMIUM, "num_ctx": config.OLLAMA_NUM_CTX,
@@ -281,10 +313,11 @@ async def _run_one(q_key: str, state: dict, run_idx: int, eps_equiv: float | Non
         "secs": secs, "chars": len(answer), "answer": answer,
         "card_fields": count_card_fields(answer),
         "cites_source": cites_source(answer),
+        "premium_pct": premium_pct, "eps_equiv": eps_equiv,
         **usage,
     }
     if q_key == "adr":
-        row["cites_premium"] = cites_premium(answer)
+        row["cites_premium"] = cites_premium(answer, premium_pct)
     if q_key in EPS_Q_KEYS:
         row["cites_eps_equiv"] = cites_eps_equiv(answer, eps_equiv)
     return row
@@ -293,13 +326,12 @@ async def _run_one(q_key: str, state: dict, run_idx: int, eps_equiv: float | Non
 async def main_async(runs: int, q_arg: str, out_path: Path) -> None:
     q_keys = ALL_Q_KEYS if q_arg == "all" else q_arg.split(",")
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    eps_equiv = _eps_equiv_from_block()
 
     rows = []
     for q_key in q_keys:
         state = await _load_or_build_fixture(q_key)
         for i in range(runs):
-            row = await _run_one(q_key, state, i, eps_equiv)
+            row = await _run_one(q_key, state, i)
             rows.append(row)
             with out_path.open("a") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
