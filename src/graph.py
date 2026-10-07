@@ -84,9 +84,14 @@ def _model_of(state: GraphState) -> str:
 
 @lru_cache(maxsize=8)
 def _llms(model: str) -> dict:
-    """建立某個模型的三個實例。lru_cache 讓同一模型的多個 session 共用，換模型才新建。"""
+    """建立某個模型的三個實例。lru_cache 讓同一模型的多個 session 共用，換模型才新建。
+
+    三個實例都帶 num_ctx=config.OLLAMA_NUM_CTX 且務必同值：Ollama 收到不同 num_ctx
+    會重新載入模型，三個節點輪流呼叫若值不一致，等於每次切換都多付一次載入時間。
+    """
     base = ChatOllama(
-        model=model, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False
+        model=model, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False,
+        num_ctx=config.OLLAMA_NUM_CTX,
     )
     return {
         # with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
@@ -97,8 +102,65 @@ def _llms(model: str) -> dict:
         # tool-calling 專用：reasoning=False 會讓模型把「我要呼叫某工具」寫成文字而非
         # 產生結構化 tool_calls（實測 A/B：關推理時同一情境完全不發 tool call，開啟則
         # 正常），因此 agent 節點不能沿用關掉推理的實例。
-        "tool": ChatOllama(model=model, base_url=config.OLLAMA_BASE_URL, temperature=0),
+        "tool": ChatOllama(model=model, base_url=config.OLLAMA_BASE_URL, temperature=0,
+                           num_ctx=config.OLLAMA_NUM_CTX),
     }
+
+
+# ns -> ms 的欄位名對照。缺的欄位（例如 structured output 走 include_raw 以外的路徑
+# 拿不到 AIMessage）直接不放進回傳的 dict，不補 0 假裝量到了。
+_OLLAMA_DURATION_FIELDS_MS = {
+    "prompt_eval_duration": "prefill_ms",
+    "eval_duration": "decode_ms",
+    "load_duration": "load_ms",
+}
+
+
+def _ollama_usage(msg: AIMessage) -> dict:
+    """從 ChatOllama 回傳的 AIMessage 取出 token 數與耗時，供併入各節點的 log_duration。
+
+    欄位來自 response_metadata（實測 langchain_ollama 0.x）：prompt_eval_count、
+    eval_count、done_reason 為計數/狀態，prompt_eval_duration／eval_duration／
+    load_duration 是奈秒、換算成毫秒取整。response_metadata 為空（例如測試用的
+    stub LLM）或缺欄位時該項就不放進回傳的 dict，不補假值。
+    """
+    meta = getattr(msg, "response_metadata", None) or {}
+    out: dict = {}
+    if "prompt_eval_count" in meta:
+        out["prompt_tokens"] = meta["prompt_eval_count"]
+    if "eval_count" in meta:
+        out["output_tokens"] = meta["eval_count"]
+    if "done_reason" in meta:
+        out["done_reason"] = meta["done_reason"]
+    for src, dst in _OLLAMA_DURATION_FIELDS_MS.items():
+        if src in meta:
+            out[dst] = round(meta[src] / 1_000_000)
+    return out
+
+
+def _warn_if_truncated(node: str, qid: str, usage: dict) -> None:
+    """prompt_tokens 疑似被 Ollama 截斷時記一筆 warning，供回測統計截斷發生率。
+
+    門檻取 num_ctx 一半再扣 8：server log 實測 4096 對應的截斷上限是 limit=2050
+    （num_ctx//2 - 4 碼 keep 左右的誤差內）。
+
+    關鍵限制（本次實作時用 tests/bench_adr_premium.py 跑一題 eps 實測確認）：Ollama
+    截斷後回報給 client 的 prompt_eval_count 是「截斷後」的 2050，不是原本的
+    prompt 長度（同一時刻 server log 顯示 limit=2050 prompt=4329——我們這端只看得到
+    前者）。也就是說程式端永遠看不到真正超出多少，prompt_tokens 一旦截斷就會卡在
+    極接近 limit 的值，這個門檻偵測到的其實是「prompt_tokens 貼著已知的截斷上限」，
+    不是「原始 prompt 遠大於 num_ctx」。因為 response_metadata 沒有其他欄位能回推
+    原始長度，暫時沒有更好的替代訊號；這個比例在其他 num_ctx 值下是否仍成立，
+    待第二步 A/B（16384／32768）用實測驗證，不成立就依實測調整門檻並更新這段註解。
+    """
+    prompt_tokens = usage.get("prompt_tokens")
+    if prompt_tokens is None:
+        return
+    threshold = config.OLLAMA_NUM_CTX // 2 - 8
+    if prompt_tokens >= threshold:
+        log.warning("prompt 疑似被截斷", extra={"fields": {
+            "node": node, "qid": qid, "prompt_tokens": prompt_tokens,
+            "num_ctx": config.OLLAMA_NUM_CTX}})
 
 
 embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
@@ -218,12 +280,16 @@ def rewrite_question(state: GraphState) -> GraphState:
 新問題：{state['question']}
 """
     started = time.monotonic()
-    rewritten = _llms(_model_of(state))["llm"].invoke(prompt).content.strip()
+    resp = _llms(_model_of(state))["llm"].invoke(prompt)
+    rewritten = resp.content.strip()
     # qid 以改寫「後」的問句計算：下游節點看到的都是改寫後的問句，用改寫前的算會讓
     # 這筆紀錄掛在一個之後再也不出現的 qid 上，同一題的耗時就串不起來。
     question = rewritten or state["question"]
+    qid = _qid(question)
+    usage = _ollama_usage(resp)
     log_duration(log, "rewrite_question", started, node="rewrite_question",
-                 model=_model_of(state), qid=_qid(question))
+                 model=_model_of(state), qid=qid, **usage)
+    _warn_if_truncated("rewrite_question", qid, usage)
     return {**state, "question": question}
 
 
@@ -338,6 +404,12 @@ def extract_filters(state: GraphState) -> GraphState:
     # _llms 以模型名為 key，換模型只是多一個快取項，不必另建實例管理。
     model = config.FILTERS_MODEL or _model_of(state)
     started = time.monotonic()
+    # 本節點目前拿不到 usage：with_structured_output 預設只回傳解析後的 Pydantic
+    # 物件，原始 AIMessage（含 response_metadata）不在回傳值裡。改成
+    # with_structured_output(..., include_raw=True) 可以拿到，但回傳型態會變成
+    # {"raw","parsed","parsing_error"} 的 dict，下面 parsed.companies 等既有呼叫
+    # 與對應測試都要跟著改——這會動到既有行為，故本次先不做，留給下次要補這個
+    # 節點的 usage 時再處理。
     try:
         parsed = _llms(model)["filters"].invoke(prompt)
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
@@ -853,9 +925,12 @@ async def agent(state: GraphState) -> GraphState:
     )
     # round 從既有訊息推算，與 agent_route 的算法一致，回測時可看出 tool loop 跑了幾輪、每輪多久
     rounds = sum(1 for m in messages if isinstance(m, AIMessage) and m.tool_calls)
+    qid = _qid(state["question"])
+    usage = _ollama_usage(resp)
     log_duration(log, "agent", started, node="agent", model=_model_of(state),
-                 qid=_qid(state["question"]), round=rounds + 1,
-                 tool_calls=len(getattr(resp, "tool_calls", None) or []))
+                 qid=qid, round=rounds + 1,
+                 tool_calls=len(getattr(resp, "tool_calls", None) or []), **usage)
+    _warn_if_truncated("agent", qid, usage)
     # directive 一併寫回 state：只塞給這次呼叫的話，下一輪模型讀到的歷史裡沒有它，
     # 又會回到「知道要補抓但不知道補哪家」。重複指名由 _news_ages_by_company 只讀
     # 最後一次補抓之後的檢索擋掉，不是靠舊 directive 自然失效。
@@ -1432,9 +1507,13 @@ def generate(state: GraphState) -> GraphState:
     answer = append_disclaimer(resp.content or "", lang)
     # 已知端到端瓶頸在本地模型生成，prompt/回應長度是判斷「慢在輸入還是輸出」的依據；
     # 只記長度不記內容，避免把提問寫進 log（保留策略未定前先不落地個資）
+    qid = _qid(state["question"])
+    usage = _ollama_usage(resp)
     log_duration(log, "generate", started, node="generate", model=_model_of(state),
-                 qid=_qid(state["question"]), prompt_chars=len(prompt),
-                 answer_chars=len(answer), retrieved=len(state.get("retrieved") or []))
+                 qid=qid, prompt_chars=len(prompt),
+                 answer_chars=len(answer), retrieved=len(state.get("retrieved") or []),
+                 **usage)
+    _warn_if_truncated("generate", qid, usage)
     # 來源編號 → 該來源的市場，對齊 ordered 的順序（索引 n-1 即 [來源n]）
     doc_market = {d["source"]: d.get("market") for d in state["retrieved"]}
     violations = check_answer_format(
