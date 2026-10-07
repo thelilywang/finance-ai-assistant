@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
+from datetime import datetime, timezone
 
-from .tickers import is_tw_ticker
+from .logging_setup import log_duration
+from .tickers import ADR_RATIO, is_tw_ticker
 
 log = logging.getLogger("market")
 
@@ -125,6 +128,69 @@ def get_market_snapshots(companies: list[str]) -> dict[str, str]:
                             thread_name_prefix="market") as executor:
         texts = executor.map(get_market_snapshot, companies)
         return {c: text for c, text in zip(companies, texts) if text}
+
+
+def _fmt_time(info: dict) -> str:
+    """把 regularMarketTime（epoch 秒）轉成 UTC 可讀字串；缺欄位回空字串。"""
+    ts = info.get("regularMarketTime")
+    if ts is None:
+        return ""
+    return f" (as of {datetime.fromtimestamp(ts, timezone.utc):%Y-%m-%d %H:%M} UTC)"
+
+
+def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
+                        fx_info: dict, ratio: int) -> str | None:
+    """純函式，算 ADR 溢價率；任一價格缺就回 None（缺資料不硬湊）。"""
+    tw_price = tw_info.get("currentPrice") or tw_info.get("regularMarketPrice")
+    us_price = us_info.get("currentPrice") or us_info.get("regularMarketPrice")
+    fx = fx_info.get("currentPrice") or fx_info.get("regularMarketPrice")
+    if tw_price is None or us_price is None or fx is None:
+        return None
+
+    per_share_twd = us_price * fx / ratio
+    premium = per_share_twd / tw_price - 1
+
+    return "\n".join([
+        f"ADR ratio: 1 {us} = {ratio} shares of {tw}",
+        f"USD/TWD: {fx}{_fmt_time(fx_info)}",
+        f"{us} price: {us_price} USD{_fmt_time(us_info)}",
+        f"{tw} price: {tw_price} TWD{_fmt_time(tw_info)}",
+        f"{us} per-share equivalent: {per_share_twd:.2f} TWD",
+        f"ADR premium vs {tw}: {premium * 100:+.2f}%",
+    ])
+
+
+def get_adr_premium(tw: str, us: str) -> str | None:
+    """抓台股/ADR/匯率三筆行情並算溢價率；查無換算比例或任一段失敗回 None。"""
+    ratio = ADR_RATIO.get(us)
+    if ratio is None:
+        return None
+
+    started = time.monotonic()
+    try:
+        import yfinance
+        from concurrent.futures import ThreadPoolExecutor
+
+        symbols = (to_symbol(tw), us, "TWD=X")
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="adr") as executor:
+            tw_info, us_info, fx_info = executor.map(
+                lambda s: yfinance.Ticker(s).get_info(), symbols)
+
+        text = format_adr_premium(tw, us, tw_info, us_info, fx_info, ratio)
+        if text is None:
+            return None
+        # 溢價率複算一次供 log：format_adr_premium 只回文字，供回測核對數字要拆出數值
+        fx = fx_info.get("currentPrice") or fx_info.get("regularMarketPrice")
+        tw_price = tw_info.get("currentPrice") or tw_info.get("regularMarketPrice")
+        us_price = us_info.get("currentPrice") or us_info.get("regularMarketPrice")
+        premium_pct = round((us_price * fx / ratio / tw_price - 1) * 100, 2)
+        log_duration(log, "adr_premium", started, node="market",
+                     tw=tw, us=us, ratio=ratio, fx=fx, premium_pct=premium_pct)
+        return text
+    except Exception as e:  # noqa: BLE001
+        log.warning("ADR 溢價取得失敗", extra={"fields": {
+            "tw": tw, "us": us, "reason": "market_failed", "error": str(e)}})
+        return None
 
 
 if __name__ == "__main__":

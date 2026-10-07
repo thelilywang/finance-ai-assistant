@@ -1,5 +1,5 @@
-"""format_snapshot 純函式，不碰網路。"""
-from src.market import format_snapshot
+"""format_snapshot / format_adr_premium 純函式，不碰網路。"""
+from src.market import format_adr_premium, format_snapshot
 
 
 def test_format_snapshot_full():
@@ -49,3 +49,32 @@ def test_format_snapshot_currency():
     cur = format_snapshot({"currency": "USD", "currentPrice": 182.4})
     assert cur.index("currency: USD") < cur.index("currentPrice: 182.4")
     assert "currency: " not in format_snapshot({"currentPrice": 100})
+
+
+# --- format_adr_premium：計畫附的容器內實測值（2026-09-24），TSM/2330/USD-TWD ---
+_TW_INFO = {"currentPrice": 2480.0}
+_US_INFO = {"currentPrice": 446.57}
+_FX_INFO = {"regularMarketPrice": 31.802}  # TWD=X 只有 regularMarketPrice，沒有 currentPrice
+
+
+def test_format_adr_premium_known_values():
+    # 446.57 * 31.802 / 5 = 2840.36；2840.36 / 2480.0 - 1 = +14.53%
+    result = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5)
+    assert result is not None
+    assert "2840.36 TWD" in result
+    assert "+14.53%" in result
+    assert "1 TSM = 5 shares of 2330" in result
+
+
+def test_format_adr_premium_fx_regular_market_price_only():
+    # TWD=X 只有 regularMarketPrice（currentPrice 為 None）也要能算，不能因此回 None
+    result = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO,
+                                 {"currentPrice": None, "regularMarketPrice": 31.802}, ratio=5)
+    assert result is not None
+    assert "31.802" in result
+
+
+def test_format_adr_premium_missing_price_returns_none():
+    assert format_adr_premium("2330", "TSM", {}, _US_INFO, _FX_INFO, ratio=5) is None
+    assert format_adr_premium("2330", "TSM", _TW_INFO, {}, _FX_INFO, ratio=5) is None
+    assert format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, {}, ratio=5) is None

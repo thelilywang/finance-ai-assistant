@@ -7,6 +7,7 @@ from src.graph import (
     resolve_market,
     route_after_resolve_market,
 )
+from src.market import get_adr_premium
 from src.tickers import TW_US_DUAL_LISTED, TW_US_OTC_ONLY, dual_listed_peer, otc_adr_of
 
 
@@ -161,6 +162,88 @@ def test_cross_market_split():
     assert cross_market_split({"companies": ["TSM"], "peer_company": "2330", "market": "us"}) is None
     # 沒指名公司不得炸掉
     assert cross_market_split({}) is None
+
+
+def test_get_adr_premium_no_ratio_skips_network(monkeypatch):
+    # --- ADR_RATIO 沒有對應比例的代號直接回 None，且根本不打網路 ---
+    import src.market as _m
+
+    class _BoomTicker:
+        def __init__(self, *a, **k):
+            raise AssertionError("ADR_RATIO 沒有比例時不應呼叫 yfinance.Ticker")
+
+    monkeypatch.setattr(_m, "ADR_RATIO", {}, raising=False)
+    assert get_adr_premium("2330", "TSM") is None
+
+    # 就算 yfinance.Ticker 被 monkeypatch 成一呼叫就炸，也不會被走到
+    import yfinance
+    monkeypatch.setattr(yfinance, "Ticker", _BoomTicker)
+    assert get_adr_premium("2330", "TSM") is None
+
+
+class _StubLLM:
+    """generate() 真正跑到底但不打真模型，捕捉最終 prompt 供斷言。"""
+
+    def __init__(self):
+        self.last_prompt = None
+
+    def invoke(self, prompt):
+        self.last_prompt = prompt
+        from langchain_core.messages import AIMessage
+        return AIMessage(content="stub answer")
+
+
+def _drive_generate(monkeypatch, arm: str) -> str:
+    """跑一次 generate()（market=both、雙掛牌併陳），回傳送進 LLM 的完整 prompt。"""
+    import src.config as _cfg
+
+    stub = _StubLLM()
+    monkeypatch.setattr(_cfg, "ADR_PREMIUM", arm)
+    monkeypatch.setattr(_g, "_llms", lambda model: {"llm": stub})
+    monkeypatch.setattr(_g, "get_market_snapshots",
+                         lambda codes: {c: f"currentPrice: 1\ncurrency: USD" for c in codes})
+    monkeypatch.setattr(_g, "get_adr_premium", lambda tw, us: "ADR premium stub text")
+
+    state = {
+        "question": "台積電台股和 ADR 的 EPS 差多少？", "lang": "zh",
+        "companies": ["2330"], "peer_company": "TSM", "market": "both",
+        "doc_type": None, "news_since_days": None, "answer_shape": None,
+        "retrieved": [], "history": [],
+    }
+    _g.generate(state)
+    assert stub.last_prompt is not None
+    return stub.last_prompt
+
+
+def test_adr_premium_off_no_block(monkeypatch):
+    prompt = _drive_generate(monkeypatch, "off")
+    assert "ADR 溢價" not in prompt
+
+
+def test_adr_premium_block_has_block(monkeypatch):
+    prompt = _drive_generate(monkeypatch, "block")
+    assert "ADR 溢價" in prompt
+    assert "ADR premium stub text" in prompt
+
+
+def test_adr_premium_block_gating():
+    # --- _adr_premium_block：off 不附；兩邊都有行情且溢價算得出來才附 ---
+    import src.config as _cfg
+    from src.graph import _adr_premium_block
+
+    orig = _cfg.ADR_PREMIUM
+    try:
+        _cfg.ADR_PREMIUM = "off"
+        assert _adr_premium_block("zh", {"2330": "s1", "TSM": "s2"}, "premium text") == ""
+
+        _cfg.ADR_PREMIUM = "block"
+        assert _adr_premium_block("zh", {"2330": "s1"}, "premium text") == ""  # 只有一邊行情
+        assert _adr_premium_block("zh", {"2330": "s1", "TSM": "s2"}, None) == ""  # 溢價算不出來
+        block = _adr_premium_block("zh", {"2330": "s1", "TSM": "s2"}, "premium text")
+        assert "premium text" in block
+        assert "ADR 溢價" in block
+    finally:
+        _cfg.ADR_PREMIUM = orig
 
 
 def test_side_by_side_merges_peer_only_when_both():
