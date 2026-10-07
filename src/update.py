@@ -598,8 +598,12 @@ def _format_rows(rows: list[dict], co_id: str) -> tuple[str, str, str] | None:
         ]
         if not lines:
             continue
+        # 綜合損益表是年初至當季累計（Q2 = 1～6 月），標明才不會被讀成單季；資產負債表是時點數
+        period = f"第 {season} 季"
+        if title == "綜合損益表":
+            period += f"（1～{int(season) * 3} 月累計）"
         blocks.append(
-            f"{name}（{co_id}）{year} 年第 {season} 季 {title}"
+            f"{name}（{co_id}）{year} 年{period} {title}"
             f"（單位：仟元，每股盈餘為元；資料來源：公開資訊觀測站 OpenAPI）\n"
             + "\n".join(lines)
         )

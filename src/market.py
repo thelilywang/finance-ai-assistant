@@ -55,8 +55,8 @@ def format_consensus(ticker) -> str:
         if dates:
             lines.append(f"next earnings date: {dates[0]}")
         for label, key in (
-            ("EPS consensus (avg/low/high)", "Earnings"),
-            ("Revenue consensus (avg/low/high)", "Revenue"),
+            ("next-quarter EPS estimate, not yet reported (avg/low/high)", "Earnings"),
+            ("next-quarter revenue estimate, not yet reported (avg/low/high)", "Revenue"),
         ):
             avg, low, high = (cal.get(f"{key} Average"), cal.get(f"{key} Low"), cal.get(f"{key} High"))
             if avg is not None:
@@ -159,6 +159,10 @@ def _latest_reported_eps(ticker) -> tuple[date, float] | None:
         return None
 
 
+def _quarter_of(d: date) -> tuple[int, int]:
+    return d.year, (d.month - 1) // 3
+
+
 def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
                         fx_info: dict, ratio: int,
                         tw_eps: tuple[date, float] | None = None,
@@ -167,8 +171,9 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
     """純函式，算 ADR 溢價率；任一價格缺就回 (None, {})（缺資料不硬湊）。
 
     回傳 (text, metrics)：metrics 供呼叫端記 log／測試斷言，不必從文字裡拆數字。
-    tw_eps/us_eps 兩邊都有值且公布日相差 ≤3 天（視為同一季）才附 EPS 等值換算，
-    否則可能不是同一季，與其硬湊不如不給。
+    tw_eps/us_eps 兩邊都有值且公布日落在同一曆法季度（年、季相同；台美公布日常差好幾天
+    但屬同一財報季）才附 EPS 等值換算並與台股比較；不同季則分開陳述已公布 EPS 與各自公布日
+    並標明不可比較，另附 ADR 換算行（不含「vs」比較，也不進 metrics），標籤含糊會讓模型硬湊換算。
     """
     tw_price = tw_info.get("currentPrice") or tw_info.get("regularMarketPrice")
     us_price = us_info.get("currentPrice") or us_info.get("regularMarketPrice")
@@ -180,11 +185,14 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
     premium_pct = round((per_share_twd / tw_price - 1) * 100, 2)
 
     lines = [
-        f"ADR ratio: 1 {us} = {ratio} shares of {tw}",
+        f"ADR ratio: 1 {us} = {ratio} shares of {tw} "
+        f"(ADR figure → per {tw} share: ÷ {ratio}, then × USD/TWD)",
         f"USD/TWD: {fx}{_fmt_time(fx_info)}",
         f"{us} price: {us_price} USD{_fmt_time(us_info)}",
         f"{tw} price: {tw_price} TWD{_fmt_time(tw_info)}",
-        f"{us} per-share equivalent: {per_share_twd:.2f} TWD",
+        # 價格行不得出現「TWD (vs」，bench 的 _EPS_BLOCK_RE 靠它只命中 EPS 換算行
+        f"{us} price per {tw} share: {us_price} / {ratio} × {fx} = {per_share_twd:.2f} TWD "
+        "(share price, not EPS)",
         f"ADR premium vs {tw}: {premium_pct:+.2f}%",
     ]
     metrics = {"premium_pct": premium_pct}
@@ -192,7 +200,7 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
     if tw_eps is not None and us_eps is not None:
         tw_date, tw_eps_val = tw_eps
         us_date, us_eps_val = us_eps
-        if abs((tw_date - us_date).days) <= 3:
+        if _quarter_of(tw_date) == _quarter_of(us_date):
             eps_equiv = us_eps_val / ratio * fx
             eps_equiv_diff_pct = round((eps_equiv / tw_eps_val - 1) * 100, 2)
             lines += [
@@ -202,6 +210,25 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
                 f"(vs {tw} {tw_eps_val} TWD, {eps_equiv_diff_pct:+.2f}%)",
             ]
             metrics["eps_equiv_diff_pct"] = eps_equiv_diff_pct
+        else:
+            lines.append(
+                f"latest reported EPS (different quarters, do not compare): "
+                f"{tw} {tw_eps_val} TWD (reported {tw_date}) / {us} {us_eps_val} USD (reported {us_date})"
+            )
+            # 換算行刻意不帶「TWD (vs」，bench 的 _EPS_BLOCK_RE 只能命中同季那行
+            eps_equiv = us_eps_val / ratio * fx
+            lines.append(
+                f"{us} EPS per {tw} share: {us_eps_val} / {ratio} × {fx} = {eps_equiv:.2f} TWD "
+                f"({us} reported {us_date}; different quarter from {tw}, do not compare)"
+            )
+    elif tw_eps is not None or us_eps is not None:
+        side, cur = (tw, "TWD") if tw_eps is not None else (us, "USD")
+        other = us if tw_eps is not None else tw
+        d, v = tw_eps or us_eps
+        lines.append(
+            f"latest reported EPS (only {side} available, {other} has no data, do not compare): "
+            f"{side} {v} {cur} (reported {d})"
+        )
 
     return "\n".join(lines), metrics
 

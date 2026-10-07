@@ -1,7 +1,7 @@
 """format_snapshot / format_adr_premium 純函式，不碰網路。"""
 from datetime import date
 
-from src.market import format_adr_premium, format_snapshot
+from src.market import format_adr_premium, format_consensus, format_snapshot
 
 
 def test_format_snapshot_full():
@@ -67,7 +67,9 @@ def test_format_adr_premium_known_values():
     # 446.57 * 31.802 / 5 = 2840.36；2840.36 / 2480.0 - 1 = +14.53%
     text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5)
     assert text is not None
-    assert "2840.36 TWD" in text
+    assert "TSM price per 2330 share: 446.57 / 5 × 31.802 = 2840.36 TWD (share price, not EPS)" in text
+    assert "TWD (vs" not in text  # 價格行不能被 bench 的 EPS 換算 regex 命中
+    assert "ADR figure → per 2330 share: ÷ 5, then × USD/TWD" in text
     assert "+14.53%" in text
     assert "1 TSM = 5 shares of 2330" in text
     assert metrics == {"premium_pct": 14.53}
@@ -97,19 +99,62 @@ def test_format_adr_premium_eps_equiv_same_quarter():
     assert metrics["eps_equiv_diff_pct"] == 0.6
 
 
-def test_format_adr_premium_eps_different_quarter_no_eps_line():
-    # 公布日相差 5 天：視為不同季，不附 EPS 等值行
-    us_eps_other_quarter = (date(2026, 7, 21), 4.31)
+def test_format_adr_premium_eps_different_quarter_separate_line():
+    # 公布日落在不同曆法季度：分開陳述 + 無 vs 的換算行，不比較
+    us_eps_other_quarter = (date(2026, 10, 2), 4.31)
     text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
                                         tw_eps=_TW_EPS, us_eps=us_eps_other_quarter)
     assert text is not None
-    assert "EPS" not in text
+    assert ("latest reported EPS (different quarters, do not compare): "
+            "2330 27.25 TWD (reported 2026-07-16) / TSM 4.31 USD (reported 2026-10-02)") in text
+    assert ("TSM EPS per 2330 share: 4.31 / 5 × ") in text
+    assert "TSM reported 2026-10-02; different quarter from 2330, do not compare)" in text
+    assert "TWD (vs" not in text
     assert "eps_equiv_diff_pct" not in metrics
 
 
-def test_format_adr_premium_eps_missing_one_side_no_eps_line():
+def test_format_adr_premium_eps_same_calendar_quarter_5_days_apart():
+    # 台 7/16、美 7/21 同屬 Q3：視為同季，附 vs 比較
+    text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
+                                        tw_eps=_TW_EPS, us_eps=(date(2026, 7, 21), 4.31))
+    assert "TWD (vs" in text and "different quarters" not in text
+    assert "eps_equiv_diff_pct" in metrics
+
+
+def test_format_adr_premium_eps_missing_one_side_separate_line():
     text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
                                         tw_eps=_TW_EPS, us_eps=None)
     assert text is not None
-    assert "EPS" not in text
+    assert "2330 27.25 TWD (reported 2026-07-16)" in text
+    assert "TSM has no data" in text and "do not compare" in text
+    assert "TWD (vs" not in text
     assert "eps_equiv_diff_pct" not in metrics
+
+    text, _ = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
+                                  tw_eps=None, us_eps=_US_EPS)
+    assert "TSM 4.31 USD (reported 2026-07-16)" in text and "2330 has no data" in text
+
+    text, _ = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5)
+    assert "latest reported EPS" not in text  # 兩邊都沒有就不輸出
+
+
+class _FakeTicker:
+    """只給 calendar；earnings_estimate / earnings_dates 存取即 raise，由 format_consensus 容錯。"""
+    ticker = "FAKE"
+    calendar = {"Earnings Average": 1.5, "Earnings Low": 1.2, "Earnings High": 1.8, "Revenue Average": 100}
+
+    @property
+    def earnings_estimate(self):
+        raise RuntimeError("no data")
+
+    @property
+    def earnings_dates(self):
+        raise RuntimeError("no data")
+
+
+def test_format_consensus_labels_next_quarter_estimate():
+    # 標籤要讓模型看得出是下一季預估而非已公布 EPS
+    text = format_consensus(_FakeTicker())
+    assert "next-quarter EPS estimate, not yet reported (avg/low/high): 1.5 / 1.2 / 1.8" in text
+    assert "next-quarter revenue estimate, not yet reported" in text
+    assert "EPS consensus" not in text

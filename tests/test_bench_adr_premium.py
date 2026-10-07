@@ -56,6 +56,18 @@ def test_parse_block_full():
     assert _parse_block(text) == (19.03, 27.41)
 
 
+def test_parse_block_price_line_not_taken_as_eps_equiv():
+    # 新版區塊的股價行也含「= 2840.36 TWD」，eps_equiv 必須取 EPS 換算行的 27.41
+    text = (
+        "ADR ratio: 1 TSM = 5 shares of 2330 (ADR figure → per 2330 share: ÷ 5, then × USD/TWD)\n"
+        "TSM price per 2330 share: 446.57 / 5 × 31.802 = 2840.36 TWD (share price, not EPS)\n"
+        "ADR premium vs 2330: +14.53%\n"
+        "latest reported EPS (reported 2026-07-16): 2330 27.25 TWD / TSM 4.31 USD\n"
+        "TSM EPS per 2330 share: 4.31 / 5 × 31.802 = 27.41 TWD (vs 2330 27.25 TWD, +0.60%)"
+    )
+    assert _parse_block(text) == (14.53, 27.41)
+
+
 def test_parse_block_premium_only():
     assert _parse_block("ADR premium vs 2330: +19.03%") == (19.03, None)
 
