@@ -1,7 +1,7 @@
 """format_snapshot / format_adr_premium 純函式，不碰網路。"""
 from datetime import date
 
-from src.market import format_adr_premium, format_consensus, format_snapshot
+from src.market import _covered_quarter, format_adr_premium, format_consensus, format_snapshot
 
 
 def test_format_snapshot_full():
@@ -106,9 +106,10 @@ def test_format_adr_premium_eps_different_quarter_separate_line():
                                         tw_eps=_TW_EPS, us_eps=us_eps_other_quarter)
     assert text is not None
     assert ("latest reported EPS (different quarters, do not compare): "
-            "2330 27.25 TWD (reported 2026-07-16) / TSM 4.31 USD (reported 2026-10-02)") in text
+            "2330 27.25 TWD (Q2 2026 results (quarter ended 2026-06-30), reported 2026-07-16) / "
+            "TSM 4.31 USD (Q3 2026 results (quarter ended 2026-09-30), reported 2026-10-02)") in text
     assert ("TSM EPS per 2330 share: 4.31 / 5 × ") in text
-    assert "TSM reported 2026-10-02; different quarter from 2330, do not compare)" in text
+    assert "TSM Q3 2026 results (quarter ended 2026-09-30), reported 2026-10-02; different quarter from 2330, do not compare)" in text
     assert "TWD (vs" not in text
     assert "eps_equiv_diff_pct" not in metrics
 
@@ -125,14 +126,14 @@ def test_format_adr_premium_eps_missing_one_side_separate_line():
     text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
                                         tw_eps=_TW_EPS, us_eps=None)
     assert text is not None
-    assert "2330 27.25 TWD (reported 2026-07-16)" in text
+    assert "2330 27.25 TWD (Q2 2026 results (quarter ended 2026-06-30), reported 2026-07-16)" in text
     assert "TSM has no data" in text and "do not compare" in text
     assert "TWD (vs" not in text
     assert "eps_equiv_diff_pct" not in metrics
 
     text, _ = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
                                   tw_eps=None, us_eps=_US_EPS)
-    assert "TSM 4.31 USD (reported 2026-07-16)" in text and "2330 has no data" in text
+    assert "TSM 4.31 USD (Q2 2026 results" in text and "2330 has no data" in text
 
     text, _ = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5)
     assert "latest reported EPS" not in text  # 兩邊都沒有就不輸出
@@ -156,5 +157,35 @@ def test_format_consensus_labels_next_quarter_estimate():
     # 標籤要讓模型看得出是下一季預估而非已公布 EPS
     text = format_consensus(_FakeTicker())
     assert "next-quarter EPS estimate, not yet reported (avg/low/high): 1.5 / 1.2 / 1.8" in text
-    assert "next-quarter revenue estimate, not yet reported" in text
+    assert "next-quarter revenue estimate, not yet reported (in 億 = 1e8)" in text
     assert "EPS consensus" not in text
+
+
+def test_format_consensus_currency_and_yi_conversion():
+    # 13 位數營收要轉成億並標幣別；EPS 用 info["currency"]，營收用 financialCurrency
+    t = _FakeTicker()
+    t.calendar = {"Earnings Average": 1.5, "Earnings Low": 1.2, "Earnings High": 1.8,
+                  "Revenue Average": 1455552055340, "Revenue Low": 1423000000000,
+                  "Revenue High": 1482697859000}
+    text = format_consensus(t, {"currency": "USD", "financialCurrency": "TWD"})
+    rev = next(x for x in text.splitlines() if "revenue" in x)
+    eps = next(x for x in text.splitlines() if "EPS" in x)
+    assert "14,555.5 億" in rev and "TWD" in rev and "USD" not in rev
+    assert "USD per share" in eps
+
+
+def test_format_consensus_no_info_omits_currency_and_tolerates_none():
+    t = _FakeTicker()  # Revenue Low/High 缺 -> n/a
+    text = format_consensus(t)
+    assert "n/a / n/a" in text
+    assert "USD" not in text and "TWD" not in text and "per share" not in text
+
+
+def test_covered_quarter_is_quarter_before_report_date():
+    # 7 月公布是 Q2 結果；1 月公布跨年是上一年 Q4
+    assert _covered_quarter(date(2026, 7, 16)) == (2026, 2, date(2026, 6, 30))
+    assert _covered_quarter(date(2027, 1, 15)) == (2026, 4, date(2026, 12, 31))
+    text, _ = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
+                                  tw_eps=(date(2027, 1, 15), 1.0), us_eps=(date(2027, 1, 16), 1.0))
+    assert "Q4 2026 results (quarter ended 2026-12-31), reported 2027-01-16" in text
+    assert "TWD (vs" in text
