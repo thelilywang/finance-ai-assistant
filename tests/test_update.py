@@ -86,7 +86,7 @@ def test_format_rows_twse():
     text, published_at, label = _format_rows(
         [("綜合損益表", _find_company_row(TWSE_ROWS, "2330"))], "2330"
     )
-    assert "台積電（2330）115 年第 2 季（1～6 月累計） 綜合損益表" in text
+    assert "台積電（2330）115 年上半年（1～6 月累計，第 2 季財報） 綜合損益表" in text
     assert "仟元" in text                                # 不標單位 LLM 會把數字讀成元
     assert "營業收入：2,404,483,690" in text
     assert "原始認列生物資產" not in text                 # 空欄位略過，不灌入雜訊
@@ -99,7 +99,7 @@ def test_format_rows_tpex_english_keys():
     tpex_text, _, tpex_label = _format_rows(
         [("綜合損益表", _find_company_row(TPEX_ROWS, "6488"))], "6488"
     )
-    assert "環球晶（6488）115 年第 2 季" in tpex_text
+    assert "環球晶（6488）115 年上半年（1～6 月累計，第 2 季財報）" in tpex_text
     assert tpex_label == "115Q2"
 
 
