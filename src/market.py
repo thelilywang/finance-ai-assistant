@@ -1,6 +1,7 @@
 """即時行情快照（yfinance），只進 prompt 不入庫。"""
 from __future__ import annotations
 
+import calendar
 import logging
 import sys
 import time
@@ -45,8 +46,20 @@ def format_snapshot(info: dict) -> str:
     return "\n".join(lines)
 
 
-def format_consensus(ticker) -> str:
-    """組分析師共識區塊（下次財報日、當季共識、近 4 季 beat/miss），各段獨立容錯。"""
+def _yi(v) -> str:
+    """換成「億」(1e8)、一位小數＋千分位；13 位數原樣給模型會被讀小 10 倍。"""
+    return "n/a" if v is None else f"{v / 1e8:,.1f} 億"
+
+
+def format_consensus(ticker, info: dict | None = None) -> str:
+    """組分析師共識區塊（下次財報日、當季共識、近 4 季 beat/miss），各段獨立容錯。
+
+    幣別：EPS 用 info["currency"]（ADR 為 USD），營收用 financialCurrency（TSM 為 TWD）；
+    查不到就不標，不猜。
+    """
+    info = info or {}
+    eps_cur = info.get("currency")
+    rev_cur = info.get("financialCurrency") or eps_cur
     lines = []
 
     try:  # 下次財報日 + 當季 EPS/營收共識（calendar 是 dict）
@@ -54,13 +67,16 @@ def format_consensus(ticker) -> str:
         dates = cal.get("Earnings Date")
         if dates:
             lines.append(f"next earnings date: {dates[0]}")
-        for label, key in (
-            ("next-quarter EPS estimate, not yet reported (avg/low/high)", "Earnings"),
-            ("next-quarter revenue estimate, not yet reported (avg/low/high)", "Revenue"),
-        ):
-            avg, low, high = (cal.get(f"{key} Average"), cal.get(f"{key} Low"), cal.get(f"{key} High"))
-            if avg is not None:
-                lines.append(f"{label}: {avg} / {low} / {high}")
+        eps = tuple(cal.get(f"Earnings {k}") for k in ("Average", "Low", "High"))
+        if eps[0] is not None:
+            tag = f" ({eps_cur} per share)" if eps_cur else ""
+            lines.append(f"next-quarter EPS estimate, not yet reported{tag} (avg/low/high): "
+                         f"{eps[0]} / {eps[1]} / {eps[2]}")
+        rev = tuple(cal.get(f"Revenue {k}") for k in ("Average", "Low", "High"))
+        if rev[0] is not None:
+            tag = f" ({rev_cur}, in 億 = 1e8)" if rev_cur else " (in 億 = 1e8)"
+            lines.append(f"next-quarter revenue estimate, not yet reported{tag} (avg/low/high): "
+                         f"{_yi(rev[0])} / {_yi(rev[1])} / {_yi(rev[2])}")
     except Exception as e:  # noqa: BLE001
         log.warning("calendar 取得失敗", extra={"fields": {
             "symbol": getattr(ticker, "ticker", None), "field": "calendar",
@@ -77,9 +93,10 @@ def format_consensus(ticker) -> str:
     try:  # 近 4 季 EPS 預估 vs 實際 vs surprise
         df = ticker.earnings_dates
         df = df[df["Reported EPS"].notna()].head(4)
+        cur_tag = f" ({eps_cur})" if eps_cur else ""
         for idx, row in df.iterrows():
             lines.append(
-                f"past quarter {idx.date()}: est {row['EPS Estimate']} / "
+                f"past quarter reported {idx.date()}{cur_tag}: est {row['EPS Estimate']} / "
                 f"actual {row['Reported EPS']} / surprise {row['Surprise(%)']:+.2f}%"
             )
     except Exception as e:  # noqa: BLE001
@@ -103,8 +120,9 @@ def get_market_snapshot(company: str) -> str | None:
 
         # ponytail: 每問抓一次不快取，單人本地 app 夠用
         ticker = yfinance.Ticker(to_symbol(company))
-        text = format_snapshot(ticker.get_info())
-        consensus = format_consensus(ticker)
+        info = ticker.get_info()
+        text = format_snapshot(info)
+        consensus = format_consensus(ticker, info)
         if consensus:
             text = f"{text}\n{consensus}" if text else consensus
         return text or None
@@ -163,6 +181,23 @@ def _quarter_of(d: date) -> tuple[int, int]:
     return d.year, (d.month - 1) // 3
 
 
+def _covered_quarter(d: date) -> tuple[int, int, date]:
+    """公布日所涵蓋的財報季 (年, 第幾季 1-4, 季末日)，即公布日之前的那個曆法季。
+
+    模型常把「reported 7 月」讀成 Q3，實為 Q2 結果，故明寫季別與季末日。
+    # ponytail: 假設曆法會計年度且在次季內公布；ADR_RATIO 雙掛牌（TSM/UMC/CHT/ASX/IMOS）成立，
+    # 非曆年制公司需自己的財報月曆。
+    """
+    y, q0 = _quarter_of(d)
+    y, q = (y - 1, 4) if q0 == 0 else (y, q0)
+    return y, q, date(y, q * 3, calendar.monthrange(y, q * 3)[1])
+
+
+def _rep(d: date) -> str:
+    y, q, end = _covered_quarter(d)
+    return f"Q{q} {y} results (quarter ended {end}), reported {d}"
+
+
 def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
                         fx_info: dict, ratio: int,
                         tw_eps: tuple[date, float] | None = None,
@@ -204,7 +239,7 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
             eps_equiv = us_eps_val / ratio * fx
             eps_equiv_diff_pct = round((eps_equiv / tw_eps_val - 1) * 100, 2)
             lines += [
-                f"latest reported EPS (reported {us_date}): {tw} {tw_eps_val} TWD / "
+                f"latest reported EPS ({_rep(us_date)}): {tw} {tw_eps_val} TWD / "
                 f"{us} {us_eps_val} USD",
                 f"{us} EPS per {tw} share: {us_eps_val} / {ratio} × {fx} = {eps_equiv:.2f} TWD "
                 f"(vs {tw} {tw_eps_val} TWD, {eps_equiv_diff_pct:+.2f}%)",
@@ -213,13 +248,13 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
         else:
             lines.append(
                 f"latest reported EPS (different quarters, do not compare): "
-                f"{tw} {tw_eps_val} TWD (reported {tw_date}) / {us} {us_eps_val} USD (reported {us_date})"
+                f"{tw} {tw_eps_val} TWD ({_rep(tw_date)}) / {us} {us_eps_val} USD ({_rep(us_date)})"
             )
             # 換算行刻意不帶「TWD (vs」，bench 的 _EPS_BLOCK_RE 只能命中同季那行
             eps_equiv = us_eps_val / ratio * fx
             lines.append(
                 f"{us} EPS per {tw} share: {us_eps_val} / {ratio} × {fx} = {eps_equiv:.2f} TWD "
-                f"({us} reported {us_date}; different quarter from {tw}, do not compare)"
+                f"({us} {_rep(us_date)}; different quarter from {tw}, do not compare)"
             )
     elif tw_eps is not None or us_eps is not None:
         side, cur = (tw, "TWD") if tw_eps is not None else (us, "USD")
@@ -227,7 +262,7 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
         d, v = tw_eps or us_eps
         lines.append(
             f"latest reported EPS (only {side} available, {other} has no data, do not compare): "
-            f"{side} {v} {cur} (reported {d})"
+            f"{side} {v} {cur} ({_rep(d)})"
         )
 
     return "\n".join(lines), metrics
