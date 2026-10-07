@@ -41,7 +41,7 @@ from .i18n import t
 from .logging_setup import log_duration
 from .market import get_adr_premium, get_market_snapshot, get_market_snapshots
 from .tickers import (
-    DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
+    ADR_RATIO, DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
     normalize_ticker, otc_adr_of,
 )
 from .tracing import node_span
@@ -1381,7 +1381,12 @@ def generate(state: GraphState) -> GraphState:
         docs = [d for d in state["retrieved"] if d["source"] == src]
         date = docs[0].get("published_at") or "日期未知"
         contents = "\n".join(d["content"] for d in docs)
-        context_blocks.append(f"[{src_label}{idx}] {src}（{date}）\n{contents}")
+        header = f"[{src_label}{idx}] {src}（{date}）"
+        # 已入庫的 ADR 申報表格欄名已遺失，只能在 prompt 端補提醒（單一共用處，不動 ingest）
+        parts = src.split(":")
+        if parts[0] == "EDGAR" and len(parts) > 1 and parts[1] in ADR_RATIO:
+            header += "\n" + t(lang, "edgar_adr_note", ticker=parts[1], ratio=ADR_RATIO[parts[1]])
+        context_blocks.append(f"{header}\n{contents}")
     context = "\n\n".join(context_blocks)
 
     history_block = ""

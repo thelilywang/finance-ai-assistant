@@ -40,6 +40,12 @@ STRINGS = {
             "不得直接相除、相減或換算成同一數字比較。幣別一律取自「即時市場數據」的 currency 欄，"
             "不得由代號推測。"
         ),
+        # EDGAR 表格切段會丟欄名，ADR 發行公司的數字最容易被誤當成每 ADR 美元金額
+        "edgar_adr_note": (
+            "（{ticker} 為 ADR 發行公司的 SEC 申報：金額為新台幣，每股數字為普通股每股、不是每 ADR"
+            "（1 ADR = {ratio} 股普通股）；表格切段可能遺失欄名，同列多個數字可能分屬單季與"
+            "年初至今累計，無法確認期間的數字不得引用）"
+        ),
         "dual_market_warning_adr": (
             "本題同時涵蓋台股（{tw}）與其美股 ADR（{us}）。兩邊的計價幣別與公布期間不同，"
             "且 1 股 ADR 對應多股台股普通股，原始數字不可直接比較。比較兩邊的股價或 EPS 時，"
@@ -185,6 +191,12 @@ STRINGS = {
             "its US ADR have a share-conversion ratio on top of that), so present them separately with explicit "
             "currency and period; never divide, subtract or convert them into a single comparable number. "
             "Take each currency from the `currency` field in the \"real-time market data\", never from the ticker symbol."
+        ),
+        "edgar_adr_note": (
+            "({ticker} is an ADR issuer's SEC filing: amounts are in NT$, per-share figures are per common "
+            "share, not per ADR (1 ADR = {ratio} common shares); table chunks may have lost column headers, "
+            "so numbers in one row may mix single-quarter and year-to-date cumulative values; do not cite "
+            "any number whose period cannot be confirmed)"
         ),
         "dual_market_warning_adr": (
             "This question covers both the Taiwan listing ({tw}) and its US ADR ({us}). Quote currency and "

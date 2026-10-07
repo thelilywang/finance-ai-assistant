@@ -275,3 +275,29 @@ def test_side_by_side_merges_peer_only_when_both():
                            "market": "us"}) == ["TSM"]
     assert _side_by_side({"companies": ["2330", "2454"]}) == ["2330", "2454"]
     assert _side_by_side({}) == []
+
+
+def test_edgar_adr_note_only_for_adr_issuers(monkeypatch):
+    # --- ADR 發行公司的 EDGAR 來源要附「新台幣／每普通股／期間不明不得引用」提醒，其他公司不附 ---
+    import src.config as _cfg
+
+    stub = _StubLLM()
+    monkeypatch.setattr(_cfg, "ADR_PREMIUM", "off")
+    monkeypatch.setattr(_g, "_llms", lambda model: {"llm": stub})
+    monkeypatch.setattr(_g, "get_market_snapshots", lambda codes: {})
+    docs = [
+        {"source": "EDGAR:TSM:0001046179-26-000541", "content": "Basic EPS (in dollars) $ 27.25",
+         "published_at": "2026-07-16"},
+        {"source": "EDGAR:NVDA:0001045810-26-000001", "content": "Basic EPS $ 1.00",
+         "published_at": "2026-05-28"},
+    ]
+    state = {
+        "question": "TSM EPS?", "lang": "zh", "companies": ["TSM"], "peer_company": None,
+        "market": "us", "doc_type": None, "news_since_days": None, "answer_shape": None,
+        "retrieved": docs, "history": [],
+    }
+    _g.generate(state)
+    prompt = stub.last_prompt
+    assert prompt.count("為 ADR 發行公司的 SEC 申報") == 1
+    assert "（TSM 為 ADR" in prompt and "1 ADR = 5 股普通股" in prompt
+    assert "NVDA 為 ADR" not in prompt
