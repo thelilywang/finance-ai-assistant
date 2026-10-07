@@ -1,5 +1,6 @@
 """_ollama_usage 從 AIMessage.response_metadata 取 token/耗時，缺的欄位不補假值。
-截斷 warning（_warn_if_truncated）用 num_ctx 一半當門檻，附帶驗證 caplog 能收到 log.warning。
+截斷 warning（_warn_if_truncated）比對 prompt_tokens 是否貼著 limit=num_ctx//2+2，
+附帶驗證 caplog 能收到 log.warning。
 """
 import logging
 
@@ -43,20 +44,38 @@ def test_ollama_usage_empty_response_metadata():
     assert _ollama_usage(msg) == {}
 
 
-def test_warn_if_truncated_triggers_at_threshold(monkeypatch, caplog):
-    monkeypatch.setattr(config, "OLLAMA_NUM_CTX", 4096)  # 門檻 = 4096//2 - 8 = 2040
+def test_warn_if_truncated_triggers_at_limit_4096(monkeypatch, caplog):
+    monkeypatch.setattr(config, "OLLAMA_NUM_CTX", 4096)  # limit = 4096//2 + 2 = 2050
     with caplog.at_level(logging.WARNING, logger="graph"):
-        _warn_if_truncated("generate", "abcd1234", {"prompt_tokens": 2040})
+        _warn_if_truncated("generate", "abcd1234", {"prompt_tokens": 2050})
     assert any("截斷" in r.message for r in caplog.records)
     fields = caplog.records[-1].fields
     assert fields == {"node": "generate", "qid": "abcd1234",
-                       "prompt_tokens": 2040, "num_ctx": 4096}
+                       "prompt_tokens": 2050, "num_ctx": 4096, "limit": 2050}
 
 
-def test_warn_if_truncated_below_threshold_is_silent(monkeypatch, caplog):
+def test_warn_if_truncated_away_from_limit_4096_is_silent(monkeypatch, caplog):
     monkeypatch.setattr(config, "OLLAMA_NUM_CTX", 4096)
     with caplog.at_level(logging.WARNING, logger="graph"):
-        _warn_if_truncated("generate", "abcd1234", {"prompt_tokens": 2039})
+        _warn_if_truncated("generate", "abcd1234", {"prompt_tokens": 2000})
+    assert caplog.records == []
+
+
+def test_warn_if_truncated_triggers_at_limit_32768(monkeypatch, caplog):
+    monkeypatch.setattr(config, "OLLAMA_NUM_CTX", 32768)  # limit = 32768//2 + 2 = 16386
+    with caplog.at_level(logging.WARNING, logger="graph"):
+        _warn_if_truncated("generate", "abcd1234", {"prompt_tokens": 16386})
+    assert any("截斷" in r.message for r in caplog.records)
+    fields = caplog.records[-1].fields
+    assert fields == {"node": "generate", "qid": "abcd1234",
+                       "prompt_tokens": 16386, "num_ctx": 32768, "limit": 16386}
+
+
+def test_warn_if_truncated_11338_under_32768_is_silent(monkeypatch, caplog):
+    # 16384 時誤報的那筆真實數據（11338），32768 下 limit=16386，差距遠超過 8，不能誤報
+    monkeypatch.setattr(config, "OLLAMA_NUM_CTX", 32768)
+    with caplog.at_level(logging.WARNING, logger="graph"):
+        _warn_if_truncated("generate", "abcd1234", {"prompt_tokens": 11338})
     assert caplog.records == []
 
 

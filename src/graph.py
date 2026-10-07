@@ -141,26 +141,29 @@ def _ollama_usage(msg: AIMessage) -> dict:
 def _warn_if_truncated(node: str, qid: str, usage: dict) -> None:
     """prompt_tokens 疑似被 Ollama 截斷時記一筆 warning，供回測統計截斷發生率。
 
-    門檻取 num_ctx 一半再扣 8：server log 實測 4096 對應的截斷上限是 limit=2050
-    （num_ctx//2 - 4 碼 keep 左右的誤差內）。
+    截斷只在原始 prompt 達到 num_ctx 時才發生，截完的長度是 `num_ctx // 2 + 2`
+    （10-07 實測兩點：4096 對應 2050、32768 對應 16386，server log 原文
+    `limit=16386 prompt=39984 keep=4 new=16386`）。沒被截斷的 prompt，
+    prompt_tokens 可以落在 0 到 num_ctx 之間任何值，所以門檻不能用「≥」，
+    要用「貼著 limit」來判斷。
 
-    關鍵限制（本次實作時用 tests/bench_adr_premium.py 跑一題 eps 實測確認）：Ollama
-    截斷後回報給 client 的 prompt_eval_count 是「截斷後」的 2050，不是原本的
-    prompt 長度（同一時刻 server log 顯示 limit=2050 prompt=4329——我們這端只看得到
-    前者）。也就是說程式端永遠看不到真正超出多少，prompt_tokens 一旦截斷就會卡在
-    極接近 limit 的值，這個門檻偵測到的其實是「prompt_tokens 貼著已知的截斷上限」，
-    不是「原始 prompt 遠大於 num_ctx」。因為 response_metadata 沒有其他欄位能回推
-    原始長度，暫時沒有更好的替代訊號；這個比例在其他 num_ctx 值下是否仍成立，
-    待第二步 A/B（16384／32768）用實測驗證，不成立就依實測調整門檻並更新這段註解。
+    關鍵限制：Ollama 截斷後回報給 client 的 prompt_eval_count 是「截斷後」的
+    limit，不是原本的 prompt 長度（client 這端只看得到前者）。prompt_tokens
+    一旦截斷就會卡在極接近 limit 的值，這個門檻偵測到的其實是「prompt_tokens
+    貼著已知的截斷上限」，不是「原始 prompt 遠大於 num_ctx」。因為
+    response_metadata 沒有其他欄位能回推原始長度，暫時沒有更好的替代訊號。
+
+    仍可能誤報：原始 prompt 剛好落在 limit ±8 以內、沒被截斷，也會被判定成
+    截斷。
     """
     prompt_tokens = usage.get("prompt_tokens")
     if prompt_tokens is None:
         return
-    threshold = config.OLLAMA_NUM_CTX // 2 - 8
-    if prompt_tokens >= threshold:
+    limit = config.OLLAMA_NUM_CTX // 2 + 2
+    if abs(prompt_tokens - limit) <= 8:
         log.warning("prompt 疑似被截斷", extra={"fields": {
             "node": node, "qid": qid, "prompt_tokens": prompt_tokens,
-            "num_ctx": config.OLLAMA_NUM_CTX}})
+            "num_ctx": config.OLLAMA_NUM_CTX, "limit": limit}})
 
 
 embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
