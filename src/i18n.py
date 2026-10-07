@@ -102,7 +102,10 @@ STRINGS = {
             "（注意：以下即時行情僅為 {shown} 一家，本題其他標的（{others}）未取得即時行情。"
             "凡引用行情數字處必須標明是 {shown}，不得套用到其他標的。）"
         ),
-        "adr_premium_header": "ADR 溢價（系統依上列價格與匯率計算，可直接引用，勿自行重算）",
+        "adr_premium_header": (
+            "ADR 換算（系統依上列價格、匯率與換算比例計算，可直接引用，勿自行重算；"
+            "EPS 等值與台股 EPS 的差距主要來自匯率時點不同）"
+        ),
         "trend_rules_common": (
             "只輸出上方列出的欄位。未列出的欄位完全不要輸出（不要輸出欄名、不要寫「資料不足」、"
             "不要寫「無」、不要用任何佔位文字）。不得輸出信心百分比；情境解讀不得含機率數字；"
@@ -254,8 +257,11 @@ STRINGS = {
             "other tickers in this question ({others}). Whenever you cite a market figure, state that it "
             "is {shown}'s, and never apply it to the other tickers.)"
         ),
-        "adr_premium_header": "ADR premium (computed by the system from the prices/FX above; "
-        "cite it directly, do not recompute)",
+        "adr_premium_header": (
+            "ADR conversion (computed by the system from the prices/FX/ratio above; cite it "
+            "directly, do not recompute; the gap between the EPS equivalent and the Taiwan-listed "
+            "EPS is mainly due to differing FX timing)"
+        ),
         "trend_rules_common": (
             "Only output the fields listed above. Do not output any field not listed (no field name, no "
             "\"insufficient data\", no \"N/A\", no placeholder text of any kind). Never output a confidence "

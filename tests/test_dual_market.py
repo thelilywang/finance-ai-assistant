@@ -217,12 +217,12 @@ def _drive_generate(monkeypatch, arm: str) -> str:
 
 def test_adr_premium_off_no_block(monkeypatch):
     prompt = _drive_generate(monkeypatch, "off")
-    assert "ADR 溢價" not in prompt
+    assert "ADR 換算" not in prompt
 
 
 def test_adr_premium_block_has_block(monkeypatch):
     prompt = _drive_generate(monkeypatch, "block")
-    assert "ADR 溢價" in prompt
+    assert "ADR 換算" in prompt
     assert "ADR premium stub text" in prompt
 
 
@@ -241,7 +241,7 @@ def test_adr_premium_block_gating():
         assert _adr_premium_block("zh", {"2330": "s1", "TSM": "s2"}, None) == ""  # 溢價算不出來
         block = _adr_premium_block("zh", {"2330": "s1", "TSM": "s2"}, "premium text")
         assert "premium text" in block
-        assert "ADR 溢價" in block
+        assert "ADR 換算" in block
     finally:
         _cfg.ADR_PREMIUM = orig
 

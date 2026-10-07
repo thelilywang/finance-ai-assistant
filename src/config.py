@@ -79,11 +79,17 @@ CROSS_MARKET_GUARD = os.getenv("CROSS_MARKET_GUARD", "facts").lower()
 
 # 雙掛牌併陳時是否附上程式算好的 ADR 溢價區塊：
 #   off    不呼叫 get_adr_premium，不附溢價區塊（等同該功能不存在）
-#   block  附溢價區塊（預設）
+#   block  附溢價區塊
+#   eps    溢價區塊再加 ADR EPS 換算成台股每股等值（見 get_adr_premium），
+#          讓模型照抄換算結果，不必自己拿匯率、換算比例去乘除 EPS（預設）
 # 10-07 A/B 曾有第三臂 full（再加一句「可引用溢價區塊、不得套用到 EPS」的例外句），
-# 實測 ADR 題引用率 block/full 都 3/3、EPS 題自行換算都 1/3，例外句無效已移除。
+# 實測 ADR 題引用率 block/full 都 3/3、EPS 題自行換算都 1/3，例外句無效已移除；
+# 同一輪 A/B 也發現 EPS 題模型自行換算常算錯，因此改由程式算好 EPS 等值（本次新增
+# 的 eps 臂）。10-07 block/eps A/B（3 種 EPS 問法）：eps 3/3 引用換算值，block 3/3
+# 答錯（2 次自行換算算錯、1 次拒答），故預設改 eps。當時 Ollama context 截斷 prompt，
+# 兩臂條件相同，但修好截斷後應重驗。
 # 保留 off 是為了能在同一份程式碼上跑 A/B（見 tests/bench_adr_premium.py）。
-ADR_PREMIUM = os.getenv("ADR_PREMIUM", "block").lower()
+ADR_PREMIUM = os.getenv("ADR_PREMIUM", "eps").lower()
 
 # extract_filters 專用模型。它只做結構化抽取（companies／doc_type／news_since_days／
 # market／in_scope／answer_shape），不需要與 generate 同級的模型，但抽錯代號會讓整條

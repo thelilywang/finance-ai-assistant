@@ -4,8 +4,9 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+from . import config
 from .logging_setup import log_duration
 from .tickers import ADR_RATIO, is_tw_ticker
 
@@ -138,30 +139,79 @@ def _fmt_time(info: dict) -> str:
     return f" (as of {datetime.fromtimestamp(ts, timezone.utc):%Y-%m-%d %H:%M} UTC)"
 
 
+def _latest_reported_eps(ticker) -> tuple[date, float] | None:
+    """取 earnings_dates 中最新一筆有 Reported EPS 的（公布日, EPS）；失敗回 None。
+
+    format_consensus 要的是近 4 季，這裡只要最新一筆，故另抽一個小函式，
+    不共用 format_consensus 的迴圈。
+    """
+    try:
+        df = ticker.earnings_dates
+        df = df[df["Reported EPS"].notna()]
+        if df.empty:
+            return None
+        row = df.iloc[0]
+        return row.name.date(), float(row["Reported EPS"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("latest reported EPS 取得失敗", extra={"fields": {
+            "symbol": getattr(ticker, "ticker", None), "field": "earnings_dates",
+            "reason": "market_failed", "error": str(e)}})
+        return None
+
+
 def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
-                        fx_info: dict, ratio: int) -> str | None:
-    """純函式，算 ADR 溢價率；任一價格缺就回 None（缺資料不硬湊）。"""
+                        fx_info: dict, ratio: int,
+                        tw_eps: tuple[date, float] | None = None,
+                        us_eps: tuple[date, float] | None = None,
+                        ) -> tuple[str | None, dict]:
+    """純函式，算 ADR 溢價率；任一價格缺就回 (None, {})（缺資料不硬湊）。
+
+    回傳 (text, metrics)：metrics 供呼叫端記 log／測試斷言，不必從文字裡拆數字。
+    tw_eps/us_eps 兩邊都有值且公布日相差 ≤3 天（視為同一季）才附 EPS 等值換算，
+    否則可能不是同一季，與其硬湊不如不給。
+    """
     tw_price = tw_info.get("currentPrice") or tw_info.get("regularMarketPrice")
     us_price = us_info.get("currentPrice") or us_info.get("regularMarketPrice")
     fx = fx_info.get("currentPrice") or fx_info.get("regularMarketPrice")
     if tw_price is None or us_price is None or fx is None:
-        return None
+        return None, {}
 
     per_share_twd = us_price * fx / ratio
-    premium = per_share_twd / tw_price - 1
+    premium_pct = round((per_share_twd / tw_price - 1) * 100, 2)
 
-    return "\n".join([
+    lines = [
         f"ADR ratio: 1 {us} = {ratio} shares of {tw}",
         f"USD/TWD: {fx}{_fmt_time(fx_info)}",
         f"{us} price: {us_price} USD{_fmt_time(us_info)}",
         f"{tw} price: {tw_price} TWD{_fmt_time(tw_info)}",
         f"{us} per-share equivalent: {per_share_twd:.2f} TWD",
-        f"ADR premium vs {tw}: {premium * 100:+.2f}%",
-    ])
+        f"ADR premium vs {tw}: {premium_pct:+.2f}%",
+    ]
+    metrics = {"premium_pct": premium_pct}
+
+    if tw_eps is not None and us_eps is not None:
+        tw_date, tw_eps_val = tw_eps
+        us_date, us_eps_val = us_eps
+        if abs((tw_date - us_date).days) <= 3:
+            eps_equiv = us_eps_val / ratio * fx
+            eps_equiv_diff_pct = round((eps_equiv / tw_eps_val - 1) * 100, 2)
+            lines += [
+                f"latest reported EPS (reported {us_date}): {tw} {tw_eps_val} TWD / "
+                f"{us} {us_eps_val} USD",
+                f"{us} EPS per {tw} share: {us_eps_val} / {ratio} × {fx} = {eps_equiv:.2f} TWD "
+                f"(vs {tw} {tw_eps_val} TWD, {eps_equiv_diff_pct:+.2f}%)",
+            ]
+            metrics["eps_equiv_diff_pct"] = eps_equiv_diff_pct
+
+    return "\n".join(lines), metrics
 
 
 def get_adr_premium(tw: str, us: str) -> str | None:
-    """抓台股/ADR/匯率三筆行情並算溢價率；查無換算比例或任一段失敗回 None。"""
+    """抓台股/ADR/匯率三筆行情並算溢價率；查無換算比例或任一段失敗回 None。
+
+    ADR_PREMIUM=="eps" 時順便抓兩邊最新一筆 Reported EPS，交給 format_adr_premium
+    附上 EPS 等值換算；仍是同一輪 thread pool 並行，不多等一輪。
+    """
     ratio = ADR_RATIO.get(us)
     if ratio is None:
         return None
@@ -171,21 +221,26 @@ def get_adr_premium(tw: str, us: str) -> str | None:
         import yfinance
         from concurrent.futures import ThreadPoolExecutor
 
-        symbols = (to_symbol(tw), us, "TWD=X")
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="adr") as executor:
-            tw_info, us_info, fx_info = executor.map(
-                lambda s: yfinance.Ticker(s).get_info(), symbols)
+        want_eps = config.ADR_PREMIUM == "eps"
 
-        text = format_adr_premium(tw, us, tw_info, us_info, fx_info, ratio)
+        def _fetch(symbol: str, want_eps_for_symbol: bool) -> tuple[dict, tuple[date, float] | None]:
+            t = yfinance.Ticker(symbol)
+            eps = _latest_reported_eps(t) if want_eps_for_symbol else None
+            return t.get_info(), eps
+
+        symbols = (to_symbol(tw), us, "TWD=X")
+        eps_wanted = (want_eps, want_eps, False)  # TWD=X 沒有 EPS 這種概念
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="adr") as executor:
+            (tw_info, tw_eps), (us_info, us_eps), (fx_info, _) = executor.map(
+                _fetch, symbols, eps_wanted)
+
+        text, metrics = format_adr_premium(tw, us, tw_info, us_info, fx_info, ratio,
+                                            tw_eps=tw_eps, us_eps=us_eps)
         if text is None:
             return None
-        # 溢價率複算一次供 log：format_adr_premium 只回文字，供回測核對數字要拆出數值
         fx = fx_info.get("currentPrice") or fx_info.get("regularMarketPrice")
-        tw_price = tw_info.get("currentPrice") or tw_info.get("regularMarketPrice")
-        us_price = us_info.get("currentPrice") or us_info.get("regularMarketPrice")
-        premium_pct = round((us_price * fx / ratio / tw_price - 1) * 100, 2)
         log_duration(log, "adr_premium", started, node="market",
-                     tw=tw, us=us, ratio=ratio, fx=fx, premium_pct=premium_pct)
+                     tw=tw, us=us, ratio=ratio, fx=fx, **metrics)
         return text
     except Exception as e:  # noqa: BLE001
         log.warning("ADR 溢價取得失敗", extra={"fields": {
