@@ -91,6 +91,10 @@ CROSS_MARKET_GUARD = os.getenv("CROSS_MARKET_GUARD", "facts").lower()
 # 保留 off 是為了能在同一份程式碼上跑 A/B（見 tests/bench_adr_premium.py）。
 ADR_PREMIUM = os.getenv("ADR_PREMIUM", "eps").lower()
 
+# 雙掛牌且有 ADR 換算區塊時，跨市場 warning 改用允許引用換算值的版本（10-07 eps2 修正）。
+# off 為舊行為，僅供 A/B；A/B 結束後視結果決定是否移除。
+ADR_COMPARE_RULE = os.getenv("ADR_COMPARE_RULE", "on").lower()
+
 # extract_filters 專用模型。它只做結構化抽取（companies／doc_type／news_since_days／
 # market／in_scope／answer_shape），不需要與 generate 同級的模型，但抽錯代號會讓整條
 # 流程查錯公司，故換不換須看實測的正確率而非只看耗時。空字串代表沿用該輪的主模型，

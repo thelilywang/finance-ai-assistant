@@ -81,6 +81,14 @@ ChatOllama 實例；建 fixture 前後都要呼叫 `_llms.cache_clear()`。
         python tests/bench_adr_premium.py --runs 3 --q all
     docker exec -e ADR_PREMIUM=eps finance_ai_assistant_app \\
         python tests/bench_adr_premium.py --runs 3 --q all
+
+compare_rule A/B（eps2 跨幣別直接比大小的修正，見 src/config.ADR_COMPARE_RULE）：
+同程式碼同容器，只用環境變數切換，各跑 eps、eps2、eps3 三題。每列多印一欄
+compare_rule，供人工對照兩臂的回答原文（結論方向是否正確、有沒有引用換算值）：
+    docker exec -e ADR_COMPARE_RULE=off finance_ai_assistant_app \\
+        python tests/bench_adr_premium.py --q eps,eps2,eps3 --out data/bench/compare_rule_ab.jsonl
+    docker exec -e ADR_COMPARE_RULE=on finance_ai_assistant_app \\
+        python tests/bench_adr_premium.py --q eps,eps2,eps3 --out data/bench/compare_rule_ab.jsonl
 """
 import argparse
 import asyncio
@@ -308,7 +316,8 @@ async def _run_one(q_key: str, state: dict, run_idx: int) -> dict:
     premium_pct, eps_equiv = _parse_block(block_text)
 
     row = {
-        "arm": config.ADR_PREMIUM, "num_ctx": config.OLLAMA_NUM_CTX,
+        "arm": config.ADR_PREMIUM, "compare_rule": config.ADR_COMPARE_RULE,
+        "num_ctx": config.OLLAMA_NUM_CTX,
         "q": q_key, "run": run_idx,
         "secs": secs, "chars": len(answer), "answer": answer,
         "card_fields": count_card_fields(answer),
@@ -336,7 +345,8 @@ async def main_async(runs: int, q_arg: str, out_path: Path) -> None:
             with out_path.open("a") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"\n=== 臂：ADR_PREMIUM={config.ADR_PREMIUM} num_ctx={config.OLLAMA_NUM_CTX} ===")
+    print(f"\n=== 臂：ADR_PREMIUM={config.ADR_PREMIUM} "
+          f"ADR_COMPARE_RULE={config.ADR_COMPARE_RULE} num_ctx={config.OLLAMA_NUM_CTX} ===")
     for q_key in q_keys:
         q_rows = [r for r in rows if r["q"] == q_key]
         avg_secs = sum(r["secs"] for r in q_rows) / len(q_rows)

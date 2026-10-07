@@ -1445,12 +1445,15 @@ def generate(state: GraphState) -> GraphState:
     # 觸發看的是「最後要並排的那組代號」而非只看雙掛牌：多標的比較題（2330 vs NVDA）
     # 才是最需要這句的場合，而它沒有 peer_company。雙掛牌併陳是其中一個特例，
     # peer_company 併進來一起判斷。
+    # 有 ADR 換算區塊（premium_block 非空）時，原版「不得換算成同一數字比較」會和
+    # 區塊的「可直接引用」互相衝突，改用允許、且要求引用換算值的 _adr 版（10-07 eps2 修正）。
     dual_block = ""
     split = cross_market_split(state)
     if split:
         tw, us = split
-        dual_block = "\n" + t(lang, "dual_market_warning",
-                              tw="、".join(tw), us="、".join(us)) + "\n"
+        key = ("dual_market_warning_adr"
+               if premium_block and config.ADR_COMPARE_RULE == "on" else "dual_market_warning")
+        dual_block = "\n" + t(lang, key, tw="、".join(tw), us="、".join(us)) + "\n"
 
     # 這些台股標的有 ADR 但取不到其財報，明講一句免得使用者以為系統漏了美股那邊
     otc = otc_adr_of(companies[0]) if len(companies) == 1 else None

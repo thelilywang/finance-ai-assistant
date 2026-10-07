@@ -40,6 +40,14 @@ STRINGS = {
             "不得直接相除、相減或換算成同一數字比較。幣別一律取自「即時市場數據」的 currency 欄，"
             "不得由代號推測。"
         ),
+        "dual_market_warning_adr": (
+            "本題同時涵蓋台股（{tw}）與其美股 ADR（{us}）。兩邊的計價幣別與公布期間不同，"
+            "且 1 股 ADR 對應多股台股普通股，原始數字不可直接比較。比較兩邊的股價或 EPS 時，"
+            "一律引用上方「ADR 換算」區塊算好的台幣等值與差距百分比，不得拿不同幣別的原始數字"
+            "直接比大小，也不得自行重算。區塊裡沒有 EPS 等值時，兩邊的 EPS 只能分開陳述、"
+            "標明幣別，不得判斷誰高誰低。幣別一律取自「即時市場數據」的 currency 欄，"
+            "不得由代號推測。"
+        ),
         "no_result_plain": (
             "資料庫中找不到與這個問題相關的財報或新聞內容。"
             "問題若有指名上市公司（代號或 ticker）會自動抓取資料，"
@@ -177,6 +185,16 @@ STRINGS = {
             "its US ADR have a share-conversion ratio on top of that), so present them separately with explicit "
             "currency and period; never divide, subtract or convert them into a single comparable number. "
             "Take each currency from the `currency` field in the \"real-time market data\", never from the ticker symbol."
+        ),
+        "dual_market_warning_adr": (
+            "This question covers both the Taiwan listing ({tw}) and its US ADR ({us}). Quote currency and "
+            "reporting period differ, and 1 ADR share corresponds to several Taiwan common shares, so the raw "
+            "numbers are not directly comparable. When comparing price or EPS across the two, always cite the "
+            "TWD-equivalent value and the percentage gap already computed in the \"ADR conversion\" block above; "
+            "never compare the raw numbers across currencies, and never recompute it yourself. When the block has "
+            "no EPS-equivalent value, state the two sides' EPS separately with their currencies and do not judge "
+            "which is higher. Take each currency from the `currency` field in the \"real-time market data\", "
+            "never from the ticker symbol."
         ),
         "no_result_plain": (
             "No filings or news related to this question were found in the database. "
