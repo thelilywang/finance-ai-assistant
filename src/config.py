@@ -77,6 +77,14 @@ ANSWER_SHAPE_GATING = os.getenv("ANSWER_SHAPE_GATING", "1").lower() not in ("0",
 # 保留三個值是為了能在同一份程式碼上跑 A/B。
 CROSS_MARKET_GUARD = os.getenv("CROSS_MARKET_GUARD", "facts").lower()
 
+# 雙掛牌併陳時是否附上程式算好的 ADR 溢價區塊：
+#   off    不呼叫 get_adr_premium，不附溢價區塊（等同該功能不存在）
+#   block  附溢價區塊（預設）
+# 10-07 A/B 曾有第三臂 full（再加一句「可引用溢價區塊、不得套用到 EPS」的例外句），
+# 實測 ADR 題引用率 block/full 都 3/3、EPS 題自行換算都 1/3，例外句無效已移除。
+# 保留 off 是為了能在同一份程式碼上跑 A/B（見 tests/bench_adr_premium.py）。
+ADR_PREMIUM = os.getenv("ADR_PREMIUM", "block").lower()
+
 # extract_filters 專用模型。它只做結構化抽取（companies／doc_type／news_since_days／
 # market／in_scope／answer_shape），不需要與 generate 同級的模型，但抽錯代號會讓整條
 # 流程查錯公司，故換不換須看實測的正確率而非只看耗時。空字串代表沿用該輪的主模型，

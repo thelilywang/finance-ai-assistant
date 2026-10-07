@@ -39,7 +39,7 @@ from pydantic import BaseModel, field_validator
 from . import config
 from .i18n import t
 from .logging_setup import log_duration
-from .market import get_market_snapshot, get_market_snapshots
+from .market import get_adr_premium, get_market_snapshot, get_market_snapshots
 from .tickers import (
     DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
     normalize_ticker, otc_adr_of,
@@ -1281,6 +1281,16 @@ def cross_market_split(state: GraphState) -> tuple[list[str], list[str]] | None:
     return (tw, us) if tw and us else None
 
 
+def _adr_premium_block(lang: str, snapshots: dict, premium_text: str | None) -> str:
+    """ADR_PREMIUM=off 時不附；兩邊行情都成功且溢價率算得出來才附上，任一邊缺就不硬湊。
+
+    抽成純函式方便單元測試：generate() 需要 stub LLM 才能整段驅動，這段純字串組裝不需要。
+    """
+    if config.ADR_PREMIUM == "off" or len(snapshots) != 2 or not premium_text:
+        return ""
+    return f"\n\n### {t(lang, 'adr_premium_header')}\n{premium_text}"
+
+
 def generate(state: GraphState) -> GraphState:
     # 計時起點在節點開頭而非 LLM 呼叫前：get_market_snapshot 是 blocking 網路呼叫且擋在
     # first token 前（實測 2.50-3.55s），不納進 elapsed_ms 就量不到它的影響。
@@ -1311,9 +1321,25 @@ def generate(state: GraphState) -> GraphState:
     # market=both 時要把 peer_company 併入，否則雙掛牌併陳只抓得到台股那一邊
     quote_codes = _side_by_side(state)
     snapshots: dict[str, str] = {}
+    premium_block = ""
+    # 雙掛牌併陳（market=both）時要順便算 ADR 溢價率；與行情抓取並行，
+    # 否則會在 first token 前多擋一輪 yfinance 網路呼叫的時間。off 時完全不算。
+    adr_split = None
+    if (config.ADR_PREMIUM != "off" and state.get("market") == "both"
+            and state.get("peer_company") and needs_market):
+        adr_split = cross_market_split(state)
+    premium_text = None
     if needs_market and quote_codes:
         market_started = time.monotonic()
-        snapshots = get_market_snapshots(quote_codes)
+        if adr_split:
+            tw_codes, us_codes = adr_split
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="market_adr") as executor:
+                snapshots_future = executor.submit(get_market_snapshots, quote_codes)
+                premium_future = executor.submit(get_adr_premium, tw_codes[0], us_codes[0])
+                snapshots = snapshots_future.result()
+                premium_text = premium_future.result()
+        else:
+            snapshots = get_market_snapshots(quote_codes)
         # node 標 market 而非 generate：這是 generate 節點內的行情抓取，不是生成呼叫，
         # 兩者混在同一個 node 值會讓耗時彙總把 3-7 秒的抓取算進生成中位數。
         log_duration(log, "market_snapshots", market_started, node="market",
@@ -1326,6 +1352,8 @@ def generate(state: GraphState) -> GraphState:
         if missing:
             note = t(lang, "market_partial_note",
                      shown="、".join(snapshots), others="、".join(missing)) + "\n"
+        premium_block = _adr_premium_block(lang, snapshots, premium_text)
+        blocks += premium_block
         market_block = (
             "\n即時市場數據（Yahoo Finance，僅供估值/時機參考，非檢索來源，不參與來源編號）：\n"
             f"{note}{blocks}\n"

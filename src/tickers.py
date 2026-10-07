@@ -43,6 +43,17 @@ TW_US_DUAL_LISTED = {
 }
 _US_TO_TW = {us: tw for tw, us in TW_US_DUAL_LISTED.items()}
 
+# 1 ADS = N 股台股普通股。數字取自各公司最新 20-F 封面／Item 12.D "American Depositary
+# Shares"，比例極少變動但會變（如 ADR ratio change 公告），算出的溢價率若突然跳動先查這裡。
+# 核對來源：SEC EDGAR 各公司最新 20-F（皆為 FY2025，2026-04 申報）。
+ADR_RATIO = {
+    "TSM": 5,    # TSM 20-F (FY2025)："each ADS represents five (5) common shares"
+    "UMC": 5,    # UMC 20-F (FY2025)："One ADS represents five common shares"
+    "CHT": 10,   # CHT 20-F (FY2025)："Each of our ADSs represents the right to receive ten shares"
+    "ASX": 2,    # ASX 20-F (FY2025)："The Company's ADS represents 2 ordinary shares"
+    "IMOS": 20,  # IMOS 20-F (FY2025)："each ADS represents 20 ordinary shares of the Company"
+}
+
 # 反問時要讓使用者認得是哪家公司，光給代號不夠親切
 DUAL_LISTED_NAMES = {
     "2330": "台積電",
