@@ -105,7 +105,7 @@ def test_format_adr_premium_eps_different_quarter_separate_line():
     text, metrics = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5,
                                         tw_eps=_TW_EPS, us_eps=us_eps_other_quarter)
     assert text is not None
-    assert ("latest reported EPS (different quarters, do not compare): "
+    assert ("latest reported single-quarter EPS (different quarters, do not compare): "
             "2330 27.25 TWD (Q2 2026 results (quarter ended 2026-06-30), reported 2026-07-16) / "
             "TSM 4.31 USD (Q3 2026 results (quarter ended 2026-09-30), reported 2026-10-02)") in text
     assert ("TSM EPS per 2330 share: 4.31 / 5 × ") in text
@@ -136,7 +136,7 @@ def test_format_adr_premium_eps_missing_one_side_separate_line():
     assert "TSM 4.31 USD (Q2 2026 results" in text and "2330 has no data" in text
 
     text, _ = format_adr_premium("2330", "TSM", _TW_INFO, _US_INFO, _FX_INFO, ratio=5)
-    assert "latest reported EPS" not in text  # 兩邊都沒有就不輸出
+    assert "latest reported single-quarter EPS" not in text  # 兩邊都沒有就不輸出
 
 
 class _FakeTicker:

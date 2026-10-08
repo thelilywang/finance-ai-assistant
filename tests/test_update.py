@@ -89,9 +89,18 @@ def test_format_rows_twse():
     assert "台積電（2330）115 年上半年（1～6 月累計，第 2 季財報） 綜合損益表" in text
     assert "仟元" in text                                # 不標單位 LLM 會把數字讀成元
     assert "營業收入：2,404,483,690" in text
+    assert "基本每股盈餘（元，1～6 月累計）：49.33" in text  # EPS 行自帶累計期間
     assert "原始認列生物資產" not in text                 # 空欄位略過，不灌入雜訊
     assert "公司代號" not in text                        # 識別欄位不當成財務數字輸出
     assert (published_at, label) == ("2026-08-01", "115Q2")
+
+
+def test_format_rows_eps_period_only_on_income_stmt_q2_plus():
+    row = {"公司代號": "2330", "公司名稱": "台積電", "年度": "115", "季別": "3", "基本每股盈餘（元）": "1"}
+    assert "基本每股盈餘（元，1～9 月累計）：1" in _format_rows([("綜合損益表", row)], "2330")[0]
+    assert "累計）：" not in _format_rows([("資產負債表", row)], "2330")[0]
+    q1 = {**row, "季別": "1"}
+    assert "基本每股盈餘（元）：1" in _format_rows([("綜合損益表", q1)], "2330")[0]
 
 
 def test_format_rows_tpex_english_keys():

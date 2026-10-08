@@ -1386,6 +1386,10 @@ def generate(state: GraphState) -> GraphState:
         parts = src.split(":")
         if parts[0] == "EDGAR" and len(parts) > 1 and parts[1] in ADR_RATIO:
             header += "\n" + t(lang, "edgar_adr_note", ticker=parts[1], ratio=ADR_RATIO[parts[1]])
+        # TWSE-API 損益表是年初至當季累計，Q2 起 EPS 易被讀成單季；label 形如 115Q2（單一共用處）
+        if parts[0] == "TWSE-API" and len(parts) > 2 and parts[2][-2:] in ("Q2", "Q3", "Q4"):
+            q = int(parts[2][-1])
+            header += "\n" + t(lang, "tw_cumulative_note", year=parts[2][:-2], month=q * 3, q=q)
         context_blocks.append(f"{header}\n{contents}")
     context = "\n\n".join(context_blocks)
 

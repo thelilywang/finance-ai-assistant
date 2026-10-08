@@ -46,6 +46,10 @@ STRINGS = {
             "（1 ADR = {ratio} 股普通股）；表格切段可能遺失欄名，同列多個數字可能分屬單季與"
             "年初至今累計，無法確認期間的數字不得引用）"
         ),
+        # TWSE 綜合損益表是年初至當季累計，累計 EPS 容易被誤讀成單季 EPS
+        "tw_cumulative_note": (
+            "（綜合損益表數字為 {year} 年 1～{month} 月累計、不是第 {q} 季單季；資產負債表為季底時點數）"
+        ),
         "dual_market_warning_adr": (
             "本題同時涵蓋台股（{tw}）與其美股 ADR（{us}）。兩邊的計價幣別與公布期間不同，"
             "且 1 股 ADR 對應多股台股普通股，原始數字不可直接比較。比較兩邊的股價或 EPS 時，"
@@ -197,6 +201,10 @@ STRINGS = {
             "share, not per ADR (1 ADR = {ratio} common shares); table chunks may have lost column headers, "
             "so numbers in one row may mix single-quarter and year-to-date cumulative values; do not cite "
             "any number whose period cannot be confirmed)"
+        ),
+        "tw_cumulative_note": (
+            "(income statement figures are cumulative for 1-{month} of ROC year {year}, not the single "
+            "quarter Q{q}; the balance sheet is a quarter-end point-in-time figure)"
         ),
         "dual_market_warning_adr": (
             "This question covers both the Taiwan listing ({tw}) and its US ADR ({us}). Quote currency and "
