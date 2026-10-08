@@ -2,7 +2,7 @@
 
 與 eval_rag_retrieval.py 一樣打真實資料庫，但只看耗時不看檢索品質。
 同一份程式碼、同一個容器，用 config 開關切換前後行為，所以數字可比
-（MAINTENANCE_LOG 2026-09-10 那組數字是跨 image 比較，回傳筆數都不同，不可比）。
+（跨 image 比較時回傳筆數都不同，數字不可比）。
 
 DB 未對 host 開 port，需在 app container 內執行：
     docker exec finance_ai_assistant_app python tests/bench_retrieve.py

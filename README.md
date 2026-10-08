@@ -7,7 +7,7 @@
 <a id="english"></a>
 ## English
 
-A financial report & news RAG assistant for individual stocks, built with LangGraph + Ollama (local LLM) + pgvector. All inference runs on your machine — sensitive financial data never leaves it.
+A financial report & news RAG assistant for individual stocks, built with LangGraph + Ollama (local LLM) + pgvector. All inference runs on your machine — sensitive financial data never leaves it. Responses take roughly 3–8 minutes because the local `qwen3.5:9b` generates about 10 characters per second; this is a hardware limit, not an architectural one.
 
 **Demo:** TODO
 **Screenshot:** TODO
@@ -131,7 +131,7 @@ For architecture, design decisions, and the full AI Product Case Study (CRISP-DM
 ## 中文
 
 針對個股的財報/新聞 RAG 問答助理,用 LangGraph + Ollama(本地 LLM)+ pgvector 打造。
-所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。
+所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。回應約需 3～8 分鐘,原因是本機 `qwen3.5:9b` 每秒約生成 10 字,屬硬體限制而非架構問題。
 
 **Demo:** TODO
 **截圖:** TODO
