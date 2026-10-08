@@ -7,7 +7,7 @@
 <a id="english"></a>
 ## English
 
-A financial report & news RAG assistant for individual stocks, built with LangGraph + Ollama (local LLM) + pgvector. All inference runs on your machine — sensitive financial data never leaves it. Responses take roughly 3–8 minutes because the local `qwen3.5:9b` generates about 10 characters per second; this is a hardware limit, not an architectural one.
+A financial report & news RAG assistant for individual stocks, built with LangGraph + Ollama (local LLM) + pgvector. All inference runs on your machine — sensitive financial data never leaves it. A single question takes about 186–470 seconds because the local `qwen3.5:9b` generates about 10 characters per second; this is a hardware limit, not an architectural one.
 
 **Demo:** TODO
 **Screenshot:** TODO
@@ -57,7 +57,7 @@ See steps 1-4 of Quick Start above (Ollama models, database, Python env, Google 
 - **Live market snapshot with real analyst consensus**: price, 52-week range, PE, target price, analyst view, plus yfinance consensus data — current-quarter EPS/revenue consensus range, analyst count, past-4-quarter beat/miss, next earnings date — folded into the decision card; any failure degrades gracefully, never breaks the answer
 - **Interactive charts under each answer** (real data, no LLM involved): 6-month price line with a next-earnings-date marker, and 8-quarter EPS estimate vs actual grouped bars colored by beat (green) / miss (red)
 - **One-command data updates**: US filings on two tracks (SEC XBRL API for figures, incl. `ifrs-full` for foreign issuers; SEC EDGAR filing text incl. 6-K/20-F), TW filings on two tracks (official TWSE/TPEx OpenAPI for figures, MOPS PDFs for narrative), Yahoo Finance RSS (news), market-news sweep from udn/cmoney/cnyes listings; idempotent re-runs
-- **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only); company questions whose newest news is stale (>2 days, or not from today when you ask for "latest/today") re-fetch news once; company-less questions trigger a market-news sweep instead
+- **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only); company questions whose newest news is stale (>3 days, or not from today when you ask for "latest/today") re-fetch news once; company-less questions trigger a market-news sweep instead
 - **Chainlit web UI**: ChatGPT-style token streaming, multi-turn chat, downloadable PDF report per answer (charts embedded, rendered via headless Chrome; falls back to `.md` when no browser is found)
 - **Honest no-result path**: says "no data" instead of hallucinating
 
@@ -131,7 +131,7 @@ For architecture, design decisions, and the full AI Product Case Study (CRISP-DM
 ## 中文
 
 針對個股的財報/新聞 RAG 問答助理,用 LangGraph + Ollama(本地 LLM)+ pgvector 打造。
-所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。回應約需 3～8 分鐘,原因是本機 `qwen3.5:9b` 每秒約生成 10 字,屬硬體限制而非架構問題。
+所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。單題回應約 186～470 秒,原因是本機 `qwen3.5:9b` 每秒約生成 10 字,屬硬體限制而非架構問題。
 
 **Demo:** TODO
 **截圖:** TODO
@@ -152,7 +152,7 @@ docker compose up -d
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env       # DB 連線用 PGVECTOR_URL(避免與 chainlit 的 DATABASE_URL 撞名)
+cp .env.example .env       # DB 連線用 PGVECTOR_URL(避免與 chainlit 的 DATABASE_URL 名稱衝突)
 psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # 套用後才能按讚/倒讚、對話歷史才有 threads 等表
                             # (全新 volume 已由 docker-compose 自動套用;
                             #  只有本檔案上線前就建立的既有 volume 才需要手動跑一次)
@@ -181,7 +181,7 @@ chainlit run src/app.py -w    # 開 http://localhost:8000,用 Google 帳號登�
 - **即時市場快照含真實分析師共識**:用 yfinance 抓股價、52 週區間、本益比、目標價、分析師評等,加上共識資料——當季 EPS/營收共識區間、分析師人數、近 4 季 beat/miss、下次財報日——併入決策卡;抓取失敗時優雅降級,不影響回答
 - **回答附兩張互動圖表**(全部真資料,LLM 不參與畫圖):6 個月股價走勢線圖(含下次財報日標記)、近 8 季 EPS 預估 vs 實際 grouped bar(beat 綠/miss 紅)
 - **一鍵抓取更新**:美股財報兩軌(SEC XBRL API 取數字,外國發行人走 ifrs-full;SEC EDGAR 取申報全文,含 6-K/20-F)、台股財報兩軌(證交所/櫃買官方 OpenAPI 取數字、MOPS 取文字敘述)、Yahoo Finance RSS(新聞)、udn/cmoney/鉅亨網 cnyes 市場新聞列表頁掃描;重跑同一來源自動去重
-- **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司);最新新聞過期時(超過 2 天,問「最新/今天」時新聞必須是今天的)自動重抓一次;沒指定公司的問題則觸發市場新聞掃描
+- **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司);最新新聞過期時(超過 3 天,或問「最新/今天」(時間窗 7 天內)時新聞不是今天的)自動重抓一次;沒指定公司的問題則觸發市場新聞掃描
 - **Chainlit 網頁介面**:ChatGPT 風格逐字串流、多輪對話、每則回答附可下載 PDF 報告(內嵌圖表,headless Chrome 渲染;找不到瀏覽器時退回 `.md`)
 - **查無資料時誠實告知**,不幻覺
 
