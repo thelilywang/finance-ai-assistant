@@ -50,9 +50,6 @@ STRINGS = {
         "tw_cumulative_note": (
             "（綜合損益表數字為 {year} 年 1～{month} 月累計、不是第 {q} 季單季；資產負債表為季底時點數）"
         ),
-        "market_context_note": (
-            "（市場脈絡新聞，非本題標的的資料；不得把其中其他公司的財測、法說或營運內容當成本題標的的資訊）"
-        ),
         "dual_market_warning_adr": (
             "本題同時涵蓋台股（{tw}）與其美股 ADR（{us}）。兩邊的計價幣別與公布期間不同，"
             "且 1 股 ADR 對應多股台股普通股，原始數字不可直接比較。比較兩邊的股價或 EPS 時，"
@@ -211,10 +208,6 @@ STRINGS = {
         "tw_cumulative_note": (
             "(income statement figures are cumulative for 1-{month} of ROC year {year}, not the single "
             "quarter Q{q}; the balance sheet is a quarter-end point-in-time figure)"
-        ),
-        "market_context_note": (
-            "(Market-context news, not about the queried ticker; never present other companies' guidance, "
-            "earnings-call or operating details in it as the queried ticker's)"
         ),
         "dual_market_warning_adr": (
             "This question covers both the Taiwan listing ({tw}) and its US ADR ({us}). Quote currency and "

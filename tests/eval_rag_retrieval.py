@@ -118,17 +118,14 @@ def check_report_plus_news(item, chunks, summary):
     return True, f"財報 {len(reports)} 筆 + 同公司新聞補充 {len(news)} 筆"
 
 
-def check_global_news(item, chunks, summary):
-    """全域補 2 條：company 為 null 或不同於查詢公司的新聞，數量 <= 2。"""
+def check_no_foreign_news(item, chunks, summary):
+    """有指名公司時不補市場新聞：回傳的 chunk 不得含 company 相異／為 null 的新聞。"""
     co = item["company"]
     extra = [c for c in chunks
              if c.get("doc_type") == "news" and c.get("company") != co]
-    if not extra:
-        return False, "無 company 相異／為 null 的補充新聞"
-    if len(extra) > 2:
-        return False, f"補充新聞 {len(extra)} 筆，超過上限 2"
-    cos = [c.get("company") for c in extra]
-    return True, f"補充全域新聞 {len(extra)} 筆，company={cos}"
+    if extra:
+        return False, f"混入非 {co} 的新聞 {len(extra)} 筆，company={[c.get('company') for c in extra]}"
+    return True, "無非本題公司的補充新聞"
 
 
 def check_freshness(item, chunks, summary):
@@ -191,7 +188,7 @@ CHECKERS = {
     "doc_type濾空放寬重查(第二樣本)": check_relax,
     "財報補新聞規則": check_report_plus_news,
     "財報補新聞規則(第二樣本)": check_report_plus_news,
-    "全域市場新聞補2條": check_global_news,
+    "有公司題不補市場新聞": check_no_foreign_news,
     "新鮮度header正確性": check_freshness,
     "新鮮度header正確性(邊界值)": check_freshness,
     "新鮮度header正確性(正常範圍)": check_freshness,

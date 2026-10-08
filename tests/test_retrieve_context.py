@@ -70,7 +70,6 @@ def test_embedding_cache_lru_eviction(fake_embeddings, monkeypatch):
 # --- 共用治具資料 ---
 REPORT = {"id": 1, "source": "report", "doc_type": "financial_report", "company": "AAPL"}
 COMPANY_NEWS = {"id": 2, "source": "company-news", "doc_type": "news", "company": "AAPL"}
-DUPLICATE = {"id": 2, "source": "duplicate", "doc_type": "news", "company": "AAPL"}
 MARKET_1 = {"id": 3, "source": "market-1", "doc_type": "news", "company": None}
 MARKET_2 = {"id": 4, "source": "market-2", "doc_type": "news", "company": "MSFT"}
 LATEST = {"id": 6, "source": "latest-report", "doc_type": "financial_report", "company": "AAPL"}
@@ -79,15 +78,13 @@ LATEST = {"id": 6, "source": "latest-report", "doc_type": "financial_report", "c
 def _stable_search(_vector, **kwargs):
     if kwargs.get("latest_source_only"):
         return [LATEST]
-    if kwargs.get("exclude_company"):
-        return [DUPLICATE, MARKET_1, MARKET_2]
     if kwargs.get("doc_type") == "news":
         return [COMPANY_NEWS]
     return [REPORT]
 
 
 def test_parallel_prefetch_starts_together_and_orders_results(monkeypatch, fake_embeddings):
-    # --- 主檢索、同公司新聞、市場新聞候選同時開始；輸出順序維持既有規則 ---
+    # --- 主檢索、同公司新聞、最新財報候選同時開始；輸出順序維持既有規則 ---
     started = []
     started_lock = threading.Lock()
     all_started = threading.Event()
@@ -95,32 +92,58 @@ def test_parallel_prefetch_starts_together_and_orders_results(monkeypatch, fake_
     def fake_search(_vector, **kwargs):
         with started_lock:
             started.append((time.monotonic(), kwargs))
-            if len(started) == 4:
+            if len(started) == 3:
                 all_started.set()
-        assert all_started.wait(0.5), "四段可獨立檢索沒有同時啟動"
+        assert all_started.wait(0.5), "三段可獨立檢索沒有同時啟動"
         if kwargs.get("latest_source_only"):
             return [LATEST]
-        if kwargs.get("exclude_company"):
-            return [DUPLICATE, MARKET_1, MARKET_2]
         if kwargs.get("doc_type") == "news":
             return [COMPANY_NEWS]
         return [REPORT]
 
     monkeypatch.setattr(graph, "similarity_search", fake_search)
     out = graph.retrieve_context("AAPL 財報", company="AAPL", doc_type="financial_report")
-    assert len(started) == 4
+    assert len(started) == 3
     assert max(t for t, _ in started) - min(t for t, _ in started) < 0.2
     # 最新一期財報排在最前面，舊資料仍保留在後（比較去年同期還要用得到）
-    assert [d["id"] for d in out] == [6, 1, 2, 3, 4]
+    assert [d["id"] for d in out] == [6, 1, 2]
     assert out[0]["latest_period"] is True
+
+
+def test_company_query_never_pulls_other_company_news(monkeypatch, fake_embeddings):
+    # 有 company 的題目不補市場新聞：那段補充沒有相關性門檻，實測會把別家的財測
+    # 寫成本題公司的風險。fake 模擬 DB：沒帶 company 過濾才會撈到別家／全域新聞。
+    calls = []
+    lock = threading.Lock()
+
+    def db_like_search(_vector, **kwargs):
+        with lock:
+            calls.append(kwargs)
+        if kwargs.get("company") is None:
+            return [MARKET_1, MARKET_2]
+        if kwargs.get("latest_source_only"):
+            return [LATEST]
+        if kwargs.get("doc_type") == "news":
+            return [COMPANY_NEWS]
+        return [REPORT]
+
+    monkeypatch.setattr(graph, "similarity_search", db_like_search)
+    results = []
+    for parallel in (True, False):
+        monkeypatch.setattr(graph.config, "RETRIEVE_PARALLEL", parallel)
+        graph._clear_embedding_cache()
+        out = graph.retrieve_context("AAPL 財報", company="AAPL", doc_type="financial_report")
+        assert {d["company"] for d in out} == {"AAPL"}, f"混入非本題公司新聞（parallel={parallel}）"
+        results.append(out)
+    assert results[0] == results[1]
+    with lock:
+        assert all(c.get("company") == "AAPL" for c in calls)
 
 
 def test_relaxed_doc_type_fallback(monkeypatch, fake_embeddings):
     def fallback_search(_vector, **kwargs):
         if kwargs.get("latest_source_only"):
             return [LATEST]
-        if kwargs.get("exclude_company"):
-            return [MARKET_1]
         if kwargs.get("doc_type") == "news":
             return [COMPANY_NEWS]
         if kwargs.get("doc_type") == "financial_report":
@@ -132,13 +155,13 @@ def test_relaxed_doc_type_fallback(monkeypatch, fake_embeddings):
     out = graph.retrieve_context("AAPL 財報（fallback）", company="AAPL", doc_type="financial_report")
     # 放寬過 doc_type 代表財報撈不到，此時不得再插最新財報席位（id 6 不該出現）
     assert out[0]["id"] == 1 and out[0]["relaxed"] == "doc_type"
-    assert [d["id"] for d in out] == [1, 2, 3]
+    assert [d["id"] for d in out] == [1, 2]
 
     # 循序路徑也要維持 doc_type 放寬與 relaxed 標記
     monkeypatch.setattr(graph.config, "RETRIEVE_PARALLEL", False)
     out = graph.retrieve_context("AAPL 財報（循序 fallback）", company="AAPL",
                                  doc_type="financial_report")
-    assert [d["id"] for d in out] == [1, 2, 3]
+    assert [d["id"] for d in out] == [1, 2]
     assert out[0]["relaxed"] == "doc_type"
 
 
@@ -150,8 +173,6 @@ def test_unused_company_news_prefetch_does_not_block(monkeypatch, fake_embedding
 
     def unused_candidate_search(_vector, **kwargs):
         if kwargs.get("latest_source_only"):
-            return []
-        if kwargs.get("exclude_company"):
             return []
         if kwargs.get("doc_type") == "news":
             company_started.set()
@@ -206,8 +227,6 @@ def test_latest_report_slot_trigger_conditions(monkeypatch, fake_embeddings):
             with latest_lock:
                 latest_calls.append(kwargs)
             return [fresh(LATEST)]
-        if kwargs.get("exclude_company"):
-            return [fresh(MARKET_1)]
         if kwargs.get("doc_type") == "news":
             return [fresh(COMPANY_NEWS)]
         return [fresh(REPORT)]
@@ -259,8 +278,6 @@ def test_latest_report_slot_dedup_and_cap(monkeypatch, fake_embeddings):
     def overlapping_search(_vector, **kwargs):
         if kwargs.get("latest_source_only"):
             return [_fresh(REPORT)]  # 與主檢索同一筆
-        if kwargs.get("exclude_company"):
-            return []
         if kwargs.get("doc_type") == "news":
             return [_fresh(COMPANY_NEWS)]
         return [_fresh(REPORT)]
@@ -275,8 +292,6 @@ def test_latest_report_slot_dedup_and_cap(monkeypatch, fake_embeddings):
     def flooding_search(_vector, **kwargs):
         if kwargs.get("latest_source_only"):
             return [dict(d) for d in many]
-        if kwargs.get("exclude_company"):
-            return []
         if kwargs.get("doc_type") == "news":
             return [_fresh(COMPANY_NEWS)]
         return [_fresh(REPORT)]
@@ -319,22 +334,6 @@ def test_embed_failure_not_cached(monkeypatch):
     with pytest.raises(RuntimeError):
         graph._embed_query_cached("會炸的問題")
     assert graph._embed_query_cached("會炸的問題") == ([7.0, 8.0], False), "失敗不該留下快取項"
-
-
-def test_parallel_branch_exception_propagates(monkeypatch, fake_embeddings):
-    # --- 並行分支中任一段檢索失敗，例外要傳出而非回傳半套結果 ---
-    def exploding_search(_vector, **kwargs):
-        if kwargs.get("latest_source_only"):
-            return [LATEST]
-        if kwargs.get("exclude_company"):
-            raise RuntimeError("market news 查詢失敗")
-        if kwargs.get("doc_type") == "news":
-            return [COMPANY_NEWS]
-        return [REPORT]
-
-    monkeypatch.setattr(graph, "similarity_search", exploding_search)
-    with pytest.raises(RuntimeError, match="market news 查詢失敗"):
-        graph.retrieve_context("市場新聞爆炸", company="AAPL", doc_type="financial_report")
 
 
 def test_primary_search_exception_propagates(monkeypatch, fake_embeddings):

@@ -28,10 +28,9 @@ from src.tickers import is_tw_ticker
 
 ANNOTATIONS = Path(__file__).parent / "eval_data" / "multiturn_annotations.json"
 
-# 市場新聞的 company 為 NULL，推不出市場。這類文件是決策卡的市場脈絡素材，
-# 本來就該有幾筆，故不算失分，但數量要受既有配額約束——超過配額代表
-# 「主檢索沒撈到東西，全靠補充在填版面」，那正是 M1 失誤的形狀。
-UNKNOWN_BUDGET = graph._MARKET_NEWS_K
+# 市場新聞的 company 為 NULL，推不出市場。檢索端已不再補市場新聞，帶 market 的
+# 檢索也會排除市場不明的塊，所以 unknown 配額為 0——出現就是 M1 失誤的形狀。
+UNKNOWN_BUDGET = 0
 
 
 def market_of(doc) -> str:
@@ -107,7 +106,7 @@ def check(item, rewritten, filters, docs):
 
     if tally["unknown"] > UNKNOWN_BUDGET:
         return False, (f"unknown（市場新聞）{tally['unknown']} 筆，超過配額 {UNKNOWN_BUDGET}；"
-                       f"主檢索僅 {tally[want]} 筆，版面多由補充新聞填滿")
+                       f"主檢索僅 {tally[want]} 筆")
 
     # 主體延續類另外要求命中指定公司——市場對了但查錯家仍是失敗
     if (co := item.get("company")) and not any(d.get("company") == co for d in docs):

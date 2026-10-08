@@ -114,7 +114,7 @@ def test_route_multi_company_per_company_freshness():
         _search([_doc("news", 0, 4, "ASML"), _doc("news", 1, 5, "2330")], "3"),
     ], companies=["2330", "ASML"])) == "assemble"
     # 單標的維持原行為：合併取 min，不受逐家邏輯影響
-    fresh = [REPORT, _doc("news", 0)]
+    fresh = [REPORT, _doc("news", 0, 1, "2330")]  # 過濾後只認本題標的的新聞
     assert route_after_tools(_state([_search(fresh)], companies=["2330"])) == "assemble"
 
 

@@ -24,7 +24,7 @@ def _configure(conn: psycopg.Connection) -> None:
 # 正常連線本該在毫秒等級完成，2 秒內連不上代表 DB 真的掛了，拖久也救不回來）
 pool = ConnectionPool(
     config.DATABASE_URL,
-    # max_size=6：並行檢索最多同時開 4 條（主檢索、同公司新聞、市場新聞、最新財報），
+    # max_size=6：並行檢索最多同時開 3 條（主檢索、同公司新聞、最新財報），
     # 留餘裕給同時進來的另一題；不足時 retrieve_context 記的 pool_waiting 會現形
     min_size=1, max_size=6,
     kwargs={"autocommit": True},
@@ -119,8 +119,6 @@ def similarity_search(
     company: str | None = None,
     doc_type: str | None = None,
     news_since_days: int | None = None,
-    exclude_company: str | None = None,
-    order_by_recency: bool = False,
     latest_source_only: bool = False,
     market: str | None = None,
 ) -> list[dict]:
@@ -128,11 +126,6 @@ def similarity_search(
 
     news_since_days 有值時只限縮新聞的日期（財報不受影響）；
     published_at 為 NULL 的新聞在此條件下會被排除，可接受。
-
-    exclude_company 排除指定公司（用 IS DISTINCT FROM，company 為 NULL 的列也會留下，
-    因為市場新聞掃描認不出標題公司時就填 NULL，那些正是要補的市場脈絡）。
-    order_by_recency=True 改以發布日期新到舊排序，供「補市場脈絡」這類要新不要準的用途；
-    published_at 為 NULL 的排最後，避免無日期的舊文佔住補充名額。
 
     latest_source_only=True 只在「該 company 最新 published_at 的那些來源」裡做相似度排序。
     用途是財報檢索的期間維度：結構化來源把整季壓成 2 塊密集數字、PDF 來源散成上百塊
@@ -151,10 +144,6 @@ def similarity_search(
     if company:
         filters.append("company = %(company)s")
         params["company"] = company
-    if exclude_company:
-        # != 不會匹配 NULL，全域新聞（company IS NULL）會被吃掉，故用 IS DISTINCT FROM
-        filters.append("company IS DISTINCT FROM %(exclude_company)s")
-        params["exclude_company"] = exclude_company
     if doc_type:
         filters.append("doc_type = %(doc_type)s")
         params["doc_type"] = doc_type
@@ -182,18 +171,12 @@ def similarity_search(
 
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
-    order_clause = (
-        "ORDER BY published_at DESC NULLS LAST, embedding <=> %(embedding)s::vector"
-        if order_by_recency
-        else "ORDER BY embedding <=> %(embedding)s::vector"
-    )
-
     sql = f"""
         SELECT id, source, title, doc_type, company, published_at, content, market,
                1 - (embedding <=> %(embedding)s::vector) AS similarity
         FROM doc_chunks
         {where_clause}
-        {order_clause}
+        ORDER BY embedding <=> %(embedding)s::vector
         LIMIT %(top_k)s
     """
 

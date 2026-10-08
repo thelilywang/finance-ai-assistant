@@ -40,7 +40,7 @@ def test_search_knowledge_base_returns_summary_and_chunks(monkeypatch):
 
 
 def test_search_knowledge_base_freshness_scoped_to_queried_company(monkeypatch):
-    # 時效只算查詢公司自己的新聞：retrieve_context 會補進其他公司與全域市場新聞，
+    # 時效只算查詢公司自己的新聞：結果若混入其他公司與全域市場新聞（防禦），
     # 那些通常更新，混進來會讓 header 報出別家的新鮮度，使用者問 AAPL 卻被告知
     # 「距今 0 天」（其實是別家的新聞）而不去補抓
     mixed = CHUNKS + [

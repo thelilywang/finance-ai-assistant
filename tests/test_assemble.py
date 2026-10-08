@@ -123,3 +123,25 @@ def test_agent_route():
     # 達輪數上限強制收工，避免 LLM 反覆補抓一直打外部網站
     over_limit = [_tool_call("fetch_company_data", str(i)) for i in range(4)]
     assert agent_route({"messages": over_limit}) == "assemble"
+
+
+def _search_msgs(companies):
+    chunks = [{"id": i, "source": f"s{i}", "company": c, "content": "x"}
+              for i, c in enumerate(companies)]
+    return [HumanMessage(content="seed"), _tool_call("search_knowledge_base", "1"),
+            ToolMessage(content=json.dumps({"chunks": chunks}),
+                        name="search_knowledge_base", tool_call_id="1")]
+
+
+def test_assemble_filters_non_target_companies():
+    # tool 呼叫不帶 company 會撈回大盤／別家新聞；peer_company 為 None 時也不能放行 company=None
+    msgs = _search_msgs(["2330", "TSM", None, "PENG"])
+    out = assemble({"messages": msgs, "companies": ["2330"], "peer_company": "TSM"})
+    assert [c["company"] for c in out["retrieved"]] == ["2330", "TSM"]
+    out = assemble({"messages": msgs, "companies": ["2330"], "peer_company": None})
+    assert [c["company"] for c in out["retrieved"]] == ["2330"]
+
+
+def test_assemble_keeps_all_without_companies():
+    out = assemble({"messages": _search_msgs(["2330", None, "PENG"]), "companies": []})
+    assert len(out["retrieved"]) == 3

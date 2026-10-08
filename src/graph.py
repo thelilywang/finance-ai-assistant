@@ -578,9 +578,6 @@ def _log_resolve_market(state: GraphState, out: GraphState) -> None:
     }})
 
 
-# 補給決策卡當市場脈絡的新聞條數；候選要多撈幾倍，去重後才補得滿
-_MARKET_NEWS_K = 2
-
 # 保留給「最新一期財報」的名額。顆粒度不對稱讓最新財報在純相似度排序裡撈不到
 # （見 vectorstore.similarity_search 的 latest_source_only），故給它固定席位而非
 # 改動全局排序——後者會傷到「比較去年同期」這類本來就需要舊資料的問法。
@@ -603,7 +600,7 @@ def _merge_latest_report(docs: list[dict], candidates: list[dict]) -> list[dict]
 
 def retrieve_context(question: str, company: str | None = None, doc_type: str | None = None,
                      news_since_days: int | None = None, market: str | None = None) -> list[dict]:
-    """向量檢索 + 既有的補資料規則（doc_type 濾空放寬重查、財報補新聞、補全域市場新聞）。
+    """向量檢索 + 既有的補資料規則（doc_type 濾空放寬重查、財報補新聞）。
 
     news_since_days 由 extract_filters 的 LLM 從問題判斷（None 表示不限日期），
     四次檢索共用同一個值。不依賴 GraphState，供 LangGraph 節點與未來的 MCP tool 共用。
@@ -643,23 +640,6 @@ def _relax_doc_type(query_vec, company, news_since_days, market=None) -> list[di
     return [{**d, "relaxed": "doc_type"} for d in docs]
 
 
-def _merge_market_news(docs: list[dict], candidates: list[dict]) -> list[dict]:
-    """補 _MARKET_NEWS_K 條市場新聞給決策卡當市場脈絡；候選多撈後去重回補。
-
-    多撈候選再去重，避免撈回的正好都已在 docs 裡而補成 0 條。
-    """
-    seen_ids = {d["id"] for d in docs}
-    extra = []
-    for d in candidates:
-        if d["id"] in seen_ids:
-            continue
-        seen_ids.add(d["id"])
-        extra.append(d)
-        if len(extra) == _MARKET_NEWS_K:
-            break
-    return docs + extra
-
-
 def _wants_latest_report(company, doc_type) -> bool:
     """要不要保留最新財報的席位。
 
@@ -683,7 +663,8 @@ def _retrieve_sequential(query_vec, company, doc_type, news_since_days, market=N
     """循序版本：無 company 時的唯一路徑，也是 RETRIEVE_PARALLEL=0 的回退路徑。
 
     market 只在沒有 company 時真正起作用——有 company 時市場已由代號鎖定。
-    但市場新聞那段補充無論如何都要帶上：它刻意不限公司，正是市場外洩的通道。
+    有 company 時不補其他公司的市場新聞：那段補充沒有相關性門檻（只取最新一天），
+    實測會把別家公司的財測寫成本題公司的風險。
     """
     docs = similarity_search(
         query_vec, company=company, doc_type=doc_type, news_since_days=news_since_days,
@@ -704,23 +685,14 @@ def _retrieve_sequential(query_vec, company, doc_type, news_since_days, market=N
             query_vec, top_k=3, company=company, doc_type="news",
             news_since_days=news_since_days,
         )
-    if docs:
-        # exclude_company 排掉查詢公司自己（否則語意檢索多半又撈回同一家，補了等於沒補；
-        # 市場新聞掃描認得出標題公司時會填代號、認不出才是 NULL，所以「全域」不等於
-        # company IS NULL，用排除法才涵蓋得完整）；order_by_recency 讓脈絡取新不取準。
-        docs = _merge_market_news(docs, similarity_search(
-            query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
-            news_since_days=news_since_days, exclude_company=company, order_by_recency=True,
-            market=market,
-        ))
     return docs
 
 
 def _retrieve_parallel(query_vec, company, doc_type, news_since_days, market=None) -> list[dict]:
-    """同公司新聞與市場脈絡最後是否採用要看主檢索結果，但 SQL 本身不依賴它；先並行取
-    候選、後過濾即可省掉兩段等待。採用條件與順序和 _retrieve_sequential 完全相同。"""
+    """同公司新聞與最新財報最後是否採用要看主檢索結果，但 SQL 本身不依賴它；先並行取
+    候選、後過濾即可省掉等待。採用條件與順序和 _retrieve_sequential 完全相同。"""
     want_latest = _wants_latest_report(company, doc_type)
-    executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag-retrieve")
+    executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="rag-retrieve")
     try:
         primary: Future = executor.submit(
             similarity_search, query_vec, company=company, doc_type=doc_type,
@@ -732,11 +704,6 @@ def _retrieve_parallel(query_vec, company, doc_type, news_since_days, market=Non
         company_news: Future = executor.submit(
             similarity_search, query_vec, top_k=3, company=company, doc_type="news",
             news_since_days=news_since_days,
-        )
-        market_news: Future = executor.submit(
-            similarity_search, query_vec, top_k=_MARKET_NEWS_K * 6, doc_type="news",
-            news_since_days=news_since_days, exclude_company=company, order_by_recency=True,
-            market=market,
         )
 
         docs = primary.result()
@@ -751,8 +718,6 @@ def _retrieve_parallel(query_vec, company, doc_type, news_since_days, market=Non
         if docs and not any(d["doc_type"] == "news" for d in docs):
             docs = docs + company_news.result()
 
-        if docs:
-            docs = _merge_market_news(docs, market_news.result())
         return docs
     finally:
         # 未採用的預取不該拖慢「主檢索為空」或「主結果已有新聞」的回覆；已經開始的
@@ -972,6 +937,9 @@ def assemble(state: GraphState) -> GraphState:
     雙掛牌會分次檢索，只取最後一次會把前幾次的結果靜默丟掉；補抓後重查則會拿到
     重複的 id，不去重會讓 generate 的 context 出現整段重複內容。
     補抓類 tool 的訊息填進 fetched/fetch_results 供 no_result 使用。
+    有指定公司時只留本題標的（companies 與 peer_company）的 chunk：agent 自行呼叫
+    search_knowledge_base 沒帶 company 時會撈回大盤／別家新聞，且沒有相關性門檻，
+    曾把別家財測寫進本題決策卡。
     """
     retrieved: list[dict] = []
     seen: set = set()
@@ -994,6 +962,15 @@ def assemble(state: GraphState) -> GraphState:
         elif msg.name in ("fetch_company_data", "fetch_market_overview"):
             fetched = True
             fetch_results.append(_tool_text(msg.content))
+    if state.get("companies"):
+        # peer_company 可能是 None，必須剔除，否則 company=None 的大盤新聞會被放行
+        allowed = (set(state["companies"]) | {state.get("peer_company")}) - {None}
+        kept = [c for c in retrieved if c.get("company") in allowed]
+        if len(kept) < len(retrieved):
+            log.info("丟棄非本題標的的檢索結果", extra={"fields": {
+                "node": "assemble", "dropped": len(retrieved) - len(kept),
+                "kept": len(kept), "companies": state["companies"]}})
+        retrieved = kept
     return {**state, "retrieved": retrieved, "fetched": fetched, "fetch_results": fetch_results}
 
 
@@ -1390,9 +1367,6 @@ def generate(state: GraphState) -> GraphState:
         if parts[0] == "TWSE-API" and len(parts) > 2 and parts[2][-2:] in ("Q2", "Q3", "Q4"):
             q = int(parts[2][-1])
             header += "\n" + t(lang, "tw_cumulative_note", year=parts[2][:-2], month=q * 3, q=q)
-        # _merge_market_news 補進的市場脈絡新聞（company 為 None 或別家）否則與本題標的來源無從區分
-        if state.get("companies") and docs[0].get("company") not in set(state["companies"]) | {state.get("peer_company")}:
-            header += "\n" + t(lang, "market_context_note")
         context_blocks.append(f"{header}\n{contents}")
     context = "\n\n".join(context_blocks)
 
