@@ -301,3 +301,24 @@ def test_edgar_adr_note_only_for_adr_issuers(monkeypatch):
     assert prompt.count("為 ADR 發行公司的 SEC 申報") == 1
     assert "（TSM 為 ADR" in prompt and "1 ADR = 5 股普通股" in prompt
     assert "NVDA 為 ADR" not in prompt
+
+
+def test_tw_cumulative_note_only_for_q2_plus(monkeypatch):
+    import src.config as _cfg
+
+    stub = _StubLLM()
+    monkeypatch.setattr(_cfg, "ADR_PREMIUM", "off")
+    monkeypatch.setattr(_g, "_llms", lambda model: {"llm": stub})
+    monkeypatch.setattr(_g, "get_market_snapshots", lambda codes: {})
+    docs = [
+        {"source": "TWSE-API:2330:115Q2", "content": "EPS 49.33", "published_at": "2026-08-01"},
+        {"source": "TWSE-API:2330:115Q1", "content": "EPS 22", "published_at": "2026-05-01"},
+    ]
+    state = {
+        "question": "2330 EPS?", "lang": "zh", "companies": ["2330"], "peer_company": None,
+        "market": "tw", "doc_type": None, "news_since_days": None, "answer_shape": None,
+        "retrieved": docs, "history": [],
+    }
+    _g.generate(state)
+    assert stub.last_prompt.count("1～6 月累計、不是第 2 季單季") == 1
+    assert "115 年 1～" in stub.last_prompt

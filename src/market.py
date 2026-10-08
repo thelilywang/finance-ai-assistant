@@ -239,7 +239,7 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
             eps_equiv = us_eps_val / ratio * fx
             eps_equiv_diff_pct = round((eps_equiv / tw_eps_val - 1) * 100, 2)
             lines += [
-                f"latest reported EPS ({_rep(us_date)}): {tw} {tw_eps_val} TWD / "
+                f"latest reported single-quarter EPS ({_rep(us_date)}): {tw} {tw_eps_val} TWD / "
                 f"{us} {us_eps_val} USD",
                 f"{us} EPS per {tw} share: {us_eps_val} / {ratio} × {fx} = {eps_equiv:.2f} TWD "
                 f"(vs {tw} {tw_eps_val} TWD, {eps_equiv_diff_pct:+.2f}%)",
@@ -247,7 +247,7 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
             metrics["eps_equiv_diff_pct"] = eps_equiv_diff_pct
         else:
             lines.append(
-                f"latest reported EPS (different quarters, do not compare): "
+                f"latest reported single-quarter EPS (different quarters, do not compare): "
                 f"{tw} {tw_eps_val} TWD ({_rep(tw_date)}) / {us} {us_eps_val} USD ({_rep(us_date)})"
             )
             # 換算行刻意不帶「TWD (vs」，bench 的 _EPS_BLOCK_RE 只能命中同季那行
@@ -261,7 +261,7 @@ def format_adr_premium(tw: str, us: str, tw_info: dict, us_info: dict,
         other = us if tw_eps is not None else tw
         d, v = tw_eps or us_eps
         lines.append(
-            f"latest reported EPS (only {side} available, {other} has no data, do not compare): "
+            f"latest reported single-quarter EPS (only {side} available, {other} has no data, do not compare): "
             f"{side} {v} {cur} ({_rep(d)})"
         )
 

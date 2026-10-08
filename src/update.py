@@ -598,6 +598,13 @@ def _format_rows(rows: list[dict], co_id: str) -> tuple[str, str, str] | None:
         ]
         if not lines:
             continue
+        # EPS 行離標題約 20 行，LLM 讀到那行時早已忘了累計期間，所以期間要寫進該行本身
+        if title == "綜合損益表" and int(season) > 1:
+            cum = f"1～{int(season) * 3} 月累計"
+            lines = [
+                ln.replace("（元）：", f"（元，{cum}）：", 1) if "每股盈餘" in ln.split("：")[0] else ln
+                for ln in lines
+            ]
         # 綜合損益表是年初至當季累計（Q2 = 1～6 月）：把累計期間放最前面（上半年／前三季／全年），
         # LLM 才不會丟掉括號而把累計 EPS 讀成單季；資產負債表是時點數，維持「第 N 季」
         period = f"第 {season} 季"
