@@ -50,6 +50,9 @@ STRINGS = {
         "tw_cumulative_note": (
             "（綜合損益表數字為 {year} 年 1～{month} 月累計、不是第 {q} 季單季；資產負債表為季底時點數）"
         ),
+        "market_context_note": (
+            "（市場脈絡新聞，非本題標的的資料；不得把其中其他公司的財測、法說或營運內容當成本題標的的資訊）"
+        ),
         "dual_market_warning_adr": (
             "本題同時涵蓋台股（{tw}）與其美股 ADR（{us}）。兩邊的計價幣別與公布期間不同，"
             "且 1 股 ADR 對應多股台股普通股，原始數字不可直接比較。比較兩邊的股價或 EPS 時，"
@@ -109,11 +112,14 @@ STRINGS = {
             "取不到就只寫代號，不得自行補寫）；只寫「即時市場數據」中實際出現的標的"
         ),
         "trend_field_earnings_call": (
-            "- **法說會/財報關注清單**：2-3 點，優先引用檢索資料中與 guidance 相關的內容（附 [來源N]）；"
-            "沒有就列通用關注項（營收指引、毛利率指引、資本支出）"
+            "- **法說會/財報關注清單**：2-3 點，優先引用檢索資料中本題標的自身的 guidance（附 [來源N]），"
+            "其他公司的財測不得列入；沒有就列通用關注項（營收指引、毛利率指引、資本支出）"
         ),
         "trend_field_recommendation": "- **建議傾向**：給「偏多／中性觀望／偏空」其一並附一句依據",
-        "trend_field_trigger": "- **觸發條件**：「轉積極」「轉保守」兩點子條列（條件式描述，非指令）",
+        "trend_field_trigger": (
+            "- **觸發條件**：「轉積極」「轉保守」兩點子條列（條件式描述，非指令）；"
+            "引用共識門檻時沿用原指標名稱（EPS 門檻就寫 EPS，不得改稱淨利等其他指標）"
+        ),
         "trend_field_next_event": "- **下一個關鍵事件**：",
         "trend_field_tracking_indicators": "- **建議追蹤指標**：2-3 個",
         "market_partial_note": (
@@ -206,6 +212,10 @@ STRINGS = {
             "(income statement figures are cumulative for 1-{month} of ROC year {year}, not the single "
             "quarter Q{q}; the balance sheet is a quarter-end point-in-time figure)"
         ),
+        "market_context_note": (
+            "(Market-context news, not about the queried ticker; never present other companies' guidance, "
+            "earnings-call or operating details in it as the queried ticker's)"
+        ),
         "dual_market_warning_adr": (
             "This question covers both the Taiwan listing ({tw}) and its US ADR ({us}). Quote currency and "
             "reporting period differ, and 1 ADR share corresponds to several Taiwan common shares, so the raw "
@@ -279,15 +289,17 @@ STRINGS = {
             "ticker alone if unavailable, never invent it); cover only tickers present in the market data"
         ),
         "trend_field_earnings_call": (
-            "- **Earnings call watch list**: 2-3 items, preferring guidance-related content from the retrieved "
-            "material (with [Source N]); if none, list generic items (revenue guidance, margin guidance, capex)"
+            "- **Earnings call watch list**: 2-3 items, preferring guidance from the retrieved "
+            "material about the queried ticker itself (with [Source N]); never list other companies' guidance; "
+            "if none, list generic items (revenue guidance, margin guidance, capex)"
         ),
         "trend_field_recommendation": (
             "- **Stance**: give \"Bullish / Neutral-wait / Bearish\" with one supporting reason"
         ),
         "trend_field_trigger": (
             "- **Triggers**: two sub-bullets \"turn positive\" / \"turn cautious\" "
-            "(conditional description, not an instruction)"
+            "(conditional description, not an instruction); when citing a consensus threshold, keep its metric "
+            "name (an EPS threshold stays EPS, never relabeled as net income or another metric)"
         ),
         "trend_field_next_event": "- **Next key event**:",
         "trend_field_tracking_indicators": "- **Metrics to watch**: 2-3 items",

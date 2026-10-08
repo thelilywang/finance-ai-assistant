@@ -322,3 +322,33 @@ def test_tw_cumulative_note_only_for_q2_plus(monkeypatch):
     _g.generate(state)
     assert stub.last_prompt.count("1～6 月累計、不是第 2 季單季") == 1
     assert "115 年 1～" in stub.last_prompt
+
+
+def test_market_context_note_only_for_non_target_sources(monkeypatch):
+    import src.config as _cfg
+
+    monkeypatch.setattr(_cfg, "ADR_PREMIUM", "off")
+    monkeypatch.setattr(_g, "get_market_snapshots", lambda codes: {})
+
+    def run(companies):
+        stub = _StubLLM()
+        monkeypatch.setattr(_g, "_llms", lambda model: {"llm": stub})
+        docs = [
+            {"source": f"news-{c}", "company": c, "content": "x", "published_at": "2026-07-01"}
+            for c in (None, "2454", "2330", "TSM")
+        ]
+        state = {
+            "question": "2330?", "lang": "zh", "companies": companies, "peer_company": "TSM",
+            "market": "tw", "doc_type": None, "news_since_days": None, "answer_shape": None,
+            "retrieved": docs, "history": [],
+        }
+        _g.generate(state)
+        return stub.last_prompt
+
+    note = "市場脈絡新聞"
+    p = run(["2330"])
+    assert p.count(note) == 2
+    for src, has in (("None", True), ("2454", True), ("2330", False), ("TSM", False)):
+        block = p.split(f"news-{src}（")[1].split("\n\n")[0]
+        assert (note in block) is has
+    assert note not in run([])

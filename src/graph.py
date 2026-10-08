@@ -1390,6 +1390,9 @@ def generate(state: GraphState) -> GraphState:
         if parts[0] == "TWSE-API" and len(parts) > 2 and parts[2][-2:] in ("Q2", "Q3", "Q4"):
             q = int(parts[2][-1])
             header += "\n" + t(lang, "tw_cumulative_note", year=parts[2][:-2], month=q * 3, q=q)
+        # _merge_market_news 補進的市場脈絡新聞（company 為 None 或別家）否則與本題標的來源無從區分
+        if state.get("companies") and docs[0].get("company") not in set(state["companies"]) | {state.get("peer_company")}:
+            header += "\n" + t(lang, "market_context_note")
         context_blocks.append(f"{header}\n{contents}")
     context = "\n\n".join(context_blocks)
 
