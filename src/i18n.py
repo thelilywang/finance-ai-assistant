@@ -54,8 +54,8 @@ STRINGS = {
             "本題同時涵蓋台股（{tw}）與其美股 ADR（{us}）。兩邊的計價幣別與公布期間不同，"
             "且 1 股 ADR 對應多股台股普通股，原始數字不可直接比較。比較兩邊的股價或 EPS 時，"
             "一律引用上方「ADR 換算」區塊算好的台幣等值與差距百分比，不得拿不同幣別的原始數字"
-            "直接比大小，也不得自行重算。區塊裡沒有 EPS 等值時，兩邊的 EPS 只能分開陳述、"
-            "標明幣別與公布日期，不得判斷誰高誰低。幣別一律取自「即時市場數據」的 currency 欄，"
+            "直接比大小，也不得自行重算。區塊裡沒有 EPS 等值、或標明不同季（do not compare）時，"
+            "兩邊的 EPS 只能分開陳述、標明幣別與公布日期，不得判斷誰高誰低，也不得解釋兩者差距的原因。幣別一律取自「即時市場數據」的 currency 欄，"
             "不得由代號推測。"
         ),
         "no_result_plain": (
@@ -122,7 +122,7 @@ STRINGS = {
         ),
         "adr_premium_header": (
             "ADR 換算（系統依上列價格、匯率與換算比例計算，可直接引用，勿自行重算；"
-            "EPS 等值與台股 EPS 的差距主要來自匯率時點不同）"
+            "同季時 EPS 等值與台股 EPS 的差距主要來自匯率時點不同；標明不同季（do not compare）時兩邊 EPS 不可比較）"
         ),
         "trend_rules_common": (
             "只輸出上方列出的欄位。未列出的欄位完全不要輸出（不要輸出欄名、不要寫「資料不足」、"
@@ -212,8 +212,9 @@ STRINGS = {
             "numbers are not directly comparable. When comparing price or EPS across the two, always cite the "
             "TWD-equivalent value and the percentage gap already computed in the \"ADR conversion\" block above; "
             "never compare the raw numbers across currencies, and never recompute it yourself. When the block has "
-            "no EPS-equivalent value, state the two sides' EPS separately with their currencies and reporting dates "
-            "and do not judge which is higher. Take each currency from the `currency` field in the \"real-time market data\", "
+            "no EPS-equivalent value or marks the two as different quarters (do not compare), state the two sides' EPS "
+            "separately with their currencies and reporting dates, do not judge which is higher, and do not explain "
+            "the gap between them. Take each currency from the `currency` field in the \"real-time market data\", "
             "never from the ticker symbol."
         ),
         "no_result_plain": (
@@ -297,8 +298,9 @@ STRINGS = {
         ),
         "adr_premium_header": (
             "ADR conversion (computed by the system from the prices/FX/ratio above; cite it "
-            "directly, do not recompute; the gap between the EPS equivalent and the Taiwan-listed "
-            "EPS is mainly due to differing FX timing)"
+            "directly, do not recompute; when both are from the same quarter, the gap between the EPS equivalent "
+            "and the Taiwan-listed EPS is mainly due to differing FX timing; when marked different quarters "
+            "(do not compare), the two EPS figures are not comparable)"
         ),
         "trend_rules_common": (
             "Only output the fields listed above. Do not output any field not listed (no field name, no "
