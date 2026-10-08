@@ -9,6 +9,19 @@
 
 A local RAG assistant for stock financial reports and news, built with LangGraph + Ollama + pgvector. See also the main [README](../README.md).
 
+### Environment & latency
+
+- **Environment**: everything runs locally (MacBook M1 / 16 GB), with Ollama serving `qwen3.5:9b` (generation) and `bge-m3` (embedding); no financial data is sent to an external API.
+- **Latency**: about 186–470 s per question. The local 9b model generates ≈10 chars/s, and reading an 11k-token prompt alone takes ~130 s; a hardware limit, not an architecture issue. Alternatives evaluated: `4b` is 25% faster but made 0/3 re-fetches when data was stale; MLX builds were slower or failed structured output; `9b` is the only usable model on a MacBook M1 / 16 GB.
+
+### Highlights
+
+- **LLM-driven fetching via MCP tools**: an `agent ⇄ tools` loop with the rules in the tool docstrings; `route_after_tools` skips a redundant agent round when the data is clearly fresh.
+- **Market decided at write time**: the `market` column is set once by the ingest layer, so TW and US data never mix.
+- **Anti-hallucination**: mandatory `[SourceN]` citations, probabilities forbidden, and the disclaimer appended by code rather than by the prompt.
+- **Observability**: JSON Lines logs plus Langfuse tracing. Prompt truncation was caught from token logs and `num_ctx` was chosen by A/B test: at 4096 every question was truncated to ~2050 tokens (0-1 decision-card fields, 0/4 citations); at 32768 there was no truncation, 9 fields and 4/4 citations.
+- **Testing**: pytest suite (38 `test_*.py` files) plus evaluation and benchmark scripts.
+
 ### Architecture
 
 ```mermaid
@@ -92,7 +105,8 @@ HNSW cosine index on `embedding`, plus B-tree indexes on `company`, `doc_type`, 
 
 | Data | Source | Command |
 |---|---|---|
-| US reports | SEC EDGAR (ticker → CIK → latest filing HTML, text via trafilatura; falls back through 10-K → 6-K → 20-F → 424B4 → S-1, so foreign issuers like ASML work) | `python -m src.update report --market us --company AAPL [--form 10-K]` |
+| US report figures | SEC XBRL API (companyfacts: ticker → CIK → structured concept values; foreign issuers use `ifrs-full`) | `python -m src.update report --market us --company AAPL [--form 10-K]` (runs both tracks) |
+| US report text | SEC EDGAR (ticker → CIK → latest filing HTML, text via trafilatura; falls back through 10-K → 6-K → 20-F → 424B4 → S-1, so foreign issuers like ASML work) | same command as above |
 | TW report figures | Official OpenAPI: TWSE `openapi.twse.com.tw` (listed) with TPEx `tpex.org.tw` (OTC) fallback; latest quarter's income statement + balance sheet as JSON, no auth | `python -m src.update report --market tw --company 2330` (runs both tracks) |
 | TW report narrative | TWSE MOPS (`doc.twse.com.tw/server-java/t57sb01`, two-step PDF download) | same command as above |
 | News | Yahoo Finance RSS (`.TW` suffix auto-added for 4-digit TW codes); 4-digit TW tickers also use the Yahoo TW stock page (`tw.stock.yahoo.com/quote/{code}.TW/news`, `fetch_tw_stock_news`) | `python -m src.update news --company 2330 --limit 10` |
@@ -105,23 +119,32 @@ Re-running any command on the same source replaces old chunks (idempotent).
 
 ### Design decisions
 
-- **`PGVECTOR_URL` instead of `DATABASE_URL`**: Chainlit treats `DATABASE_URL` as its own persistence-layer setting (requiring asyncpg), so the env var was renamed to avoid the collision.
-- **No Google News RSS**: since 2024 its links are encoded internal URLs, so article bodies can't be fetched; Yahoo Finance RSS is used instead.
+- **LLM-driven fetching via MCP tools**: the hard-coded refetch threshold (`needs_refetch()`) only looked at how many days old the news was, so it could not read the recency a question implies, and the external MCP tools were just a facade. Fetching now sits behind three single-purpose tools (`search_knowledge_base`, `fetch_company_data`, `fetch_market_overview`) whose rules live in their docstrings, driven by an `agent ⇄ tools` loop (max 4 rounds); the internal agent and external MCP clients share the same definitions. The cost is one extra LLM round trip per question and no code-level guarantee of correct judgment, so `route_after_tools` takes back only the "data is clearly fresh, stop" decision (computed per company for multi-company questions), saving a redundant agent round measured at ~106 s; every other case goes back to the LLM.
+- **Market decision at write time, not query time**: the `market` column ('tw'/'us'/NULL) is decided once by the ingest layer (`ingest_text` by ticker, `_market_of_source` by source key suffix), not inferred later from ticker regex; this avoids ticker-shape misclassification (0700 Hong Kong, 7203 Japan) and keeps the decision in one place. Retrieval filters out `market IS NULL` chunks when a market is specified, excluding unidentifiable cross-market news from results.
+- **No probabilities or confidence scores — consensus thresholds come from real data**: scenario probabilities ("35% chance of a beat") and confidence scores would be hallucinations dressed up as quantification, since the LLM has no probability model behind them; instead the decision card's thresholds are the actual yfinance analyst-consensus range (low/avg/high), and the scenario read is strictly conditional ("if above the high…") with probabilities explicitly forbidden by the prompt's hard rules.
+- **Decision card can't fully abstain**: `generate` always includes triggers, key event, and watch metrics even with thin data, so the answer stays actionable; only the directional "stance" is gated on having filings+news+market data to back it.
+- **One `num_ctx` for all ChatOllama instances (`OLLAMA_NUM_CTX`, default 32768)**: the Ollama default (4096) truncated prompts (p50 ~6k, max ~22k tokens), causing missing decision-card fields and no citations; 32768 covers the longest observed prompt (16384 does not). All three ChatOllama instances (llm / filters / tool) must share the value, because a different `num_ctx` makes Ollama reload the model.
+- **Observability: tracing must never break Q&A, and logs must allow after-the-fact analysis**: every entry point in `tracing.py` swallows exceptions, so missing keys or an unreachable Langfuse just means one fewer trace; one question is one trace, and each node is wrapped in a named span so nodes that never call the LLM still show up. `logging_setup.py` writes a daily JSON Lines file with structured fields (latency, model, token usage) that jq or pandas can read directly; prompt truncation was found from the token-usage logs. Each entry point must call `setup_logging` first, otherwise logs never reach the file.
+- **Market snapshot is prompt-only, never stored**: yfinance data is fetched fresh per question and injected into the `generate` prompt; it's excluded from `doc_chunks` and from the citation numbering since it isn't a retrievable source, and any fetch failure is caught and silently degrades to no snapshot.
 - **Idempotent ingest**: `ingest_text` deletes all chunks for the same `source` before inserting, so updates can be re-run freely without duplicates.
 - **Everything local**: Ollama (qwen3.5:9b + bge-m3) keeps sensitive financial documents on-machine.
 - **HNSW over IVFFlat**: the vector index is HNSW because it handles incremental inserts well (no cluster rebuild needed), matching this project's fetch-on-demand write pattern.
-- **Market decision at write time, not query time**: the `market` column ('tw'/'us'/NULL) is decided once by the ingest layer (`ingest_text` by ticker, `_market_of_source` by source key suffix), not inferred later from ticker regex; this avoids ticker-shape misclassification (0700 Hong Kong, 7203 Japan) and keeps the decision in one place. Retrieval filters out `market IS NULL` chunks when a market is specified, excluding unidentifiable cross-market news from results.
-- **Market snapshot is prompt-only, never stored**: yfinance data is fetched fresh per question and injected into the `generate` prompt; it's excluded from `doc_chunks` and from the citation numbering since it isn't a retrievable source, and any fetch failure is caught and silently degrades to no snapshot.
-- **Decision card can't fully abstain**: `generate` always includes triggers, key event, and watch metrics even with thin data, so the answer stays actionable; only the directional "stance" is gated on having filings+news+market data to back it.
-- **No probabilities or confidence scores — consensus thresholds come from real data**: scenario probabilities ("35% chance of a beat") and confidence scores would be hallucinations dressed up as quantification, since the LLM has no probability model behind them; instead the decision card's thresholds are the actual yfinance analyst-consensus range (low/avg/high), and the scenario read is strictly conditional ("if above the high…") with probabilities explicitly forbidden by the prompt's hard rules.
 - **PDF via headless Chrome, not weasyprint**: weasyprint needs Homebrew's pango, which fails to load on an arm64 Mac with Intel Homebrew; Chrome's `--print-to-pdf` needs no extra native libraries and renders CJK reliably. No Chrome/Chromium/Edge found → the download gracefully falls back to `.md`.
-- **One `num_ctx` for all ChatOllama instances (`OLLAMA_NUM_CTX`, default 32768)**: the Ollama default (4096) truncated prompts (p50 ~6k, max ~22k tokens), causing missing decision-card fields and no citations; 32768 covers the longest observed prompt (16384 does not). All three ChatOllama instances (llm / filters / tool) must share the value, because a different `num_ctx` makes Ollama reload the model.
+- **No Google News RSS**: since 2024 its links are encoded internal URLs, so article bodies can't be fetched; Yahoo Finance RSS is used instead.
+
+### Testing & evaluation
+
+- **pytest suite**: 38 `test_*.py` files under `tests/`, with no real Ollama or network calls; mocking uses `monkeypatch` and stdlib `unittest.mock`.
+- **Evaluation scripts** (hit the real DB or model; not collected by pytest): `tests/eval_extract_filters.py` (per-field accuracy of `extract_filters` on a fixed question set), `eval_rag_retrieval.py` (whether `search_knowledge_base` rules take effect, per category), `eval_multiturn_market.py` (whether a US follow-up still pulls back TW documents).
+- **Benchmark scripts**: `bench_retrieve.py` (`retrieve_context` latency, parallel vs sequential, cached vs uncached), `bench_chunk_tokens.py` (chunk token distribution under candidate `CHUNK_SIZE` values), `bench_adr_premium.py` (whether the model copies the program-computed ADR premium and EPS equivalent), `bench_cross_market_guard.py` (which prompt field carries the cross-market guard rule best).
+- Commands are in the [README](../README.md) Testing section.
+
 
 ### Known limitations
 
 Details for each item are in [MAINTENANCE_LOG](MAINTENANCE_LOG.md).
 
-- **Response latency 186–470 s on local hardware**: qwen3.5:9b via Ollama runs at ≈10 chars/s, and reading an 11k-token prompt alone takes ~130 s; a hardware limit, not an architecture issue.
+- **Slow responses on local hardware**: a hardware limit; see Environment & latency above.
 - **TW narrative text depends on scraping MOPS**: no official API, so management discussion, risks and outlook go missing when it breaks; figures are unaffected.
 - **No API figures for financial-sector companies**: the official OpenAPI covers general industry only; these firms fall back to the MOPS track alone.
 - Answer quality depends on the local model; verify figures against the cited sources.
@@ -135,6 +158,19 @@ Details for each item are in [MAINTENANCE_LOG](MAINTENANCE_LOG.md).
 ## 中文
 
 以 LangGraph + Ollama + pgvector 打造的本地個股財報/新聞 RAG 助理。另見主 [README](../README.md)。
+
+### 執行環境與回應時間
+
+- **執行環境**:全部在本機執行(MacBook M1／16GB),以 Ollama 跑 `qwen3.5:9b`(生成)與 `bge-m3`(embedding),財報資料不會送到外部 API。
+- **回應時間**:單題回應約 186～470 秒。本機 9b 模型每秒約生成 10 字,11k token 的 prompt 僅讀取即需約 130 秒,屬硬體限制而非架構問題。已評估的替代方案:`4b` 快 25%,但資料過期時 0/3 次補抓;MLX 版本更慢,或結構化輸出失敗;`9b` 是 MacBook M1／16GB 上唯一可用的模型。
+
+### 重點摘要
+
+- **補抓決策由 LLM 經 MCP tool 做出**:`agent ⇄ tools` 迴圈,判準寫在 tool 的 docstring;`route_after_tools` 在資料明顯夠新時略過多餘的一輪 agent 決策。
+- **市場別在寫入時決定**:`market` 欄於 ingest 層一次判定,台股與美股資料不會混用。
+- **抑制幻覺**:強制標示 `[來源N]` 引用、禁止輸出機率,免責聲明由程式追加,不依賴 prompt。
+- **可觀測性**:JSON Lines 日誌加 Langfuse 追蹤;由 token 日誌發現 prompt 被截斷,並以 A/B 測試選定 `num_ctx`:設為 4096 時每題皆被截至約 2050 token,決策卡僅 0~1 欄、引用 0/4;設為 32768 則無截斷、9 欄、引用 4/4。
+- **測試**:pytest 套件(38 個 `test_*.py`)加上評估與量測腳本。
 
 ### 架構
 
@@ -174,7 +210,7 @@ flowchart TD
 |---|---|
 | `rewrite_question` | 有對話歷史時,把追問(「那毛利率呢?」)改寫成獨立問題,讓 embedding 檢索有效;無歷史直接通過 |
 | `extract_filters` | 用 LLM 從問題抽出公司代號(台股 4 碼或美股 ticker)/文件類型作為檢索 filter(null 表示不過濾);另抽出 `companies` 清單(問題中提到的所有代號;同一公司的台美雙掛牌合併為一個) |
-| `resolve_market` | 把公司代號對齊到使用者要的市場,並決定本輪是否提早收工:離題問題轉 `off_topic`,雙掛牌卻沒指明市場轉 `ask_market` |
+| `resolve_market` | 把公司代號對齊到使用者要的市場,並決定本輪是否提前結束流程:離題問題轉 `off_topic`,雙掛牌卻沒指明市場轉 `ask_market` |
 | `off_topic` | 問題不在財經範圍(天氣、食譜、閒聊),依 `extract_filters` 一併抽出的 `in_scope` 判定。直接請使用者改問,本輪不檢索也不補抓 |
 | `agent` | 把 MCP tool 綁給 LLM,由它自行決定要呼叫哪個 tool、要不要再呼叫下一個。時效判準寫在 tool 的 docstring(`src/mcp_server.py`)而非程式碼裡。`_trim_for_llm` 會把送進模型的複本中的結構化 `chunks` 裁掉、只留 `summary_for_llm`,完整內容留在 state 供 `assemble` 使用。tool 呼叫上限 4 輪。問及多間公司時,agent 會被指示對每個代號分別檢索,時效逐公司判斷,並略過市場反問 |
 | `tools` | 執行 LLM 選定的 MCP tool(`ToolNode`)。之後由 `route_after_tools` 判斷:檢索到的新聞明顯夠新時(3 天內,`extract_filters` 抽出的時效窗在 7 天內時收緊為「必須是今天」)直接跳到 `assemble`,省下一輪重複的 agent 決策;其餘情況(全空、沒有新聞、已過期、日期不明,或剛跑完補抓 tool)一律回 `agent`,補抓與否仍由 LLM 決定 |
@@ -219,7 +255,8 @@ created_at TIMESTAMPTZ
 
 | 資料 | 來源 | 指令 |
 |---|---|---|
-| 美股財報 | SEC EDGAR(ticker → CIK → 最新申報 HTML,trafilatura 抽文字;依序退回 10-K → 6-K → 20-F → 424B4 → S-1,ASML 這類外國發行人也抓得到) | `python -m src.update report --market us --company AAPL [--form 10-K]` |
+| 美股財報數字 | SEC XBRL API(companyfacts;ticker → CIK → 結構化概念數字,外國發行人走 `ifrs-full`) | `python -m src.update report --market us --company AAPL [--form 10-K]`(兩軌一起跑) |
+| 美股財報全文 | SEC EDGAR(ticker → CIK → 最新申報 HTML,trafilatura 抽文字;依序退回 10-K → 6-K → 20-F → 424B4 → S-1,ASML 這類外國發行人也抓得到) | 同上一列指令 |
 | 台股財報數字 | 官方 OpenAPI:證交所 `openapi.twse.com.tw`(上市)、櫃買 `tpex.org.tw`(上櫃)後備;最新一季綜合損益表 + 資產負債表 JSON,免驗證 | `python -m src.update report --market tw --company 2330`(兩軌一起跑) |
 | 台股財報敘述 | 公開資訊觀測站 MOPS(`doc.twse.com.tw/server-java/t57sb01` 兩步下載 PDF) | 同上一列指令 |
 | 新聞 | Yahoo Finance RSS(4 碼台股代號自動加 `.TW`);4 碼台股代號另使用 Yahoo 奇摩股市個股頁(`tw.stock.yahoo.com/quote/{code}.TW/news`,`fetch_tw_stock_news`) | `python -m src.update news --company 2330 --limit 10` |
@@ -232,23 +269,31 @@ created_at TIMESTAMPTZ
 
 ### 設計決策
 
-- **用 `PGVECTOR_URL` 而非 `DATABASE_URL`**:Chainlit 會把 `DATABASE_URL` 當成自己的持久化層設定(需 asyncpg),改名避免撞名。
-- **不用 Google News RSS**:2024 年後其連結改為編碼過的內部網址,抓不到原文,改用 Yahoo Finance RSS。
+- **補抓決策交給 LLM,經由 MCP tool 執行**:原本寫死在節點內的補抓門檻(`needs_refetch()`)只看新聞日期距今幾天,無法判讀問法暗示的時效需求,對外的 MCP tool 也只是門面。改為三個單一用途 tool(`search_knowledge_base`、`fetch_company_data`、`fetch_market_overview`),判準寫在 docstring,由 `agent ⇄ tools` 迴圈(上限 4 輪)驅動,內部 agent 與外部 MCP 用戶端共用同一組定義。代價是每題多一次 LLM 往返、判斷正確性不再由程式保證,因此 `route_after_tools` 只收回「資料明顯夠新就停止」這一種判斷(多公司時逐家計算),省下實測約 106 秒的重複 agent 決策;其餘情況一律交還 LLM。
+- **市場別在寫入端決定一次,不在查詢時推導**:`market` 欄位(tw/us/NULL)在 ingest 層決定(有 company 時靠 ticker 判定、市場新聞靠來源 key 尾碼 `_tw`/`_us`),不在查詢時從代號格式推導,避免正則誤判(港股 0700、日股 7203)並集中邏輯。檢索指定市場時排除 `market IS NULL` 的塊,防止無法歸屬的跨市場新聞污染結果。
+- **不輸出機率與信心分數——共識門檻用真實數據**:情境機率(「35% 機率 beat」)與信心分數是包裝成量化的幻覺,LLM 背後沒有任何機率模型;決策卡的門檻改用 yfinance 真實分析師共識區間(low/avg/high),情境解讀限定為條件式描述(「若高於上緣…」),prompt 硬規則明文禁止機率數字。
+- **決策卡不整段棄權**:即使資料稀薄,`generate` 仍固定要求觸發條件、關鍵事件、觀察指標,讓回答保持可執行;只有方向性的「立場」需要財報+新聞+市場數據齊全才會給。
+- **所有 ChatOllama 實例共用同一個 `num_ctx`(`OLLAMA_NUM_CTX`,預設 32768)**:Ollama 預設值(4096)會截斷 prompt(中位數約 6k、最長約 22k token),導致決策卡欄位缺漏、沒有引用;32768 可涵蓋目前觀察到最長的 prompt(16384 不夠)。三個 ChatOllama(llm / filters / tool)必須使用相同數值,因為 `num_ctx` 不同會使 Ollama 重新載入模型。
+- **可觀測性:追蹤不得拖垮問答,日誌須能事後回測**:`tracing.py` 的所有進入點都不拋例外,缺金鑰或 Langfuse 連不上只是少一筆 trace;一次問答對應一個 trace,各節點以具名 span 包裝,連不呼叫 LLM 的節點也看得到。`logging_setup.py` 每日輸出一份 JSON Lines,耗時、模型、token 用量等欄位結構化,可直接以 jq 或 pandas 分析;prompt 被截斷即是由 token 用量日誌發現。各進入點須先呼叫 `setup_logging`,否則日誌不會寫入檔案。
+- **市場快照只進 prompt,不入庫**:yfinance 資料每次問答即時抓取後併入 `generate` 的 prompt;不寫進 `doc_chunks`,也不計入引用編號,因為它不是可檢索的來源,抓取失敗一律靜默降級成無快照。
 - **Idempotent ingest**:`ingest_text` 寫入前先刪除同 `source` 的舊 chunk,更新指令可任意重跑不會重複。
 - **全部本地執行**:Ollama(qwen3.5:9b + bge-m3)讓財報這類敏感資料不出本機。
 - **HNSW 而非 IVFFlat**:向量索引改用 HNSW,增量寫入不需重建分群,符合本專案隨用隨抓的寫入模式。
-- **市場別在寫入端決定一次,不在查詢時推導**:`market` 欄位(tw/us/NULL)在 ingest 層決定(有 company 時靠 ticker 判定、市場新聞靠來源 key 尾碼 `_tw`/`_us`),不在查詢時從代號格式推導,避免正則誤判(港股 0700、日股 7203)並集中邏輯。檢索指定市場時排除 `market IS NULL` 的塊,防止無法歸屬的跨市場新聞污染結果。
-- **市場快照只進 prompt,不入庫**:yfinance 資料每次問答即時抓取後併入 `generate` 的 prompt;不寫進 `doc_chunks`,也不計入引用編號,因為它不是可檢索的來源,抓取失敗一律靜默降級成無快照。
-- **決策卡不整段棄權**:即使資料稀薄,`generate` 仍固定要求觸發條件、關鍵事件、觀察指標,讓回答保持可執行;只有方向性的「立場」需要財報+新聞+市場數據齊全才會給。
-- **不輸出機率與信心分數——共識門檻用真實數據**:情境機率(「35% 機率 beat」)與信心分數是包裝成量化的幻覺,LLM 背後沒有任何機率模型;決策卡的門檻改用 yfinance 真實分析師共識區間(low/avg/high),情境解讀限定為條件式描述(「若高於上緣…」),prompt 硬規則明文禁止機率數字。
 - **PDF 用 headless Chrome 而非 weasyprint**:weasyprint 依賴 Homebrew 的 pango,在 arm64 Mac + Intel Homebrew 環境載不起來;Chrome 的 `--print-to-pdf` 零額外原生依賴且中文渲染最穩。找不到 Chrome/Chromium/Edge 時,下載檔優雅退回 `.md`。
-- **所有 ChatOllama 實例共用同一個 `num_ctx`(`OLLAMA_NUM_CTX`,預設 32768)**:Ollama 預設值(4096)會截斷 prompt(中位數約 6k、最長約 22k token),導致決策卡欄位缺漏、沒有引用;32768 可涵蓋目前觀察到最長的 prompt(16384 不夠)。三個 ChatOllama(llm / filters / tool)必須使用相同數值,因為 `num_ctx` 不同會使 Ollama 重新載入模型。
+- **不用 Google News RSS**:2024 年後其連結改為編碼過的內部網址,抓不到原文,改用 Yahoo Finance RSS。
+
+### 測試與評估
+
+- **pytest 套件**:`tests/` 下共 38 個 `test_*.py`,不呼叫真實的 Ollama 或網路;mock 一律使用 `monkeypatch` 與標準庫 `unittest.mock`。
+- **評估腳本**(打真實資料庫或模型,不被 pytest 收集):`tests/eval_extract_filters.py`(`extract_filters` 對固定題組的逐欄正確率)、`eval_rag_retrieval.py`(`search_knowledge_base` 的檢索規則依類別是否生效)、`eval_multiturn_market.py`(多輪追問時,問美股是否仍撈回台股資料)。
+- **量測腳本**:`bench_retrieve.py`(`retrieve_context` 並行 vs 循序、快取 vs 無快取的耗時)、`bench_chunk_tokens.py`(不同 `CHUNK_SIZE` 下 chunk 的 token 分佈)、`bench_adr_premium.py`(模型是否照抄程式算好的 ADR 溢價與 EPS 等值)、`bench_cross_market_guard.py`(跨市場防線規則掛在哪一欄最有效)。
+- 執行指令請見 [README](../README.md) 的「測試」一節。
 
 ### 已知限制
 
 各項細節請見 [MAINTENANCE_LOG](MAINTENANCE_LOG.md)。
 
-- **本地硬體上的回應時間為 186–470 秒**:qwen3.5:9b 透過 Ollama 約每秒 10 字元,光是讀取 11k token 的 prompt 就需約 130 秒;此為硬體限制,非架構問題。
+- **本機硬體上回應較慢**:屬硬體限制,詳見上方「執行環境與回應時間」。
 - **台股財報文字敘述依賴爬取 MOPS**:MOPS 無官方 API,失效時管理層討論、風險與展望會缺漏;數字部分不受影響。
 - **金融業查不到 API 數字**:官方 OpenAPI 僅涵蓋一般業,金融相關業別只能使用 MOPS 這一軌。
 - 回答品質受本地模型限制,數字請對照引用來源確認。
