@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finance AI Assistant Demo</title>
+<style>
+:root{--bg:#f6f6f4;--fg:#1d1d1b;--muted:#6b6b66;--card:#fff;--line:#e2e2dc;--accent:#2b6cb0;--accent-soft:#e6eef8;--user:#2b6cb0;--user-fg:#fff;--ok:#2f855a;--hot:#d9731f;--seg:#9aa7b5}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ececea;--muted:#9a9a94;--card:#222220;--line:#383835;--accent:#7ab3f0;--accent-soft:#25344a;--user:#35629e;--ok:#5cc08a;--hot:#f0963f;--seg:#6c7a8a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 system-ui,-apple-system,"Noto Sans TC",sans-serif}
+main{max-width:860px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:1.4rem;line-height:1.3;margin:0 0 6px}
+.intro{margin:0 0 4px}
+.note{color:var(--muted);font-size:.86rem;margin:0 0 18px}
+a{color:var(--accent)}
+#qs{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:10px;margin-bottom:18px}
+.q{font:inherit;cursor:pointer;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;text-align:left;display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+.q:hover{border-color:var(--accent)}
+.q.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.chip{font-size:.74rem;line-height:1.5;color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:0 10px}
+#bar{position:sticky;top:0;z-index:5;padding:8px 0;margin:0 0 4px;text-align:right;pointer-events:none}
+#skip{pointer-events:auto;font:inherit;font-size:.85rem;cursor:pointer;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:3px 14px;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.bubble{background:var(--user);color:var(--user-fg);border-radius:14px 14px 4px 14px;padding:10px 14px;margin:0 0 14px auto;width:fit-content;max-width:90%}
+ol.steps{list-style:none;margin:0;padding:0}
+.step{display:grid;grid-template-columns:22px 1fr auto;column-gap:10px;position:relative;padding-bottom:10px;animation:in .25s}
+.step:not(:last-child)::before{content:"";position:absolute;left:10px;top:22px;bottom:0;width:2px;background:var(--line)}
+.ico{width:22px;height:22px;border-radius:50%;background:var(--ok);color:#fff;font-size:.8rem;line-height:22px;text-align:center}
+.step .t{font-size:.92rem;line-height:22px;min-width:0}
+.step .t small{color:var(--muted);font-size:.84rem;margin-left:6px;overflow-wrap:anywhere}
+.step .d{font-size:.86rem;line-height:22px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.step.hot .d{color:var(--hot);font-weight:600}
+@keyframes in{from{opacity:0;transform:translateY(4px)}}
+#sum{margin:6px 0 4px;animation:in .3s}
+#sum:empty{display:none}
+.stack{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--line);gap:2px}
+.stack i{display:block;min-width:3px;background:var(--seg)}
+.stack i.hot{background:var(--hot)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.8rem;color:var(--muted);margin-top:6px}
+.legend span::before{content:"";display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--seg);margin-right:5px}
+.legend span.hot::before{background:var(--hot)}
+.total{font-size:.9rem;margin-top:6px}
+.total b{font-variant-numeric:tabular-nums}
+#ans{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px 16px;margin-top:14px;overflow-wrap:anywhere}
+#ans:empty{display:none}
+#ans table,#ans pre{display:block;overflow-x:auto;max-width:100%}
+#ans table{border-collapse:collapse}
+#ans th,#ans td{border:1px solid var(--line);padding:4px 8px;min-width:120px;vertical-align:top}
+#ans a.cite{font-size:.74rem;text-decoration:none;color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:0 7px;margin:0 1px;white-space:nowrap;vertical-align:1px}
+#ans a.cite:hover{text-decoration:underline}
+#charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:12px;margin-top:14px}
+.chart{background:#fcfcfb;border:1px solid var(--line);border-radius:12px;padding:6px;min-width:0;min-height:372px;overflow:hidden}
+</style>
+</head>
+<body>
+<main>
+<h1>Finance AI Assistant — Demo 重播</h1>
+<p class="intro">本機 LLM（qwen3.5:9b）+ LangGraph + pgvector 的個股財報／新聞 RAG 助理，以下為真實問答重播。
+  <a href="https://github.com/thelilywang/finance-ai-assistant" target="_blank" rel="noopener">GitHub</a></p>
+<p class="note" id="note">載入中…</p>
+<div id="qs"></div>
+<div id="bar"><button id="skip" hidden>跳過動畫</button></div>
+<div id="out"></div>
+<div id="sum"></div>
+<div id="ans"></div>
+<div id="charts"></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.30.1/plotly.min.js"></script>
+<script>
+const LABEL={rewrite_question:"改寫問題",extract_filters:"解析問題",resolve_market:"判斷市場",ask_market:"確認市場",picker:"雙掛牌選擇",
+  agent:"判斷是否補抓資料",tools:"補抓財報／新聞",assemble:"檢索並整理資料",generate:"生成回答",no_result:"查無資料",off_topic:"非財經問題"};
+const P=new URLSearchParams(location.search),INSTANT=P.has("instant");
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,INSTANT?0:ms));
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+// 工具名稱換成人話（資料裡存的是原始呼叫）
+const detail=d=>d.replace(/search_knowledge_base\(([^)]*)\)/g,"檢索「$1」").replace(/fetch_company_data\(([^)]*)\)/g,"補抓 $1 財報／新聞").replace(/^呼叫 /,"");
+const secs=ms=>ms<1000?"<1 秒":(ms/1000).toFixed(1)+" 秒";
+let data,run=0,skipped=false;
+// 回答裡的「2.34~2.70」會被 GFM 當刪除線；關掉 del 語法（本站不需要刪除線）
+marked.use({tokenizer:{del(){return undefined}}});
+
+function render(md){
+  const d=document.createElement("div");
+  d.innerHTML=DOMPurify.sanitize(marked.parse(md));
+  d.querySelectorAll("a").forEach(a=>{
+    a.target="_blank";a.rel="noopener";
+    const m=a.textContent.trim().match(/^\[?(來源\s?\d+)\]?$/);
+    if(m){a.className="cite";a.textContent=m[1].replace(/\s/g,"")}
+  });
+  return d.innerHTML;
+}
+
+// 同名節點（agent 多輪）合併成一段，generate 以外都用同一個中性色
+function summary(it){
+  const tot=it.timeline.reduce((s,t)=>s+t.duration_ms,0)||1,seg={};
+  it.timeline.forEach(t=>{const k=LABEL[t.node]||t.node;seg[k]=(seg[k]||0)+t.duration_ms});
+  const rows=Object.entries(seg).filter(([,v])=>v>0),hot=k=>k===LABEL.generate?" hot":"";
+  return `<div class="stack">${rows.map(([k,v])=>`<i class="${hot(k).trim()}" style="flex:${v}" title="${esc(k)} ${secs(v)}"></i>`).join("")}</div>`
+    +`<div class="legend">${rows.map(([k,v])=>`<span class="${hot(k).trim()}">${esc(k)} ${secs(v)}</span>`).join("")}</div>`
+    +`<div class="total">實際總耗時 <b>${it.total_secs}</b> 秒　本機 qwen3.5:9b 生成佔 ${Math.round((seg[LABEL.generate]||0)/tot*100)}%</div>`;
+}
+
+async function play(i){
+  const my=++run;skipped=false;
+  const it=data.items[i],live=()=>my===run,fast=()=>skipped||INSTANT;
+  document.querySelectorAll(".q").forEach((b,k)=>b.classList.toggle("on",k===i));
+  const out=$("out"),ans=$("ans");
+  out.innerHTML=`<div class="bubble">${esc(it.question)}</div><ol class="steps"></ol>`;
+  ans.innerHTML="";$("charts").innerHTML="";$("sum").innerHTML="";$("skip").hidden=false;
+  const ol=out.querySelector("ol"),top=Math.max(0,...it.timeline.map(t=>t.duration_ms));
+  for(const t of it.timeline){
+    const li=document.createElement("li");
+    li.className="step"+(t.duration_ms===top&&t.duration_ms>10000?" hot":"");
+    li.innerHTML=`<span class="ico">✓</span><span class="t">${esc(LABEL[t.node]||t.node)}${t.detail?`<small>${esc(detail(t.detail))}</small>`:""}</span>`
+      +`<span class="d">${t.duration_ms>0?"實際 "+secs(t.duration_ms):""}</span>`;
+    ol.appendChild(li);
+    if(!fast()) await sleep(400); if(!live())return;
+  }
+  $("sum").innerHTML=summary(it);
+  // 串流：依長度分塊 progressive render，總長約 2.5 秒
+  const md=it.answer_md,size=Math.ceil(md.length/25);
+  for(let p=size;p<md.length&&!fast();p+=size){
+    ans.innerHTML=render(md.slice(0,p));await sleep(100);if(!live())return;
+  }
+  ans.innerHTML=render(md);
+  // 先把所有卡片放進 grid 再畫，寬度才量得準；之後交給 ResizeObserver
+  const boxes=it.charts.map(()=>{const b=document.createElement("div");b.className="chart";$("charts").appendChild(b);return b});
+  it.charts.forEach((c,k)=>{
+    const f=c.figure;f.layout=Object.assign(f.layout||{},{autosize:true,height:360});delete f.layout.width;
+    Plotly.newPlot(boxes[k],f.data,f.layout,{responsive:true,displaylogo:false});
+  });
+  $("skip").hidden=true;
+}
+
+new ResizeObserver(()=>document.querySelectorAll(".chart.js-plotly-plot").forEach(el=>Plotly.Plots.resize(el))).observe($("charts"));
+
+fetch("data.json").then(r=>r.json()).then(d=>{
+  data=d;
+  $("note").textContent=`重播真實問答紀錄；本機 qwen3.5:9b 實際耗時以數字標示，重播時略過等待。圖表為 ${d.charts_generated_at} 以 yfinance 重新產生。`;
+  d.items.forEach((it,i)=>{
+    const b=document.createElement("button");b.className="q";
+    b.innerHTML=`<span class="chip">${esc(it.tag||"")}</span><span>${esc(it.question)}</span>`;
+    b.onclick=()=>play(i);$("qs").appendChild(b);
+  });
+  $("skip").onclick=()=>{skipped=true};
+  play(Math.max(0,d.items.findIndex(x=>x.id===P.get("q"))));
+}).catch(e=>{$("note").textContent="載入失敗："+e});
+</script>
+</body>
+</html>
