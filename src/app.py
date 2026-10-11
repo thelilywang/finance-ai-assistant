@@ -19,7 +19,7 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
 from src import config, tracing
-from src.graph import append_disclaimer, build_graph, is_fetching, unique_sources
+from src.graph import _side_by_side, append_disclaimer, build_graph, is_fetching, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.logging_setup import setup_logging
 from src.tickers import is_tw_ticker
@@ -351,7 +351,7 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
 
     # 真資料圖表：同一份 figures 供互動顯示與 PDF 嵌入，生成失敗不影響文字回答
     figures = []
-    companies = final_state.get("companies") or []
+    companies = _side_by_side(final_state)  # 雙掛牌選 both 時一併畫 peer（ADR）
     for company in companies:
         for name, fn in (("price", price_chart), ("eps", eps_chart)):
             try:
