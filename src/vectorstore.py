@@ -19,9 +19,7 @@ def _configure(conn: psycopg.Connection) -> None:
 
 
 # open=False：延遲到第一次真的要用連線才連 DB，避免 import 這個模組就連線
-# timeout=2：DB 連不上時 2 秒內放棄（原本 psycopg.connect() 是毫秒級失敗，
-# ConnectionPool 預設 timeout=30 秒會讓「DB 沒開」的降級路徑變得很慢；
-# 正常連線本該在毫秒等級完成，2 秒內連不上代表 DB 真的掛了，拖久也救不回來）
+# timeout：ConnectionPool 預設 30 秒會讓「DB 沒開」的降級路徑變得很慢，故調短（值見下方）
 pool = ConnectionPool(
     config.DATABASE_URL,
     # max_size=6：並行檢索最多同時開 3 條（主檢索、同公司新聞、最新財報），
@@ -30,7 +28,13 @@ pool = ConnectionPool(
     kwargs={"autocommit": True},
     configure=_configure,
     open=False,
-    timeout=2,
+    # 原為 2：主機吃滿時（Ollama 生成＋langfuse clickhouse 500% CPU）新建連線偶爾超過 2 秒，
+    # MCP 回「couldn't get a connection after 2.00 sec」，整批檢索落空（2026-10-10 實錄三次）。
+    # 平時建連 40-420ms 實測；10 秒仍遠短於一題數分鐘的總耗時，DB 真掛時多等 8 秒可接受
+    timeout=10,
+    # check：借出前先驗連線還活著。閒置後被斷的連線原本會直接發給請求，
+    # 丟棄重建趕不上 2 秒 timeout，整批檢索落成查無資料（2026-10-10 MCP 實測兩次）
+    check=ConnectionPool.check_connection,
 )
 
 
