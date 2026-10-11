@@ -73,7 +73,11 @@ async def starters(user=None, language=None):
 
 
 def _clean_url(source: str) -> str | None:
-    """http(s) URL 回傳去 query/fragment 的乾淨 URL；其他（EDGAR/本地檔）回 None。"""
+    """http(s) URL 回傳去 query/fragment 的乾淨 URL；EDGAR/SEC-XBRL 回該 ticker 的申報列表；其他回 None。"""
+    # ponytail: source 只帶 ticker+accession，沒有 CIK（路徑式申報網址要正確 CIK，猜錯 404），
+    # 故連到 ticker 查詢的申報列表；要直達單份申報需把 CIK 寫進 source。
+    if source.startswith(("EDGAR:", "SEC-XBRL:")):
+        return f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={source.split(':')[1]}&owner=include&count=40"
     if source.startswith(("http://", "https://")):
         split = urlsplit(source)
         return f"{split.scheme}://{split.netloc}{split.path}"
@@ -81,12 +85,16 @@ def _clean_url(source: str) -> str | None:
 
 
 # ponytail: 有 DB title 就用真標題，沒有（舊資料）才退回 URL slug 當 fallback
-def _format_source(source: str, title: str | None = None) -> str:
-    """把原始來源字串轉成可讀的 markdown（EDGAR/本地檔案/URL）。"""
-    if source.startswith("EDGAR:"):
-        parts = source.split(":")
-        ticker = parts[1] if len(parts) > 1 else ""
-        return f"SEC EDGAR filing ({ticker})" if ticker else "SEC EDGAR filing"
+def _format_source(source: str, title: str | None = None, published: str | None = None) -> str:
+    """把原始來源字串轉成可讀的 markdown（EDGAR/SEC-XBRL/TWSE-API/本地檔案/URL）。
+    published 用來區分同一 ticker 的不同申報。"""
+    prefix, _, rest = source.partition(":")
+    if prefix in ("EDGAR", "SEC-XBRL"):
+        name = "SEC EDGAR filing" if prefix == "EDGAR" else "SEC XBRL financials"
+        detail = ", ".join(x for x in (rest.split(":")[0], published) if x)
+        return f"[{name} ({detail})]({_clean_url(source)})"
+    if prefix == "TWSE-API":
+        return f"TWSE financials ({rest.replace(':', ', ')})"
 
     clean_url = _clean_url(source)
     if clean_url:
@@ -106,6 +114,17 @@ def _format_source(source: str, title: str | None = None) -> str:
 
     # 本地路徑：只留檔名
     return source.rsplit("/", 1)[-1]
+
+
+def _source_meta(retrieved: list[dict]) -> tuple[dict, dict]:
+    """依 source 取第一個 title / published_at。"""
+    titles, dates = {}, {}
+    for doc in retrieved:
+        if doc.get("title"):
+            titles.setdefault(doc["source"], doc["title"])
+        if doc.get("published_at"):
+            dates.setdefault(doc["source"], str(doc["published_at"])[:10])
+    return titles, dates
 
 
 def _link_citations(body: str, label: str, lang: str, urls: list[str | None]) -> str:
@@ -316,11 +335,8 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
     body = _link_citations(msg.content, label, content_lang, urls)
     msg.content = body
 
-    titles = {}
-    for doc in final_state["retrieved"]:
-        if doc.get("title") and doc["source"] not in titles:
-            titles[doc["source"]] = doc["title"]
-    source_list = "\n".join(f"{i}. {_format_source(s, titles.get(s))}" for i, s in enumerate(unique, start=1))
+    titles, dates = _source_meta(final_state["retrieved"])
+    source_list = "\n".join(f"{i}. {_format_source(s, titles.get(s), dates.get(s))}" for i, s in enumerate(unique, start=1))
     await msg.stream_token(f"\n\n---\n**{t(content_lang, 'sources_label')}:**\n{source_list}")
 
     now = dt.datetime.now()
