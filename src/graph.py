@@ -1041,6 +1041,13 @@ def _fresh_limit(state: GraphState) -> int:
     return 0 if days is not None and days <= 7 else 3
 
 
+def _fetched_companies(state: GraphState) -> set[str]:
+    """本輪已呼叫過 fetch_company_data 的公司（大寫 ticker），從 AIMessage.tool_calls 讀。"""
+    return {str((tc.get("args") or {}).get("ticker", "")).strip().upper()
+            for m in state["messages"] if isinstance(m, AIMessage)
+            for tc in m.tool_calls if tc.get("name") == "fetch_company_data"}
+
+
 def _stale_companies(state: GraphState) -> tuple[list[tuple[str, int]], list[str]]:
     """多標的時逐家判斷新鮮度，回傳（過期的家與其天數, 完全沒檢索到的家）。
 
@@ -1052,13 +1059,20 @@ def _stale_companies(state: GraphState) -> tuple[list[tuple[str, int]], list[str
     ages 為 None（補抓後尚未檢索）時兩者皆回空：沒有可判斷的檢索就不指名，
     交還 LLM 依 tool 說明自行先查庫，否則每家都會落進 missing，變成叫模型
     重抓剛抓完的公司、或在首輪還沒查庫時就白白補抓。
+
+    本輪已補抓過的公司不列入 stale/missing：補抓再多次也產不出更新的資料。
+    實測 2026-10-10 NVDA 新聞 19 天，補抓成功但「跳過 10 篇已入庫」寫入 0 筆，
+    重查仍是同樣的 19 天，被反覆指名補抓到輪數上限，白花 3 分鐘以上。
     """
     ages = _news_ages_by_company(state)
     if ages is None:
         return [], []
     limit = _fresh_limit(state)
     stale, missing = [], []
+    done = _fetched_companies(state)
     for c in state.get("companies") or []:
+        if c.upper() in done:
+            continue
         if not ages.get(c):
             missing.append(c)
         elif min(ages[c]) > limit:
@@ -1264,6 +1278,12 @@ def route_after_tools(state: GraphState) -> str:
     limit = _fresh_limit(state)
     if min(ages) <= limit:
         log.info("新聞夠新，跳過 agent 決策", extra={"fields": {
+            "node": "tools", "news_age_days": min(ages), "limit": limit}})
+        return "assemble"
+    # 唯一的公司本輪已補抓過：資料已是庫內最新，再回 agent 只會重複補抓（見 _stale_companies，
+    # 實測 2026-10-10 NVDA 19 天、補抓 0 筆新資料，空轉到輪數上限）
+    if _fetched_companies(state) & {c.upper() for c in state.get("companies") or []}:
+        log.info("已補抓過，跳過 agent 決策", extra={"fields": {
             "node": "tools", "news_age_days": min(ages), "limit": limit}})
         return "assemble"
     return "agent"

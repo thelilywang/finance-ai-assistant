@@ -263,3 +263,38 @@ def test_round_limit_forces_assemble():
     # 差一輪時不收工，確認上限值本身有生效而不是恆為 assemble
     under = at_limit[:-1] + [_ai_call("search_knowledge_base", "x")]
     assert agent_route({"messages": under[:graph._MAX_TOOL_ROUNDS - 1]}) == "tools"
+
+
+# --- 已補抓過的公司不得再被判過期：補抓不出新資料時重查仍舊（實測 2026-10-10 NVDA 19 天）---
+
+def _fetched_stale(docs, companies, ticker="nvda"):
+    return _state([
+        _ai_call_ticker(ticker),
+        ToolMessage(content="跳過 10 篇已入庫", name="fetch_company_data", tool_call_id="f"),
+        _search(docs, "3"),
+    ], companies=companies)
+
+
+def _ai_call_ticker(ticker):
+    return AIMessage(content="", tool_calls=[
+        {"name": "fetch_company_data", "args": {"ticker": ticker}, "id": "f"}])
+
+
+def test_single_company_already_fetched_goes_assemble():
+    st = _fetched_stale([_doc("news", 19, 1, "NVDA")], ["NVDA"])
+    assert route_after_tools(st) == "assemble"  # ticker 大小寫不同也要認
+
+
+def test_multi_company_stale_but_fetched_goes_assemble():
+    docs = [_doc("news", 19, 1, "NVDA"), _doc("news", 1, 2, "AAPL")]
+    st = _fetched_stale(docs, ["NVDA", "AAPL"])
+    assert _stale_companies(st) == ([], [])
+    assert route_after_tools(st) == "assemble"
+
+
+def test_stale_not_fetched_still_goes_agent():
+    # 迴歸：沒補抓過（或只補抓別家）仍交還 agent
+    docs = [_doc("news", 19, 1, "NVDA")]
+    assert route_after_tools(_state([_search(docs)], companies=["NVDA"])) == "agent"
+    other = _fetched_stale(docs, ["NVDA"], ticker="AAPL")
+    assert route_after_tools(other) == "agent"
