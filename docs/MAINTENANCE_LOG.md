@@ -8,8 +8,7 @@
 
 ## 待辦
 
-1. **靜態互動式 demo 重播頁**（`README.md:12-13`、`:136-137` 目前為 TODO）
-   挑 3-5 題真實問答做成可點選重播的單頁（節點進度、答案、`[來源N]`、圖表），重播時略過實際等待時間，部署於 GitHub Pages 並可嵌入個人網站；完成後補上 README 的 Demo／Screenshot 區塊。
+目前無待辦項目。靜態 demo 重播頁已於 2026-10-10 完成（詳見該章節第一節）。
 
 ## 已知限制
 
@@ -18,6 +17,9 @@
 - **`market IS NULL` 殘留 165 筆**——cmoney 137 筆須重新抓取才能修正；udn／cnyes 28 筆來自未納管版面。詳見 2026-09-21 章節第三節。
 - **`_select_exhibit` 取最大 htm 的啟發式**（`src/update.py`）——目前未出現誤選，並以入庫字數警示作為後備防線。詳見 2026-09-09 章節。
 - **mcp-server 不對外開 port**——僅供 `app` 經 docker 內部網路連線；Bearer token 驗證已備妥，待有外部 client 需求再開放。詳見 2026-09-19 章節第七節。
+- **補抓時效仍以檢索回來的 top-k chunk 判斷，而非 DB 內最新新聞**（`route_after_tools`）——第一次檢索可能多一次不必要的補抓；本輪補抓過的公司不再判過期，以此避免反覆補抓。詳見 2026-10-10 章節第二節。
+- **EDGAR／XBRL 來源連結只到該公司申報列表**——source 字串不含 CIK，無法直連單份申報。詳見 2026-10-10 章節第二節。
+- **無簡轉繁後處理**——模型偶爾殘留簡體字，demo 答案未手改；可考慮 OpenCC，需新增依賴，尚未做。詳見 2026-10-10 章節第一節。
 
 ## 後續方向
 
@@ -615,3 +617,34 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | 跨幣別、同季、單位與 EDGAR 口徑修正 | `fd53762`、`55d943b`、`ecccd9f`、`8e7e6df`、`1a78078` |
 | 台股累計 EPS 標示 | `d8a8dd4`、`a333c3d` |
 | 決策卡用詞與檢索過濾 | `042d1f4`、`db89527` |
+
+---
+
+## 2026-10-10　靜態 demo 重播頁與錄製中發現的問題修正　`工程品質` `LangGraph`
+
+同一條線：先做 demo 重播頁（原待辦一），錄製真實問答時連帶踩出補抓、檢索連線、來源顯示與雙掛牌圖表四個缺陷，一併修掉。
+
+### 一、靜態 demo 重播頁
+
+`docs/demo/` 是純靜態頁（`index.html` 加 `data.json`），由 GitHub Pages 自 main 的 `/docs` 發布：<https://thelilywang.github.io/finance-ai-assistant/demo/>，`?q=<id>` 指定題目、`?instant` 略過動畫。收錄 4 題真實問答（美股財報、雙掛牌 ADR 含反問選 both、新聞、NVDA 對 GOOGL 多標的比較），重播節點進度與每節點實測耗時、答案、可點的 `[來源N]` 與 yfinance 圖表。實測總耗時 333～644 秒，與 README 的延遲說明一致。錄製腳本 `scripts/record_demo.py` 鏡像 `app.py` 的串流與來源組裝，在 app 容器內執行。
+
+**已知限制**：答案是模型原始輸出、未手改，仍有瑕疵——tsmc-adr 一處引用來源與內容不符、殘留兩個簡體字，nvda 有市場數據被誤標為新聞來源。專案沒有簡轉繁後處理（可考慮 OpenCC，需新增依賴，未做）。
+
+### 二、錄製中發現並修正的四個問題
+
+- **補抓迴圈**：新聞時效看的是檢索回來的 top-k chunk。NVDA 補抓後寫入 0 筆（文章早已入庫），top-k 仍舊、公司持續被判過期，agent 反覆補抓到 4 輪上限。修法（`src/graph.py` 的 `route_after_tools`）：本輪已呼叫過 `fetch_company_data` 的公司不再判過期，單一公司已補抓過就直接進 `assemble`。**已知限制**：時效仍以 top-k 而非 DB 最新新聞判斷，第一次可能仍有一次不必要的補抓。
+- **檢索偶發落空（「解析檢索結果失敗」）**：兩個獨立原因。(a) 連線池把閒置後被斷開的連線直接借出，加上 `check=ConnectionPool.check_connection`；A/B 手動終止後端連線，無 check 失敗（`AdminShutdown`）、有 check 正常。(b) MCP 回「couldn't get a connection after 2.00 sec」被當成 JSON 解析失敗，推測是主機滿載（Ollama 生成加 Langfuse 的 clickhouse 約 560% CPU）時建新連線超過 2 秒（未在滿載下重現）；平時建連實測 40～420ms，`timeout` 由 2 秒調為 10 秒。**取捨**：真正的 DB 故障多等最長 8 秒才報錯（推翻 09-03「2 秒內連不上即代表 DB 已掛」的假設——滿載主機上慢不等於掛）。
+- **來源清單可讀性**（`src/app.py`）：SEC-XBRL、TWSE-API 的原始字串改為可讀名稱（如「SEC XBRL financials (NVDA, 2026-08-26)」「TWSE financials (2330, 115Q2)」）；EDGAR／XBRL 帶申報日期以區分不同申報，連結指向該公司 EDGAR 申報列表。**已知限制**：source 字串不含 CIK，無法直連單份申報。
+- **雙掛牌選 both 時圖表漏 ADR**：圖表只畫台股，改用 `_side_by_side`（與 09-24 行情抓取同一個代號來源），正式環境同受影響。
+
+測試 292 passed、4 skipped。
+
+### 改動內容
+
+| 項目 | 改動說明 | commit |
+|---|---|---|
+| demo 重播頁與錄製腳本 | `docs/demo/`、`scripts/record_demo.py`，README 補 Demo／截圖 | `8125c19` |
+| 補抓迴圈 | `route_after_tools`、`_fetched_companies`、`_stale_companies` | `37c1b0e` |
+| 連線池 | `check_connection` 與 `timeout` 2→10 秒（`src/vectorstore.py`） | `41ff5f8` |
+| 來源清單顯示 | `_format_source`、`_clean_url`、`_source_meta` | `b72b28b` |
+| 雙掛牌圖表 | 改用 `_side_by_side` | `14dcdc2` |
