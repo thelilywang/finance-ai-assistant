@@ -133,7 +133,7 @@ For architecture, design decisions, and the full AI Product Case Study (CRISP-DM
 針對個股的財報/新聞 RAG 問答助理,用 LangGraph + Ollama(本地 LLM)+ pgvector 打造。
 所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。單題回應約 186～470 秒,原因是本機 `qwen3.5:9b` 每秒約生成 10 字,屬硬體限制而非架構問題。
 
-**Demo:** [4 題真實問答重播](https://thelilywang.github.io/finance-ai-assistant/demo/)
+**Demo:** [4 題真實問答重播](https://thelilywang.github.io/finance-ai-assistant/demo/?lang=zh)
 **截圖:** ![demo 截圖](docs/demo/screenshot.png)
 
 ### 快速開始

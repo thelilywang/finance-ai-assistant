@@ -11,6 +11,10 @@
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 system-ui,-apple-system,"Noto Sans TC",sans-serif}
 main{max-width:860px;margin:0 auto;padding:24px 16px 48px}
 h1{font-size:1.4rem;line-height:1.3;margin:0 0 6px}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+#lang{display:flex;flex:none;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--card)}
+#lang button{font:inherit;font-size:.82rem;cursor:pointer;color:var(--fg);background:none;border:0;padding:3px 12px}
+#lang button.on{background:var(--accent);color:#fff}
 .intro{margin:0 0 4px}
 .note{color:var(--muted);font-size:.86rem;margin:0 0 18px}
 a{color:var(--accent)}
@@ -54,12 +58,14 @@ ol.steps{list-style:none;margin:0;padding:0}
 </head>
 <body>
 <main>
-<h1>Finance AI Assistant — Demo 重播</h1>
-<p class="intro">本機 LLM（qwen3.5:9b）+ LangGraph + pgvector 的個股財報／新聞 RAG 助理，以下為真實問答重播。
+<div class="top"><h1 id="title"></h1>
+<div id="lang"><button data-l="en">EN</button><button data-l="zh">中文</button></div></div>
+<p class="intro"><span id="intro"></span>
   <a href="https://github.com/thelilywang/finance-ai-assistant" target="_blank" rel="noopener">GitHub</a></p>
-<p class="note" id="note">載入中…</p>
+<p class="note" id="note"></p>
+<p class="note" id="xl" style="margin-top:-12px"></p>
 <div id="qs"></div>
-<div id="bar"><button id="skip" hidden>跳過動畫</button></div>
+<div id="bar"><button id="skip" hidden></button></div>
 <div id="out"></div>
 <div id="sum"></div>
 <div id="ans"></div>
@@ -69,16 +75,37 @@ ol.steps{list-style:none;margin:0;padding:0}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.30.1/plotly.min.js"></script>
 <script>
-const LABEL={rewrite_question:"改寫問題",extract_filters:"解析問題",resolve_market:"判斷市場",ask_market:"確認市場",picker:"雙掛牌選擇",
-  agent:"判斷是否補抓資料",tools:"補抓財報／新聞",assemble:"檢索並整理資料",generate:"生成回答",no_result:"查無資料",off_topic:"非財經問題"};
-const P=new URLSearchParams(location.search),INSTANT=P.has("instant");
+const TX={
+zh:{title:"Finance AI Assistant — Demo 重播",
+  intro:"本機 LLM（qwen3.5:9b）+ LangGraph + pgvector 的個股財報／新聞 RAG 助理，以下為真實問答重播。",
+  note:d=>`重播真實問答紀錄；本機 qwen3.5:9b 實際耗時以數字標示，重播時略過等待。圖表為 ${d.charts_generated_at} 以 yfinance 重新產生。`,
+  skip:"跳過動畫",actual:"實際 ",sec:"秒",lt1:"<1 秒",total:"實際總耗時",gen:"本機 qwen3.5:9b 生成佔",fail:"載入失敗：",
+  LABEL:{rewrite_question:"改寫問題",extract_filters:"解析問題",resolve_market:"判斷市場",ask_market:"確認市場",picker:"雙掛牌選擇",
+  agent:"判斷是否補抓資料",tools:"補抓財報／新聞",assemble:"檢索並整理資料",generate:"生成回答",no_result:"查無資料",off_topic:"非財經問題"}},
+en:{title:"Finance AI Assistant — Demo Replay",
+  intro:"Replay of real Q&A runs from a local-LLM (qwen3.5:9b) + LangGraph + pgvector RAG assistant for stock filings and news.",
+  note:d=>`Replay of recorded real runs. Durations are the actual wall-clock times on a local qwen3.5:9b; the replay skips the waiting. Charts were regenerated from yfinance on ${d.charts_generated_at}.`,
+  xl:"Answers translated from the original Chinese run; timings, sources and charts are unchanged.",
+  skip:"Skip animation",actual:"Actual ",sec:"s",lt1:"<1 s",total:"Actual total time",gen:"Local qwen3.5:9b generation takes",fail:"Failed to load: ",
+  LABEL:{rewrite_question:"Rewrite question",extract_filters:"Parse question",resolve_market:"Resolve market",ask_market:"Confirm market",picker:"Dual-listing choice",
+  agent:"Decide whether to fetch",tools:"Fetch filings / news",assemble:"Retrieve & assemble",generate:"Generate answer",no_result:"No data found",off_topic:"Off-topic"}}};
+let L=P0().get("lang")==="zh"?"zh":"en";
+function P0(){return new URLSearchParams(location.search)}
+const P=P0(),INSTANT=P.has("instant");
 const $=id=>document.getElementById(id);
 const sleep=ms=>new Promise(r=>setTimeout(r,INSTANT?0:ms));
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-// 工具名稱換成人話（資料裡存的是原始呼叫）
-const detail=d=>d.replace(/search_knowledge_base\(([^)]*)\)/g,"檢索「$1」").replace(/fetch_company_data\(([^)]*)\)/g,"補抓 $1 財報／新聞").replace(/^呼叫 /,"");
-const secs=ms=>ms<1000?"<1 秒":(ms/1000).toFixed(1)+" 秒";
-let data,run=0,skipped=false;
+const T=()=>TX[L],LABEL=()=>T().LABEL;
+// 工具名稱換成人話（資料裡存的是原始呼叫，依該題錄製語言轉換）
+const detail=(d,q)=>L==="en"
+  ?d.replace(/^呼叫 /,"").replace(/^標的：/,"Tickers: ").replace(/^(\d+) 個工具回傳$/,(_,n)=>n+(n==="1"?" tool result":" tool results")).replace(/^取得 (\d+) 段資料$/,"$1 chunks retrieved")
+    .replace(/^回答 (\d+) 字$/,"Answer: $1 chars").replace("不需補抓","No extra fetch needed").replace("使用者選擇：台股與 ADR 都要","User chose: both Taiwan and ADR")
+    .replace(/search_knowledge_base\(([^)]*)\)/g,(_,x)=>`Search “${(q||{})[x]||x}”`).replace(/fetch_company_data\(([^)]*)\)/g,"Fetch $1 filings / news").replace(/、/g,", ")
+  :d.replace(/search_knowledge_base\(([^)]*)\)/g,"檢索「$1」").replace(/fetch_company_data\(([^)]*)\)/g,"補抓 $1 財報／新聞").replace(/^呼叫 /,"");
+// 目前語言的檢視：英文為翻譯（問題/tag/答案）與英文標題圖表；時間軸、來源、數值同一份
+const V=it=>L==="en"&&it.en?{...it.en,charts:it.charts_en||it.charts}:it;
+const secs=ms=>ms<1000?T().lt1:(ms/1000).toFixed(1)+" "+T().sec;
+let data,items=[],run=0,skipped=false;
 // 回答裡的「2.34~2.70」會被 GFM 當刪除線；關掉 del 語法（本站不需要刪除線）
 marked.use({tokenizer:{del(){return undefined}}});
 
@@ -87,8 +114,8 @@ function render(md){
   d.innerHTML=DOMPurify.sanitize(marked.parse(md));
   d.querySelectorAll("a").forEach(a=>{
     a.target="_blank";a.rel="noopener";
-    const m=a.textContent.trim().match(/^\[?(來源\s?\d+)\]?$/);
-    if(m){a.className="cite";a.textContent=m[1].replace(/\s/g,"")}
+    const m=a.textContent.trim().match(/^\[?((?:來源|Source)\s?\d+)\]?$/);
+    if(m){a.className="cite";a.textContent=m[1].replace(/^來源\s/,"來源")}
   });
   return d.innerHTML;
 }
@@ -96,39 +123,39 @@ function render(md){
 // 同名節點（agent 多輪）合併成一段，generate 以外都用同一個中性色
 function summary(it){
   const tot=it.timeline.reduce((s,t)=>s+t.duration_ms,0)||1,seg={};
-  it.timeline.forEach(t=>{const k=LABEL[t.node]||t.node;seg[k]=(seg[k]||0)+t.duration_ms});
-  const rows=Object.entries(seg).filter(([,v])=>v>0),hot=k=>k===LABEL.generate?" hot":"";
+  it.timeline.forEach(t=>{const k=LABEL()[t.node]||t.node;seg[k]=(seg[k]||0)+t.duration_ms});
+  const rows=Object.entries(seg).filter(([,v])=>v>0),hot=k=>k===LABEL().generate?" hot":"";
   return `<div class="stack">${rows.map(([k,v])=>`<i class="${hot(k).trim()}" style="flex:${v}" title="${esc(k)} ${secs(v)}"></i>`).join("")}</div>`
     +`<div class="legend">${rows.map(([k,v])=>`<span class="${hot(k).trim()}">${esc(k)} ${secs(v)}</span>`).join("")}</div>`
-    +`<div class="total">實際總耗時 <b>${it.total_secs}</b> 秒　本機 qwen3.5:9b 生成佔 ${Math.round((seg[LABEL.generate]||0)/tot*100)}%</div>`;
+    +`<div class="total">${T().total} <b>${it.total_secs}</b> ${T().sec}　${T().gen} ${Math.round((seg[LABEL().generate]||0)/tot*100)}%</div>`;
 }
 
 async function play(i){
   const my=++run;skipped=false;
-  const it=data.items[i],live=()=>my===run,fast=()=>skipped||INSTANT;
+  const it=items[i],v=V(it),live=()=>my===run,fast=()=>skipped||INSTANT;
   document.querySelectorAll(".q").forEach((b,k)=>b.classList.toggle("on",k===i));
   const out=$("out"),ans=$("ans");
-  out.innerHTML=`<div class="bubble">${esc(it.question)}</div><ol class="steps"></ol>`;
+  out.innerHTML=`<div class="bubble">${esc(v.question)}</div><ol class="steps"></ol>`;
   ans.innerHTML="";$("charts").innerHTML="";$("sum").innerHTML="";$("skip").hidden=false;
   const ol=out.querySelector("ol"),top=Math.max(0,...it.timeline.map(t=>t.duration_ms));
   for(const t of it.timeline){
     const li=document.createElement("li");
     li.className="step"+(t.duration_ms===top&&t.duration_ms>10000?" hot":"");
-    li.innerHTML=`<span class="ico">✓</span><span class="t">${esc(LABEL[t.node]||t.node)}${t.detail?`<small>${esc(detail(t.detail))}</small>`:""}</span>`
-      +`<span class="d">${t.duration_ms>0?"實際 "+secs(t.duration_ms):""}</span>`;
+    li.innerHTML=`<span class="ico">✓</span><span class="t">${esc(LABEL()[t.node]||t.node)}${t.detail?`<small>${esc(detail(t.detail,it.en&&it.en.queries))}</small>`:""}</span>`
+      +`<span class="d">${t.duration_ms>0?T().actual+secs(t.duration_ms):""}</span>`;
     ol.appendChild(li);
     if(!fast()) await sleep(400); if(!live())return;
   }
   $("sum").innerHTML=summary(it);
   // 串流：依長度分塊 progressive render，總長約 2.5 秒
-  const md=it.answer_md,size=Math.ceil(md.length/25);
+  const md=v.answer_md,size=Math.ceil(md.length/25);
   for(let p=size;p<md.length&&!fast();p+=size){
     ans.innerHTML=render(md.slice(0,p));await sleep(100);if(!live())return;
   }
   ans.innerHTML=render(md);
   // 先把所有卡片放進 grid 再畫，寬度才量得準；之後交給 ResizeObserver
-  const boxes=it.charts.map(()=>{const b=document.createElement("div");b.className="chart";$("charts").appendChild(b);return b});
-  it.charts.forEach((c,k)=>{
+  const boxes=v.charts.map(()=>{const b=document.createElement("div");b.className="chart";$("charts").appendChild(b);return b});
+  v.charts.forEach((c,k)=>{
     const f=c.figure;f.layout=Object.assign(f.layout||{},{autosize:true,height:360});delete f.layout.width;
     Plotly.newPlot(boxes[k],f.data,f.layout,{responsive:true,displaylogo:false});
   });
@@ -137,17 +164,38 @@ async function play(i){
 
 new ResizeObserver(()=>document.querySelectorAll(".chart.js-plotly-plot").forEach(el=>Plotly.Plots.resize(el))).observe($("charts"));
 
-fetch("data.json").then(r=>r.json()).then(d=>{
-  data=d;
-  $("note").textContent=`重播真實問答紀錄；本機 qwen3.5:9b 實際耗時以數字標示，重播時略過等待。圖表為 ${d.charts_generated_at} 以 yfinance 重新產生。`;
-  d.items.forEach((it,i)=>{
+// 切換語言：同一題 id，更新網址但不重載頁面
+function setLang(l,qid){
+  run++;L=l;
+  const u=new URL(location.href);
+  l==="zh"?u.searchParams.set("lang","zh"):u.searchParams.delete("lang");
+  if(qid)u.searchParams.set("q",qid);
+  history.replaceState(null,"",u);
+  init(qid);
+}
+function init(qid){
+  const d=data;
+  document.documentElement.lang=L==="zh"?"zh-Hant":"en";
+  document.title=T().title;
+  $("title").textContent=T().title;$("intro").textContent=T().intro;$("note").textContent=T().note(d);$("xl").textContent=T().xl||"";$("skip").textContent=T().skip;
+  document.querySelectorAll("#lang button").forEach(b=>b.classList.toggle("on",b.dataset.l===L));
+  items=d.items;
+  $("qs").innerHTML="";$("out").innerHTML="";$("ans").innerHTML="";$("charts").innerHTML="";$("sum").innerHTML="";$("skip").hidden=true;
+  items.forEach((it,i)=>{
     const b=document.createElement("button");b.className="q";
-    b.innerHTML=`<span class="chip">${esc(it.tag||"")}</span><span>${esc(it.question)}</span>`;
+    b.innerHTML=`<span class="chip">${esc(V(it).tag||"")}</span><span>${esc(V(it).question)}</span>`;
     b.onclick=()=>play(i);$("qs").appendChild(b);
   });
-  $("skip").onclick=()=>{skipped=true};
-  play(Math.max(0,d.items.findIndex(x=>x.id===P.get("q"))));
-}).catch(e=>{$("note").textContent="載入失敗："+e});
+  play(Math.max(0,items.findIndex(x=>x.id===qid)));
+}
+document.querySelectorAll("#lang button").forEach(b=>b.onclick=()=>{
+  if(b.dataset.l===L||!data)return;
+  const cur=items[[...document.querySelectorAll(".q")].findIndex(q=>q.classList.contains("on"))];
+  setLang(b.dataset.l,cur&&cur.id);
+});
+$("skip").onclick=()=>{skipped=true};
+$("title").textContent=T().title;$("note").textContent="…";
+fetch("data.json").then(r=>r.json()).then(d=>{data=d;init(P.get("q"))}).catch(e=>{$("note").textContent=T().fail+e});
 </script>
 </body>
 </html>

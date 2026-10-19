@@ -6,6 +6,8 @@
     docker compose run --rm -v $PWD/scripts:/app/scripts -v $PWD/docs:/app/docs \
         app python -m scripts.record_demo            # 全錄
     ... python -m scripts.record_demo tsmc-adr       # 只重錄指定 id，合併進既有 data.json
+    ... python -m scripts.record_demo --charts       # 不跑 graph，只重產圖表（charts=zh、charts_en=en）
+    ... python -m scripts.record_demo --merge-en F.json   # 把英文譯文 {id:{question,tag,answer_md}} 併進各 item["en"]
 """
 from __future__ import annotations
 
@@ -82,14 +84,14 @@ async def _run(graph, state: dict, session_id: str, offset: float) -> tuple[dict
     return final_state, content, timeline
 
 
-def _charts(companies: list[str]) -> list[dict]:
+def _charts(companies: list[str], lang: str = "zh") -> list[dict]:
     from src.charts import eps_chart, price_chart
 
     res = []
     for c in companies:
-        for kind, fn in (("股價", price_chart), ("EPS", eps_chart)):
+        for kind, fn in ((("股價" if lang == "zh" else "Price"), price_chart), ("EPS", eps_chart)):
             try:
-                fig = fn(c)
+                fig = fn(c, lang)
             except Exception as e:  # noqa: BLE001
                 log.warning("圖表生成失敗 %s %s: %s", c, kind, e)
                 continue
@@ -146,6 +148,29 @@ async def record(graph, qid: str, question: str, tag: str) -> dict:
             "total_secs": total, "picker": picker, "timeline": timeline, "answer_md": body, "charts": charts}
 
 
+def _save(items: list[dict], charts_date: str | None = None) -> None:
+    now = dt.date.today().isoformat()
+    OUT.write_text(json.dumps({"generated_at": now, "charts_generated_at": charts_date or now, "items": items},
+                              ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
+def charts_only() -> None:
+    """不跑 graph：從既有 charts 名稱（"NVDA 股價"）推回代號，依新 charts.py 產 zh/en 兩組。"""
+    d = json.loads(OUT.read_text("utf-8"))
+    for it in d["items"]:
+        cos = list(dict.fromkeys(c["name"].rsplit(" ", 1)[0] for c in it["charts"]))
+        it["charts"], it["charts_en"] = _charts(cos, "zh"), _charts(cos, "en")
+        log.info("%s 圖表重產 %s zh=%d en=%d", it["id"], cos, len(it["charts"]), len(it["charts_en"]))
+    _save(d["items"])
+
+
+def merge_en(path: str) -> None:
+    d, tr = json.loads(OUT.read_text("utf-8")), json.loads(Path(path).read_text("utf-8"))
+    for it in d["items"]:
+        it["en"] = tr[it["id"]]  # KeyError = 少題，直接炸
+    OUT.write_text(json.dumps(d, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
 async def main(ids: list[str]) -> None:
     from src.graph import build_graph
 
@@ -169,4 +194,10 @@ async def main(ids: list[str]) -> None:
 
 if __name__ == "__main__":
     setup_logging("demo")
-    asyncio.run(main(sys.argv[1:]))
+    a = sys.argv[1:]
+    if a[:1] == ["--charts"]:
+        charts_only()
+    elif a[:1] == ["--merge-en"]:
+        merge_en(a[1])
+    else:
+        asyncio.run(main(a))
