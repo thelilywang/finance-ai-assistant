@@ -355,7 +355,7 @@ async def _send_with_sources(msg: cl.Message, final_state: dict, question: str, 
     for company in companies:
         for name, fn in (("price", price_chart), ("eps", eps_chart)):
             try:
-                fig = fn(company)
+                fig = fn(company, content_lang)
                 if fig is not None:
                     # 代號進 name：互動版面多標的時才分得出哪張圖是哪家
                     figures.append((f"{name}-{company}", fig))

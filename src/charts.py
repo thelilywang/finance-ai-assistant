@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import sys
 
+from .i18n import t
 from .market import to_symbol
 
 log = logging.getLogger("charts")
@@ -27,7 +28,7 @@ _LAYOUT = dict(
 )
 
 
-def price_chart(company: str):
+def price_chart(company: str, lang: str = "zh"):
     """近 6 個月收盤價線圖；calendar 有下次財報日且在圖表範圍附近就加垂直標記。"""
     try:
         import plotly.graph_objects as go  # 延遲 import
@@ -41,11 +42,11 @@ def price_chart(company: str):
         fig = go.Figure(go.Scatter(
             # ponytail: kaleido 的 orjson 不吃 pandas Timestamp，轉 ISO 字串（plotly 仍視為日期軸）
             x=hist.index.strftime("%Y-%m-%d").tolist(), y=hist["Close"].tolist(), mode="lines",
-            line=dict(color=BLUE, width=2), name="收盤價",
-            hovertemplate="%{x|%Y-%m-%d}<br>收盤 %{y:.2f}<extra></extra>",
+            line=dict(color=BLUE, width=2), name=t(lang, "chart_close"),
+            hovertemplate=f"%{{x|%Y-%m-%d}}<br>{t(lang, 'chart_close_short')} %{{y:.2f}}<extra></extra>",
         ))
         fig.update_layout(
-            title=f"{company.upper()} 股價走勢（6 個月）", showlegend=False, **_LAYOUT,
+            title=t(lang, "chart_price_title", company=company.upper()), showlegend=False, **_LAYOUT,
         )
         fig.update_xaxes(gridcolor=GRID)
         fig.update_yaxes(gridcolor=GRID)
@@ -63,7 +64,7 @@ def price_chart(company: str):
                 x = date.isoformat()
                 fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
                               line=dict(color=INK_MUTED, dash="dash"))
-                fig.add_annotation(x=x, y=1, yref="paper", text="下次財報", showarrow=False,
+                fig.add_annotation(x=x, y=1, yref="paper", text=t(lang, "chart_next_earnings"), showarrow=False,
                                    yanchor="bottom", font=dict(color=INK_MUTED))
         except Exception as e:  # noqa: BLE001
             log.warning("財報日標記略過", extra={"fields": {
@@ -76,7 +77,7 @@ def price_chart(company: str):
         return None
 
 
-def eps_chart(company: str):
+def eps_chart(company: str, lang: str = "zh"):
     """近 8 季 EPS 預估 vs 實際 grouped bar，實際 beat 綠 / miss 紅。"""
     try:
         import plotly.graph_objects as go  # 延遲 import
@@ -92,14 +93,14 @@ def eps_chart(company: str):
         colors = [GREEN if a >= e else RED for a, e in zip(actual, est)]
 
         fig = go.Figure([
-            go.Bar(x=quarters, y=est, name="預估 EPS", marker_color=BLUE,
-                   hovertemplate="%{x}<br>預估 %{y:.2f}<extra></extra>"),
-            go.Bar(x=quarters, y=actual, name="實際 EPS（綠=beat／紅=miss）",
+            go.Bar(x=quarters, y=est, name=t(lang, "chart_eps_est"), marker_color=BLUE,
+                   hovertemplate=f"%{{x}}<br>{t(lang, 'chart_eps_est_short')} %{{y:.2f}}<extra></extra>"),
+            go.Bar(x=quarters, y=actual, name=t(lang, "chart_eps_actual"),
                    marker_color=colors,
-                   hovertemplate="%{x}<br>實際 %{y:.2f}<extra></extra>"),
+                   hovertemplate=f"%{{x}}<br>{t(lang, 'chart_eps_actual_short')} %{{y:.2f}}<extra></extra>"),
         ])
         fig.update_layout(
-            title=f"{company.upper()} EPS 預估 vs 實際（近 8 季）",
+            title=t(lang, "chart_eps_title", company=company.upper()),
             barmode="group", bargroupgap=0.05,
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             **{**_LAYOUT, "margin": dict(l=50, r=30, t=90, b=40)},  # legend 在標題下，需較高上邊距
