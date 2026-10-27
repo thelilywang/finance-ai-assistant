@@ -241,3 +241,16 @@ def test_fresh_limit_boundary():
     from src.graph import fresh_limit
     assert (fresh_limit(None), fresh_limit(7), fresh_limit(8)) == (3, 0, 3)
 
+
+def test_bearer_auth_rejects_missing_and_wrong_token(monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(mcp_server.config, "MCP_AUTH_TOKEN", "secret")
+    app = mcp_server._add_bearer_auth(Starlette(routes=[Route("/", lambda r: PlainTextResponse("ok"))]))
+    c = TestClient(app)
+    assert c.get("/").status_code == 401
+    assert c.get("/", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert c.get("/", headers={"Authorization": "Bearer secret"}).status_code == 200

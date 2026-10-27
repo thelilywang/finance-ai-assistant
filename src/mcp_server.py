@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hmac
 import json
 import logging
 from pathlib import Path
@@ -220,11 +221,13 @@ def _add_bearer_auth(app):
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
-    expected = f"Bearer {config.MCP_AUTH_TOKEN}"
+    expected = f"Bearer {config.MCP_AUTH_TOKEN}".encode()
 
     class _AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            if request.headers.get("authorization") != expected:
+            # 常數時間比對，避免以回應時間差逐字猜 token；轉 bytes 以容許非 ASCII header
+            got = request.headers.get("authorization", "").encode()
+            if not hmac.compare_digest(got, expected):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await call_next(request)
 
