@@ -12,7 +12,7 @@ A local RAG assistant for stock financial reports and news, built with LangGraph
 ### Environment & latency
 
 - **Environment**: everything runs locally (MacBook M1 / 16 GB), with Ollama serving `qwen3.5:9b` (generation) and `bge-m3` (embedding); no financial data is sent to an external API.
-- **Latency**: about 186–470 s per question. The local 9b model generates ≈10 chars/s, and reading an 11k-token prompt alone takes ~130 s; a hardware limit, not an architecture issue. Alternatives evaluated: `4b` is 25% faster but made 0/3 re-fetches when data was stale; MLX builds were slower or failed structured output; `9b` is the only usable model on a MacBook M1 / 16 GB.
+- **Latency**: about 186–470 s for a single-company question; dual-listed (both markets) or multi-company comparisons take about 520–640 s. The local 9b model generates ≈10 chars/s, and reading an 11k-token prompt alone takes ~130 s; a hardware limit, not an architecture issue. Alternatives evaluated: `4b` is 25% faster but made 0/3 re-fetches when data was stale; MLX builds were slower or failed structured output; `9b` is the only usable model on a MacBook M1 / 16 GB.
 
 ### Highlights
 
@@ -162,7 +162,7 @@ Details for each item are in [MAINTENANCE_LOG](MAINTENANCE_LOG.md).
 ### 執行環境與回應時間
 
 - **執行環境**:全部在本機執行(MacBook M1／16GB),以 Ollama 跑 `qwen3.5:9b`(生成)與 `bge-m3`(embedding),財報資料不會送到外部 API。
-- **回應時間**:單題回應約 186～470 秒。本機 9b 模型每秒約生成 10 字,11k token 的 prompt 僅讀取即需約 130 秒,屬硬體限制而非架構問題。已評估的替代方案:`4b` 快 25%,但資料過期時 0/3 次補抓;MLX 版本更慢,或結構化輸出失敗;`9b` 是 MacBook M1／16GB 上唯一可用的模型。
+- **回應時間**:單一標的約 186～470 秒;雙掛牌兩市場併陳或多標的比較約 520～640 秒。本機 9b 模型每秒約生成 10 字,11k token 的 prompt 僅讀取即需約 130 秒,屬硬體限制而非架構問題。已評估的替代方案:`4b` 快 25%,但資料過期時 0/3 次補抓;MLX 版本更慢,或結構化輸出失敗;`9b` 是 MacBook M1／16GB 上唯一可用的模型。
 
 ### 重點摘要
 

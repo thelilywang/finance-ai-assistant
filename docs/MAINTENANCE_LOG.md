@@ -12,7 +12,7 @@
 
 ## 已知限制
 
-- **回應延遲 186～470 秒，屬本機硬體限制而非架構問題**（`generate` 節點）——本機以 Ollama 執行 `qwen3.5:9b`，生成速度約每秒 10 字，11k token 的 prompt 僅讀取即需約 130 秒（2026-10-07 第二節）。首字延遲（TTFT）尚未量測，須修改節點內部。詳見 2026-09-17、09-19 章節。
+- **回應延遲：單一標的 186～470 秒，雙掛牌併陳或多標的比較 520～640 秒，屬本機硬體限制而非架構問題**（`generate` 節點）——本機以 Ollama 執行 `qwen3.5:9b`，生成速度約每秒 10 字，11k token 的 prompt 僅讀取即需約 130 秒（2026-10-07 第二節）。首字延遲（TTFT）尚未量測，須修改節點內部。詳見 2026-09-17、09-19 章節。
 - **LLM 選用 tool 的正確性沒有自動化測試**（`_tool_llm`）——模型行為不保證重現，目前以多次端到端手動驗證確認。詳見 2026-09-08 章節。
 - **`market IS NULL` 殘留 165 筆**——cmoney 137 筆須重新抓取才能修正；udn／cnyes 28 筆來自未納管版面。詳見 2026-09-21 章節第三節。
 - **`_select_exhibit` 取最大 htm 的啟發式**（`src/update.py`）——目前未出現誤選，並以入庫字數警示作為後備防線。詳見 2026-09-09 章節。
@@ -626,7 +626,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ### 一、靜態 demo 重播頁
 
-`docs/demo/` 是純靜態頁（`index.html` 加 `data.json`），由 GitHub Pages 自 main 的 `/docs` 發布：<https://thelilywang.github.io/finance-ai-assistant/demo/>，`?q=<id>` 指定題目、`?instant` 略過動畫。收錄 4 題真實問答（美股財報、雙掛牌 ADR 含反問選 both、新聞、NVDA 對 GOOGL 多標的比較），重播節點進度與每節點實測耗時、答案、可點的 `[來源N]` 與 yfinance 圖表。實測總耗時 333～644 秒，與 README 的延遲說明一致。錄製腳本 `scripts/record_demo.py` 鏡像 `app.py` 的串流與來源組裝，在 app 容器內執行。
+`docs/demo/` 是純靜態頁（`index.html` 加 `data.json`），由 GitHub Pages 自 main 的 `/docs` 發布：<https://thelilywang.github.io/finance-ai-assistant/demo/>，`?q=<id>` 指定題目、`?instant` 略過動畫。收錄 4 題真實問答（美股財報、雙掛牌 ADR 含反問選 both、新聞、NVDA 對 GOOGL 多標的比較），重播節點進度與每節點實測耗時、答案、可點的 `[來源N]` 與 yfinance 圖表。實測總耗時 333～644 秒：單一標的兩題（333、370 秒）落在 186～470 秒內，雙掛牌選 both（522 秒）與多標的比較（644 秒）超出；README 改以「每題約 3～11 分鐘」概括，分類範圍見 PROJECT.md 與「已知限制」。錄製腳本 `scripts/record_demo.py` 鏡像 `app.py` 的串流與來源組裝，在 app 容器內執行。
 
 **已知限制**：答案是模型原始輸出、未手改，仍有瑕疵——tsmc-adr 一處引用來源與內容不符、殘留兩個簡體字，nvda 有市場數據被誤標為新聞來源。專案沒有簡轉繁後處理（可考慮 OpenCC，需新增依賴，未做）。
 

@@ -7,7 +7,7 @@
 <a id="english"></a>
 ## English
 
-A financial report & news RAG assistant for individual stocks, built with LangGraph + Ollama (local LLM) + pgvector. All inference runs on your machine — sensitive financial data never leaves it. A single question takes about 186–470 seconds because the local `qwen3.5:9b` generates about 10 characters per second; this is a hardware limit, not an architectural one.
+A financial report & news RAG assistant for individual stocks, built with LangGraph + Ollama (local LLM) + pgvector. All inference runs on your machine — sensitive financial data never leaves it. Response time depends on your hardware: on the 2020 13-inch MacBook Pro (M1, 16 GB) used for development, the local `qwen3.5:9b` generates about 10 characters per second and each question takes about 3–11 minutes. Faster machines will answer sooner.
 
 **Demo:** [Live replay of 4 real Q&A runs](https://thelilywang.github.io/finance-ai-assistant/demo/)
 **Screenshot:** ![demo screenshot](docs/demo/screenshot.png)
@@ -131,7 +131,7 @@ For architecture, design decisions, and the full AI Product Case Study (CRISP-DM
 ## 中文
 
 針對個股的財報/新聞 RAG 問答助理,用 LangGraph + Ollama(本地 LLM)+ pgvector 打造。
-所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。單題回應約 186～470 秒,原因是本機 `qwen3.5:9b` 每秒約生成 10 字,屬硬體限制而非架構問題。
+所有推理都在本機跑,資料不會送到外部 API,適合處理財報這類敏感資料。回應時間依硬體而定:在開發用的 2020 年 13 吋 MacBook Pro(M1、16GB)上,本機 `qwen3.5:9b` 每秒約生成 10 字,每題約 3～11 分鐘;效能較好的機器會更快。
 
 **Demo:** [4 題真實問答重播](https://thelilywang.github.io/finance-ai-assistant/demo/?lang=zh)
 **截圖:** ![demo 截圖](docs/demo/screenshot.png)
