@@ -648,3 +648,19 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | 連線池 | `check_connection` 與 `timeout` 2→10 秒（`src/vectorstore.py`） | `41ff5f8` |
 | 來源清單顯示 | `_format_source`、`_clean_url`、`_source_meta` | `b72b28b` |
 | 雙掛牌圖表 | 改用 `_side_by_side` | `14dcdc2` |
+
+---
+
+## 2026-10-27　CI 導入與程式碼收斂　`工程品質`
+
+- **CI**：`.github/workflows/ci.yml` 在 push main 與 PR 時跑 `ruff check .`、`pytest -q`。不起 Postgres／Ollama，4 個 DB 測試自動 skip，只在本機容器跑。
+- **Lint**：清掉既有 51 項 ruff 錯誤；`# noqa` 皆附理由；`update.py` 的 log 改 lazy `%` 格式。
+- **MCP 驗證**：Bearer token 改用 `hmac.compare_digest` 常數時間比對。
+- **新聞時效門檻**：graph 與 `mcp_server` 各寫一份的算式，收斂為 `graph.fresh_limit`。
+
+| 項目 | commit |
+|---|---|
+| Lint | `958db4b`、`d504d19` |
+| CI | `5f26ebd` |
+| MCP 驗證 | `dc07435` |
+| 時效門檻 | `dd7750a` |
