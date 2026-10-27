@@ -235,3 +235,9 @@ def test_fetch_market_overview_returns_detail(monkeypatch):
         lambda limit: FetchResult(True, "市場新聞更新完成，共寫入 5 筆"),
     )
     assert asyncio.run(mcp_server.fetch_market_overview()) == "市場新聞更新完成，共寫入 5 筆"
+
+
+def test_fresh_limit_boundary():
+    from src.graph import fresh_limit
+    assert (fresh_limit(None), fresh_limit(7), fresh_limit(8)) == (3, 0, 3)
+

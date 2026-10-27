@@ -26,7 +26,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import config
-from .graph import fetch_missing_data, retrieve_context
+from .graph import fetch_missing_data, fresh_limit, retrieve_context
 from .logging_setup import setup_logging
 from .tickers import normalize_ticker
 from .update import fetch_market_news
@@ -127,7 +127,7 @@ async def search_knowledge_base(
             # 只給 N 讓模型自己比門檻是不夠的：實測 2454 報 N=17、docstring 明寫
             # 「N 大於 3 → 補抓」，模型仍直接收工（09-19 題 2，round 2 tool_calls 0）。
             # 門檻的算式就在下面幾行，直接把結論算好寫進去，和「不要自己推算日期」同一手法。
-            limit = 0 if news_since_days is not None and news_since_days <= 7 else 3
+            limit = fresh_limit(news_since_days)
             verdict = (
                 f"依本工具說明，這超過 {limit} 天的門檻，請呼叫 fetch_company_data 補抓後再重新檢索。"
                 if min(news_ages) > limit else

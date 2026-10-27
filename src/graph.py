@@ -1030,15 +1030,18 @@ def _news_ages_by_company(state: GraphState) -> dict[str, list[int]] | None:
     return ages
 
 
-def _fresh_limit(state: GraphState) -> int:
-    """新聞算「夠新」的天數上限，與 mcp_server.search_knowledge_base 的判準一致。
+def fresh_limit(days: int | None) -> int:
+    """新聞算「夠新」的天數上限；graph 的補抓判斷與 mcp_server.search_knowledge_base 共用此函式。
 
     問題明確要求近期（時效窗 <= 7 天）就要求當天的新聞，否則 3 天內都算夠新。
     時效窗由 extract_filters 抽出，與檢索過濾共用同一個判斷，不再各自比對問題字串；
     窗是 90 天（「最近三個月」）時要求當天新聞太嚴，故以 7 天為界而非「有值就收緊」。
     """
-    days = state.get("news_since_days")
     return 0 if days is not None and days <= 7 else 3
+
+
+def _fresh_limit(state: GraphState) -> int:
+    return fresh_limit(state.get("news_since_days"))
 
 
 def _fetched_companies(state: GraphState) -> set[str]:
