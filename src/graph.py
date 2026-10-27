@@ -177,7 +177,7 @@ def _qid(question: str) -> str:
     GraphState 沒有 thread_id，加欄位會擴散到所有呼叫端；問題文字在 rewrite_question
     之後就固定，拿它的短 hash 已足夠關聯，且不必把提問內容寫進 log。
     """
-    return hashlib.sha1(question.encode()).hexdigest()[:8]
+    return hashlib.sha1(question.encode(), usedforsecurity=False).hexdigest()[:8]
 
 # query embedding 只取決於模型、端點與問題文字，不會因為 doc_chunks 新增而失效。
 # 用程序內短 TTL/LRU 避免 agent 在同一題的 tool loop 重複打 Ollama；不落地，重啟即清空。

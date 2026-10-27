@@ -81,7 +81,7 @@ def test_unconditional_fields_always_subset():
     for hm in (None, True, False):
         for state in combos:
             fields = set(allowed_fields(state, has_market=hm))
-            assert UNCONDITIONAL <= fields, (state, hm, fields)
+            assert fields >= UNCONDITIONAL, (state, hm, fields)
 
 
 def test_impact_field_never_present():

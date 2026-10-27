@@ -5,7 +5,7 @@ import calendar
 import logging
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from . import config
 from .logging_setup import log_duration
@@ -146,7 +146,7 @@ def get_market_snapshots(companies: list[str]) -> dict[str, str]:
     with ThreadPoolExecutor(max_workers=min(len(companies), 3),
                             thread_name_prefix="market") as executor:
         texts = executor.map(get_market_snapshot, companies)
-        return {c: text for c, text in zip(companies, texts) if text}
+        return {c: text for c, text in zip(companies, texts, strict=True) if text}  # map 對每個輸入各產一筆
 
 
 def _fmt_time(info: dict) -> str:
@@ -154,7 +154,7 @@ def _fmt_time(info: dict) -> str:
     ts = info.get("regularMarketTime")
     if ts is None:
         return ""
-    return f" (as of {datetime.fromtimestamp(ts, timezone.utc):%Y-%m-%d %H:%M} UTC)"
+    return f" (as of {datetime.fromtimestamp(ts, UTC):%Y-%m-%d %H:%M} UTC)"
 
 
 def _latest_reported_eps(ticker) -> tuple[date, float] | None:

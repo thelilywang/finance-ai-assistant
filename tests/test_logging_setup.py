@@ -33,7 +33,7 @@ def test_logging_setup(monkeypatch):
 
         logfile = Path(tmp) / f"{name}.log"
         assert logfile.exists(), "logfile 未建立"
-        lines = [l for l in logfile.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln for ln in logfile.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert len(lines) == 2, f"應寫入 2 行，實際 {len(lines)}"
 
         first = json.loads(lines[0])  # 每行都必須是合法 JSON，回測才能直接餵 pandas/jq
@@ -62,7 +62,7 @@ def test_logging_setup(monkeypatch):
         try:
             raise ValueError("boom")
         except ValueError:
-            log.error("出錯", exc_info=True)
+            log.exception("出錯")
         last = json.loads(logfile.read_text(encoding="utf-8").splitlines()[-1])
         assert "ValueError: boom" in last["exc"]
 

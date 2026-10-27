@@ -74,7 +74,7 @@ def main() -> None:
     print(f"\n=== A. 現況：庫內既有 chunk（樣本 {len(rows)}，"
           f"切法 CHUNK_UNIT={config.CHUNK_UNIT} CHUNK_SIZE={config.CHUNK_SIZE}）===")
     groups: dict[str, list[tuple[int, int]]] = {"中文": [], "英文": []}
-    for doc_type, content in rows:
+    for _doc_type, content in rows:
         lang = "中文" if cjk_ratio(content) > CJK_RATIO else "英文"
         groups[lang].append((len(content), count(content)))
 

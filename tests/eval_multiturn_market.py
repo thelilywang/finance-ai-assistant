@@ -69,7 +69,7 @@ def run_one(item):
         "market_confirmed": item["category"] == "反問回答",
     })
     company = (resolved.get("companies") or [None])[0]
-    kw = dict(doc_type=filters.get("doc_type"), news_since_days=filters.get("news_since_days"))
+    kw = {"doc_type": filters.get("doc_type"), "news_since_days": filters.get("news_since_days")}
 
     # 「都要」的雙掛牌要兩邊各查一次：兩市場的資料掛在不同 company（2330／TSM），
     # 一次檢索只查得到一邊。正式流程是 _seed_prompt 指示 agent 分兩次呼叫，這裡

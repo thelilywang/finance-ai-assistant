@@ -21,7 +21,6 @@
     docker exec -e CROSS_MARKET_GUARD=off finance_ai_assistant_app \\
         python tests/bench_cross_market_guard.py
 """
-import re
 import sys
 import time
 from pathlib import Path

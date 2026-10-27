@@ -202,7 +202,7 @@ def _drive_generate(monkeypatch, arm: str, compare_rule: str = "on") -> str:
     monkeypatch.setattr(_cfg, "ADR_COMPARE_RULE", compare_rule)
     monkeypatch.setattr(_g, "_llms", lambda model: {"llm": stub})
     monkeypatch.setattr(_g, "get_market_snapshots",
-                         lambda codes: {c: f"currentPrice: 1\ncurrency: USD" for c in codes})
+                         lambda codes: dict.fromkeys(codes, "currentPrice: 1\ncurrency: USD"))
     monkeypatch.setattr(_g, "get_adr_premium", lambda tw, us: "ADR premium stub text")
 
     state = {

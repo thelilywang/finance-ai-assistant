@@ -34,7 +34,7 @@ def load_text(path: str) -> str:
         log_duration(log, "PDF 解析完成", started, source=path,
                      pages=len(reader.pages), chars=len(text))
         return text
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return f.read()
 
 
@@ -42,7 +42,7 @@ def load_text(path: str) -> str:
 _MIN_FINANCIAL_REPORT_CHARS = 10000
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _token_counter():
     """回傳 embedding 模型自己的 tokenizer 計數函式；不可用時回 None（退回字元計數）。
 
@@ -168,7 +168,7 @@ def ingest_text(
             "content": chunk,
             "embedding": vec,
         }
-        for i, (chunk, vec) in enumerate(zip(chunks, vectors))
+        for i, (chunk, vec) in enumerate(zip(chunks, vectors, strict=False))  # 長度由 embedding 服務保證，不在此新增拋錯路徑
     ]
 
     insert_started = time.monotonic()

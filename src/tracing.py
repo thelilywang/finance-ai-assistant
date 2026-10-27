@@ -38,8 +38,9 @@ def _release() -> str:
     if config.LANGFUSE_RELEASE:
         return config.LANGFUSE_RELEASE
     try:
-        return subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+        # 固定指令、無外部輸入；git 走 PATH 查找
+        return subprocess.run(  # noqa: S603
+            ["git", "rev-parse", "--short", "HEAD"],  # noqa: S607
             capture_output=True, text=True, timeout=2, check=True,
         ).stdout.strip() or "unknown"
     except Exception:  # 容器內沒有 .git，屬正常情況

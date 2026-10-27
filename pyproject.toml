@@ -20,6 +20,9 @@ ignore = [
     # 專案原本就沒有行寬慣例，現存 115 筆多是 i18n.py 的翻譯字串與中文說明註解，
     # 折行反而難讀。line-length 仍設 100 供日後 ruff format 參考，但不當成錯誤擋。
     "E501",
+    # 專案 log 訊息統一用 f-string 帶出變數，結構化欄位另走 extra={"fields": ...}；
+    # lazy % 格式只省下未啟用層級的字串組裝，這裡的量級（每次 ingest／抓取數十則）可忽略。
+    "G004",
 ]
 
 [tool.ruff.lint.per-file-ignores]

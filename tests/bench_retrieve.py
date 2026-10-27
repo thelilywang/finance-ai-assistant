@@ -13,6 +13,7 @@ DB 未對 host 開 port，需在 app container 內執行：
     --concurrency   併發情境要測的並行檢索數，逗號分隔（預設 1,2,3,4）
 """
 import argparse
+import contextlib
 import statistics
 import sys
 import time
@@ -128,10 +129,8 @@ def _set_pool_size(max_size: int) -> None:
     )
     vectorstore.pool = new
     graph.pool = new  # graph 是 from ... import pool，要一起換
-    try:
+    with contextlib.suppress(Exception):
         old.close()
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def main() -> None:
@@ -190,10 +189,8 @@ def main() -> None:
         config.RETRIEVE_PARALLEL = original_parallel
         config.EMBEDDING_CACHE_MAX_ENTRIES = original_cache_size
         if vectorstore.pool is not original_pool:
-            try:
+            with contextlib.suppress(Exception):
                 vectorstore.pool.close()
-            except Exception:  # noqa: BLE001
-                pass
             vectorstore.pool = original_pool
             graph.pool = original_pool
         graph._clear_embedding_cache()

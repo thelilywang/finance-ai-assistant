@@ -106,10 +106,7 @@ def _format_source(source: str, title: str | None = None, published: str | None 
             title = split.path.rstrip("/").rsplit("/", 1)[-1]
             title = title.replace("-", " ").replace("_", " ").strip()
             title = (title[:60] + "…") if len(title) > 60 else title
-            if title:
-                title = title[0].upper() + title[1:]
-            else:
-                title = domain
+            title = title[0].upper() + title[1:] if title else domain
         return f"[{title} — {domain}]({clean_url})"
 
     # 本地路徑：只留檔名
@@ -172,10 +169,9 @@ def _rebuild_history(steps: list[dict]) -> list[tuple[str, str]]:
         step_type = step.get("type")
         if step_type == "user_message":
             pending_question = step.get("output", "")
-        elif step_type == "assistant_message":
-            if pending_question is not None:
-                pairs.append((pending_question, _trim_for_history(step.get("output", ""))))
-                pending_question = None
+        elif step_type == "assistant_message" and pending_question is not None:
+            pairs.append((pending_question, _trim_for_history(step.get("output", ""))))
+            pending_question = None
         # 其餘 type（tool 等）跳過
     return pairs[-5:]
 

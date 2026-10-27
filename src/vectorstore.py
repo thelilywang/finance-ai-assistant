@@ -101,20 +101,19 @@ def insert_chunks(rows: list[dict]) -> None:
         "market": None,
     }
     rows = [{**provenance, **row} for row in rows]
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO doc_chunks
-                    (source, title, doc_type, company, published_at, chunk_index, content, embedding,
-                     chunk_unit, chunk_size, embed_model, market)
-                VALUES
-                    (%(source)s, %(title)s, %(doc_type)s, %(company)s, %(published_at)s,
-                     %(chunk_index)s, %(content)s, %(embedding)s,
-                     %(chunk_unit)s, %(chunk_size)s, %(embed_model)s, %(market)s)
-                """,
-                rows,
-            )
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO doc_chunks
+                (source, title, doc_type, company, published_at, chunk_index, content, embedding,
+                 chunk_unit, chunk_size, embed_model, market)
+            VALUES
+                (%(source)s, %(title)s, %(doc_type)s, %(company)s, %(published_at)s,
+                 %(chunk_index)s, %(content)s, %(embedding)s,
+                 %(chunk_unit)s, %(chunk_size)s, %(embed_model)s, %(market)s)
+            """,
+            rows,
+        )
 
 
 def similarity_search(
@@ -182,12 +181,11 @@ def similarity_search(
         {where_clause}
         ORDER BY embedding <=> %(embedding)s::vector
         LIMIT %(top_k)s
-    """
+    """  # noqa: S608  where_clause 只由本函式內的常數片段組成，使用者值全走 params 參數化
 
-    with get_connection() as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(sql, params)
-            return cur.fetchall()
+    with get_connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
 
 
 def list_sources(doc_type: str | None = None, company: str | None = None) -> list[dict]:
@@ -216,4 +214,4 @@ def list_sources(doc_type: str | None = None, company: str | None = None) -> lis
     with get_connection() as conn:
         cur = conn.execute(sql, (doc_type, doc_type, company, company))
         cols = [d.name for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]

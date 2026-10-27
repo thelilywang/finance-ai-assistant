@@ -19,13 +19,13 @@ INK_MUTED = "#898781"
 GRID = "#e1e0d9"
 
 # ponytail: 圖表固定淺色版面（PDF 也是白底），不做深色主題
-_LAYOUT = dict(
-    template="plotly_white",
-    font=dict(family='system-ui, "PingFang TC", sans-serif', color="#0b0b0b"),
-    plot_bgcolor="#fcfcfb",
-    paper_bgcolor="#fcfcfb",
-    margin=dict(l=50, r=30, t=50, b=40),
-)
+_LAYOUT = {
+    "template": "plotly_white",
+    "font": {"family": 'system-ui, "PingFang TC", sans-serif', "color": "#0b0b0b"},
+    "plot_bgcolor": "#fcfcfb",
+    "paper_bgcolor": "#fcfcfb",
+    "margin": {"l": 50, "r": 30, "t": 50, "b": 40},
+}
 
 
 def price_chart(company: str, lang: str = "zh"):
@@ -42,7 +42,7 @@ def price_chart(company: str, lang: str = "zh"):
         fig = go.Figure(go.Scatter(
             # ponytail: kaleido 的 orjson 不吃 pandas Timestamp，轉 ISO 字串（plotly 仍視為日期軸）
             x=hist.index.strftime("%Y-%m-%d").tolist(), y=hist["Close"].tolist(), mode="lines",
-            line=dict(color=BLUE, width=2), name=t(lang, "chart_close"),
+            line={"color": BLUE, "width": 2}, name=t(lang, "chart_close"),
             hovertemplate=f"%{{x|%Y-%m-%d}}<br>{t(lang, 'chart_close_short')} %{{y:.2f}}<extra></extra>",
         ))
         fig.update_layout(
@@ -63,9 +63,9 @@ def price_chart(company: str, lang: str = "zh"):
                 # TypeError。拆成 shape + annotation 手動指定位置，繞過那段平均。
                 x = date.isoformat()
                 fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
-                              line=dict(color=INK_MUTED, dash="dash"))
+                              line={"color": INK_MUTED, "dash": "dash"})
                 fig.add_annotation(x=x, y=1, yref="paper", text=t(lang, "chart_next_earnings"), showarrow=False,
-                                   yanchor="bottom", font=dict(color=INK_MUTED))
+                                   yanchor="bottom", font={"color": INK_MUTED})
         except Exception as e:  # noqa: BLE001
             log.warning("財報日標記略過", extra={"fields": {
                 "company": company, "reason": "chart_failed", "error": str(e)}})
@@ -90,7 +90,7 @@ def eps_chart(company: str, lang: str = "zh"):
 
         quarters = [idx.date().isoformat() for idx in df.index]
         est, actual = df["EPS Estimate"], df["Reported EPS"]
-        colors = [GREEN if a >= e else RED for a, e in zip(actual, est)]
+        colors = [GREEN if a >= e else RED for a, e in zip(actual, est, strict=True)]  # 同一個 df 的兩欄，長度必相等
 
         fig = go.Figure([
             go.Bar(x=quarters, y=est, name=t(lang, "chart_eps_est"), marker_color=BLUE,
@@ -102,8 +102,8 @@ def eps_chart(company: str, lang: str = "zh"):
         fig.update_layout(
             title=t(lang, "chart_eps_title", company=company.upper()),
             barmode="group", bargroupgap=0.05,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            **{**_LAYOUT, "margin": dict(l=50, r=30, t=90, b=40)},  # legend 在標題下，需較高上邊距
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
+            **{**_LAYOUT, "margin": {"l": 50, "r": 30, "t": 90, "b": 40}},  # legend 在標題下，需較高上邊距
         )
         fig.update_yaxes(gridcolor=GRID)
         return fig
@@ -160,7 +160,8 @@ def report_pdf(report_md: str, figures: list) -> bytes | None:
             out = os.path.join(tmp, "report.pdf")
             with open(src, "w", encoding="utf-8") as f:
                 f.write(html)
-            subprocess.run(
+            # chrome 來自固定的 _CHROME_PATHS 白名單，其餘參數為自己產生的暫存路徑
+            subprocess.run(  # noqa: S603
                 [chrome, "--headless", "--disable-gpu", "--no-pdf-header-footer",
                  f"--print-to-pdf={out}", src],
                 check=True, capture_output=True, timeout=60,

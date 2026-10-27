@@ -22,9 +22,9 @@ def test_shape_and_annotation_workaround():
     # 實際採用的寫法：shape + annotation 分開，自己指定位置，不經過那段平均
     x = "2026-10-15"
     fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
-                  line=dict(color="#898781", dash="dash"))
+                  line={"color": "#898781", "dash": "dash"})
     fig.add_annotation(x=x, y=1, yref="paper", text="下次財報", showarrow=False,
-                       yanchor="bottom", font=dict(color="#898781"))
+                       yanchor="bottom", font={"color": "#898781"})
     assert len(fig.layout.shapes) == 1 and fig.layout.shapes[0].x0 == x
     assert len(fig.layout.annotations) == 1 and fig.layout.annotations[0].text == "下次財報"
 

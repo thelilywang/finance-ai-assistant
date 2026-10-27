@@ -703,7 +703,7 @@ def fetch_mops(co_id: str) -> FetchResult:
                 timeout=TIMEOUT,
             )
             resp.raise_for_status()
-            files = re.findall(r"(\d{6}_%s_\w+\.pdf)" % re.escape(co_id), resp.text)
+            files = re.findall(rf"(\d{{6}}_{re.escape(co_id)}_\w+\.pdf)", resp.text)
             filename = _select_report_file(files)
             if filename:
                 break
@@ -785,7 +785,9 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
             "company": company, "source": "yahoo_rss", "reason": "http_error"}})
         return FetchResult(False, msg)
 
-    items = ET.fromstring(resp.content).findall(".//item")[:limit]
+    # 來源固定是 Yahoo 官方 HTTPS RSS（可信第三方），不引入 defusedxml
+    items = ET.fromstring(resp.content).findall(  # noqa: S314
+".//item")[:limit]
     if not items:
         # Yahoo RSS 台股覆蓋只到大型股（實測 3049/2380/3025 一律回 0 篇），
         # 個股頁則有 20 篇且跨代號不重疊。兩者同母站不同端點，互補而非替代，
