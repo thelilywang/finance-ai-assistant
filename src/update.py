@@ -648,7 +648,7 @@ def fetch_tw_financials(co_id: str) -> FetchResult:
                     found.append((title, row))
         except requests.RequestException as e:
             # 單一市場的端點掛掉不影響另一個市場，繼續試下一個
-            log.warning(f"{source_name} OpenAPI 取得失敗（{e}），略過。", extra={"fields": {
+            log.warning("%s OpenAPI 取得失敗（%s），略過。", source_name, e, extra={"fields": {
                 "company": co_id, "source": source_name, "reason": "api_down", "error": str(e)}})
             continue
         reachable = True
@@ -761,7 +761,7 @@ def fetch_mops(co_id: str) -> FetchResult:
         # 只收「抓取／寫檔」這段的失敗。ingest_file 內的 DB 或 embedding 失敗不是
         # MOPS 的錯，讓它往上拋給 graph.py 的 handler，不要誤報成 MOPS 抓取異常、
         # 也不要印一份無關的手動下載指引
-        log.warning(f"MOPS 抓取異常：{e}", extra={"fields": {
+        log.warning("MOPS 抓取異常：%s", e, extra={"fields": {
             "company": co_id, "source": "mops", "reason": "mops_blocked", "error": str(e)}})
         print(MOPS_MANUAL_GUIDE)
         return FetchResult(False, f"MOPS 抓取異常：{e}")
@@ -824,7 +824,7 @@ def fetch_news(company: str, limit: int = 10) -> FetchResult:
         except (requests.RequestException, OSError, ValueError) as e:
             # 單篇文章的下載或解析失敗就跳過。DB/embedding 失敗不會落在這裡，
             # 會往上拋——那是系統性問題，逐篇印錯再回報「寫入 0 筆」等於靜默失敗
-            log.warning(f"新聞處理失敗（{link}）：{e}", extra={"fields": {
+            log.warning("新聞處理失敗（%s）：%s", link, e, extra={"fields": {
                 "company": company, "source": "yahoo_rss", "reason": "news_failed",
                 "error": str(e)}})
     ok = total > 0 or skipped > 0
@@ -871,7 +871,7 @@ def fetch_tw_stock_news(company: str, limit: int = 10) -> FetchResult:
         # 一篇公告連結編碼後 544 字元），插入會整批失敗；截斷會讓不同長 URL 共用
         # 前綴、騙過 source_exists 去重，故直接跳過整篇，不硬塞。
         if len(link) > 512:
-            log.warning(f"個股頁連結超過欄位長度上限，跳過：{link}", extra={"fields": {
+            log.warning("個股頁連結超過欄位長度上限，跳過：%s", link, extra={"fields": {
                 "company": company, "source": "yahoo_tw_stock", "reason": "url_too_long",
                 "length": len(link)}})
             continue
@@ -881,12 +881,12 @@ def fetch_tw_stock_news(company: str, limit: int = 10) -> FetchResult:
         try:
             html = trafilatura.fetch_url(link)
             if not html:
-                log.warning(f"個股頁文章下載失敗：{link}", extra={"fields": {
+                log.warning("個股頁文章下載失敗：%s", link, extra={"fields": {
                     "company": company, "source": "yahoo_tw_stock", "reason": "http_error"}})
                 continue
             doc = trafilatura.bare_extraction(html, with_metadata=True)
             if not doc or len(doc.text or "") < 100:
-                log.warning(f"個股頁內文過短或抽取失敗：{link}", extra={"fields": {
+                log.warning("個股頁內文過短或抽取失敗：%s", link, extra={"fields": {
                     "company": company, "source": "yahoo_tw_stock", "reason": "no_content"}})
                 continue
             total += ingest_text(
@@ -895,7 +895,7 @@ def fetch_tw_stock_news(company: str, limit: int = 10) -> FetchResult:
             )
         except (requests.RequestException, OSError, ValueError) as e:
             # 單篇失敗跳過，DB/embedding 失敗往上拋，同 fetch_news 的例外邊界
-            log.warning(f"個股頁文章處理失敗（{link}）：{e}", extra={"fields": {
+            log.warning("個股頁文章處理失敗（%s）：%s", link, e, extra={"fields": {
                 "company": company, "source": "yahoo_tw_stock", "reason": "news_failed",
                 "error": str(e)}})
     ok = total > 0 or skipped > 0
@@ -924,7 +924,7 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
             listing_url, headers=BROWSER_UA, timeout=TIMEOUT
         )
         if resp.status_code != 200:
-            log.warning(f"{name} 列表頁取得失敗（HTTP {resp.status_code}），跳過。", extra={"fields": {
+            log.warning("%s 列表頁取得失敗（HTTP %s），跳過。", name, resp.status_code, extra={"fields": {
                 "source": name, "reason": "http_error"}})
             continue
 
@@ -936,7 +936,7 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
                 seen.add(url)
                 urls.append(url)
         if not urls:
-            log.warning(f"{name} 找不到任何文章連結（版面可能改版），跳過。", extra={"fields": {
+            log.warning("%s 找不到任何文章連結（版面可能改版），跳過。", name, extra={"fields": {
                 "source": name, "reason": "http_error"}})
             continue
 
@@ -947,12 +947,12 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
             try:
                 html = trafilatura.fetch_url(url)
                 if not html:
-                    log.warning(f"{name} 文章下載失敗：{url}", extra={"fields": {
+                    log.warning("%s 文章下載失敗：%s", name, url, extra={"fields": {
                         "source": name, "reason": "http_error"}})
                     continue
                 doc = trafilatura.bare_extraction(html, with_metadata=True)
                 if not doc or len(doc.text or "") < 100:
-                    log.warning(f"{name} 內文過短或抽取失敗：{url}", extra={"fields": {
+                    log.warning("%s 內文過短或抽取失敗：%s", name, url, extra={"fields": {
                         "source": name, "reason": "no_content"}})
                     continue
 
@@ -967,7 +967,7 @@ def fetch_market_news(limit_per_source: int = 10) -> FetchResult:
                 )
             except (requests.RequestException, OSError, ValueError) as e:
                 # 同 fetch_news：單篇失敗跳過，DB/embedding 失敗往上拋
-                log.warning(f"{name} 文章處理失敗（{url}）：{e}", extra={"fields": {
+                log.warning("%s 文章處理失敗（%s）：%s", name, url, e, extra={"fields": {
                     "source": name, "reason": "news_failed", "error": str(e)}})
 
     ok = total > 0 or skipped > 0
