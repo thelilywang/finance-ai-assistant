@@ -112,7 +112,7 @@ def test_embed_in_batches_retries_once_on_failure(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="ingest"):
         vectors = ingest._embed_in_batches(emb, CHUNKS, "s")
     assert len(vectors) == len(CHUNKS)
-    assert any(r.fields.get("reason") == "embed_batch_failed" for r in caplog.records)
+    assert any(getattr(r, "fields", {}).get("reason") == "embed_batch_failed" for r in caplog.records)
 
 
 def test_embed_in_batches_raises_after_two_failures(monkeypatch):
@@ -149,7 +149,7 @@ def test_chunk_text_token_unit(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="ingest"):
         token_chunks = _chunk_with(monkeypatch, "token")
     fell_back = any(
-        r.fields.get("reason") in ("tokenizer_load_failed", "tokenizer_not_registered")
+        getattr(r, "fields", {}).get("reason") in ("tokenizer_load_failed", "tokenizer_not_registered")
         for r in caplog.records
     )
     if fell_back:
@@ -169,5 +169,5 @@ def test_chunk_text_token_unit_unregistered_model_falls_back(monkeypatch, caplog
     monkeypatch.setattr(ingest.config, "EMBEDDING_MODEL", "some-unregistered-model")
     with caplog.at_level(logging.INFO, logger="ingest"):
         unreg_chunks = _chunk_with(monkeypatch, "token")
-    assert any(r.fields.get("reason") == "tokenizer_not_registered" for r in caplog.records)
+    assert any(getattr(r, "fields", {}).get("reason") == "tokenizer_not_registered" for r in caplog.records)
     assert [len(c) for c in unreg_chunks] == [len(c) for c in char_chunks]
