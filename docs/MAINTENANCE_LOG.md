@@ -6,10 +6,6 @@
 
 本文紀錄專案已知的技術債、優化候選項與決策依據；系統架構與名詞（決策卡、補抓等）見 [PROJECT.md](PROJECT.md)。核心問答流程（檢索＋補抓＋生成，涵蓋台股／美股雙市場、雙掛牌比較、決策卡格式驗證、AI 執行可觀測性）已實作，並在本機 Ollama（`qwen3.5:9b`）環境通過端到端驗證。
 
-## 待辦
-
-目前無待辦項目。靜態 demo 重播頁已於 2026-10-10 完成（詳見該章節第一節）。
-
 ## 已知限制
 
 - **回應延遲：單一標的 186～470 秒，雙掛牌併陳或多標的比較 520～640 秒，屬本機硬體限制而非架構問題**（`generate` 節點）——本機以 Ollama 執行 `qwen3.5:9b`，生成速度約每秒 10 字，11k token 的 prompt 僅讀取即需約 130 秒（2026-10-07 第二節）。首字延遲（TTFT）尚未量測，須修改節點內部。詳見 2026-09-17、09-19 章節。
@@ -20,7 +16,6 @@
 - **補抓時效仍以檢索回來的 top-k chunk 判斷，而非 DB 內最新新聞**（`route_after_tools`）——第一次檢索可能多一次不必要的補抓；本輪補抓過的公司不再判過期，以此避免反覆補抓。詳見 2026-10-10 章節第二節。
 - **EDGAR／XBRL 來源連結只到該公司申報列表**——source 字串不含 CIK，無法直連單份申報。詳見 2026-10-10 章節第二節。
 - **無簡轉繁後處理**——模型偶爾殘留簡體字，demo 答案未手改；可考慮 OpenCC，需新增依賴，尚未做。詳見 2026-10-10 章節第一節。
-- **`generate` 串流中途停滯逾時，使用者看到半截答案加免責聲明而非逾時文案**（`src/app.py`）——需停滯超過 600 秒才會發生，暫不處理。詳見 2026-10-28 章節第一節。
 - **mcp 升到 1.30 後只驗證連線與 tool 列表**——完整問答沒有重跑。詳見 2026-10-28 章節第四節。
 
 ## 後續方向
@@ -61,18 +56,13 @@
 
 ## 2026-09-03　LLM 與資料層穩定性修復　`LangGraph` `資料層`
 
-> 本節提及的 `route_after_retrieve`／`auto_fetch` 已於 2026-09-07 改造時移除，內容保留作為當時的決策紀錄。
-
-三項修復：
-
-- **LLM 重試**：`llm` 加上 `.with_retry(stop_after_attempt=3)`，Ollama 冷啟動或短暫逾時時重試，不再直接中斷整個 graph 節點。
-- **連線池**：`get_connection()` 改用 `psycopg_pool.ConnectionPool`，不再每次新開 TCP 與 PG 認證。預設 `timeout=30` 秒遠慢於原本毫秒級失敗，改成 `timeout=2` 後測試由 32 秒降到 4-5 秒——正常連線本該是毫秒級，2 秒內連不上即代表 DB 已掛。
-- **Ticker 誤判治本**：regex fallback 會把純英文問題裡的一般單字當 ticker；改為 `extract_filters` 用 `with_structured_output(ExtractedFilters)`，代號由 `normalize_ticker()` 正規化並驗證，regex fallback 直接移除（多標的問題當時改為回報錯誤，該降級已於 2026-09-16 由多標的支援取代）。三處 `isdigit() and len==4` 的台股判斷會把 ETF 6 碼、特別股與可轉債字母尾碼誤判成美股，統一改用 `is_tw_ticker()`。
+- **LLM 重試**：`llm` 加上 `.with_retry(stop_after_attempt=3)`，Ollama 冷啟動或短暫逾時時重試，不再直接中斷整個 graph 節點（2026-10-28 改為只重試連線類錯誤）。
+- **連線池**：`get_connection()` 改用 `psycopg_pool.ConnectionPool`，不再每次新開 TCP 與 PG 認證。預設 `timeout=30` 秒遠慢於原本毫秒級失敗，改成 `timeout=2` 後測試由 32 秒降到 4-5 秒——正常連線本該是毫秒級，2 秒內連不上即代表 DB 已掛（2026-10-10 推翻此假設，調為 10 秒）。
+- **Ticker 誤判治本**：regex fallback 會把純英文問題裡的一般單字當 ticker；改為 `extract_filters` 用 `with_structured_output(ExtractedFilters)`，代號由 `normalize_ticker()` 正規化並驗證，regex fallback 直接移除。三處 `isdigit() and len==4` 的台股判斷會把 ETF 6 碼、特別股與可轉債字母尾碼誤判成美股，統一改用 `is_tw_ticker()`。
 
 | 項目 | commit |
 |---|---|
 | LLM retry/backoff | `b031f5c` |
-| 測試 fixture 補齊 `published_at` | `87c989c` |
 | 連線池 | `c77ff4b` |
 | Ticker 誤判治本 | `2a00991` |
 
@@ -584,7 +574,7 @@ META 在 `doc_chunks` 只有 1 塊 XBRL 數字塊、EDGAR 全文為 0，全庫 1
 
 ## 2026-10-07　雙掛牌比較的數字可比性與 Ollama context 截斷　`資料層` `LangGraph`
 
-同一條調查線：雙掛牌比較題讓模型自己換算幣別與股數比，不是算錯就是拒答，改為程式先算好、模型只引用。A/B 驗證時發現答案常在固定字數斷句，查出是 Ollama 的 context 過小造成 prompt 被靜默截斷。之後修的是同一類問題的另一面：資料餵給模型時缺了單位或期間，模型只好自行推測，把不可比的數字當成可比。
+雙掛牌比較題讓模型自己換算幣別與股數比，不是算錯就是拒答，改為程式先算好、模型只引用。A/B 驗證時連帶查出 Ollama 的 context 過小，造成 prompt 被靜默截斷。
 
 ### 一、ADR 溢價與 EPS 換算改由程式計算
 
@@ -604,9 +594,14 @@ Ollama 以 4096 context 載入 `qwen3.5:9b`，超長 prompt 被靜默截到約 2
 
 ### 三、數字可比性：跨幣別、跨期與累計 EPS 誤讀
 
-**問題**：驗收時模型直接比台股 27.25 元與 ADR 4.31 美元，說「台股 EPS 較高」（換算後約 27.4 元，其實 ADR 較高）。**根因**是兩份指示衝突（`dual_market_warning` 要求「不得換算比較」，區塊卻已算好等值），加上資料缺單位或期間。**修法**：有換算區塊時改用 `dual_market_warning_adr`，要求引用等值與差距；換算區塊只在同季時給 EPS 等值並解釋差距；共識營收標「億」與幣別（TSM 預估以 TWD 計價，原值被讀小 10 倍）；季別明寫（`Q2 2026 results (quarter ended 2026-06-30)`，**取捨**：假設曆年制會計年度，日後納入非曆年制公司要改推算）；EDGAR 6-K 切段遺失欄名、49.33 曾被當成 ADR 美元 EPS，改為來源標頭加註幣別與口徑警語。
+**問題**：驗收時模型直接比台股 27.25 元與 ADR 4.31 美元，說「台股 EPS 較高」（換算後約 27.4 元，其實 ADR 較高）。**根因**是兩份指示衝突（`dual_market_warning` 要求「不得換算比較」，區塊卻已算好等值），加上資料缺單位或期間。**修法**：
+- `dual_market_warning_adr`：有換算區塊時改用，要求引用等值與差距。
+- 同季才給 EPS 等值並解釋差距。
+- 共識營收標「億」與幣別（TSM 預估以 TWD 計價，原值被讀小 10 倍）。
+- 季別明寫（`Q2 2026 results (quarter ended 2026-06-30)`）。**取捨**：假設曆年制會計年度，日後納入非曆年制公司要改推算。
+- EDGAR 來源標頭加註幣別與口徑警語。
 
-**台股累計 EPS**：TWSE OpenAPI 的綜合損益表是年初至當季累計，Q2 的 49.33 是 1～6 月累計，單季為 27.25，模型曾拿 49.33 去比 ADR 單季等值。標題、EPS 行、TWSE-API 來源與即時市場區塊四處補標示，並對 2308、2379、2380、2454、3008、3025、3049 七家重抓。驗證（`qwen3.5:9b`，每題 1 次）：同季題 EPS 換算 27.45 對 27.25（+0.74%），不同季題標累計並判定不可比；pytest 283 passed、4 skipped。**「不同季」情境未改用單季 EPS，結案不修**：情境罕見（2330 與 TSM 的 Q1、Q2 都同日公布，「不同季」是驗證腳本寫死的假資料）、有害行為已消除、兩種 prompt 補強都失敗已還原，且證交所 OpenAPI 只給最新一季快照、無法自行算出單季值。
+**台股累計 EPS**：TWSE OpenAPI 的綜合損益表是年初至當季累計，Q2 的 49.33 是 1～6 月累計，單季為 27.25，模型曾拿 49.33 去比 ADR 單季等值。標題、EPS 行、TWSE-API 來源與即時市場區塊四處補標示，並對七家重抓。驗證（`qwen3.5:9b`，每題 1 次）：同季題 EPS 換算 27.45 對 27.25（+0.74%），不同季題標累計並判定不可比。**「不同季」情境未改用單季 EPS，結案不修**：情境罕見（2330 與 TSM 同日公布），且證交所 OpenAPI 只給最新一季快照、無法算出單季值。
 
 ### 四、個股題混入無關公司內容
 
@@ -630,28 +625,28 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ### 一、靜態 demo 重播頁
 
-`docs/demo/` 是純靜態頁（`index.html` 加 `data.json`），由 GitHub Pages 自 main 的 `/docs` 發布：<https://thelilywang.github.io/finance-ai-assistant/demo/>，`?q=<id>` 指定題目、`?instant` 略過動畫。收錄 4 題真實問答（美股財報、雙掛牌 ADR 含反問選 both、新聞、NVDA 對 GOOGL 多標的比較），重播節點進度與每節點實測耗時、答案、可點的 `[來源N]` 與 yfinance 圖表。實測總耗時 333～644 秒：單一標的兩題（333、370 秒）落在 186～470 秒內，雙掛牌選 both（522 秒）與多標的比較（644 秒）超出；README 改以「每題約 3～11 分鐘」概括，分類範圍見 PROJECT.md 與「已知限制」。錄製腳本 `scripts/record_demo.py` 鏡像 `app.py` 的串流與來源組裝，在 app 容器內執行。
+`docs/demo/` 是純靜態頁（`index.html` 加 `data.json`），由 GitHub Pages 自 main 的 `/docs` 發布：<https://thelilywang.github.io/finance-ai-assistant/demo/>，`?q=<id>` 指定題目、`?instant` 略過動畫。收錄 4 題真實問答（美股財報、雙掛牌 ADR 含反問選 both、新聞、NVDA 對 GOOGL 多標的比較），重播節點進度與每節點實測耗時、答案、可點的 `[來源N]` 與 yfinance 圖表。實測總耗時 333～644 秒，README 以「每題約 3～11 分鐘」概括，分類範圍見 PROJECT.md 與「已知限制」。
 
 **已知限制**：答案是模型原始輸出、未手改，仍有瑕疵——tsmc-adr 一處引用來源與內容不符、殘留兩個簡體字，nvda 有市場數據被誤標為新聞來源。專案沒有簡轉繁後處理（可考慮 OpenCC，需新增依賴，未做）。
 
 ### 二、錄製中發現並修正的四個問題
 
 - **補抓迴圈**：新聞時效看的是檢索回來的 top-k chunk。NVDA 補抓後寫入 0 筆（文章早已入庫），top-k 仍舊、公司持續被判過期，agent 反覆補抓到 4 輪上限。修法（`src/graph.py` 的 `route_after_tools`）：本輪已呼叫過 `fetch_company_data` 的公司不再判過期，單一公司已補抓過就直接進 `assemble`。**已知限制**：時效仍以 top-k 而非 DB 最新新聞判斷，第一次可能仍有一次不必要的補抓。
-- **檢索偶發落空（「解析檢索結果失敗」）**：兩個獨立原因。(a) 連線池把閒置後被斷開的連線直接借出，加上 `check=ConnectionPool.check_connection`；A/B 手動終止後端連線，無 check 失敗（`AdminShutdown`）、有 check 正常。(b) MCP 回「couldn't get a connection after 2.00 sec」被當成 JSON 解析失敗，推測是主機滿載（Ollama 生成加 Langfuse 的 clickhouse 約 560% CPU）時建新連線超過 2 秒（未在滿載下重現）；平時建連實測 40～420ms，`timeout` 由 2 秒調為 10 秒。**取捨**：真正的 DB 故障多等最長 8 秒才報錯（推翻 09-03「2 秒內連不上即代表 DB 已掛」的假設——滿載主機上慢不等於掛）。
-- **來源清單可讀性**（`src/app.py`）：SEC-XBRL、TWSE-API 的原始字串改為可讀名稱（如「SEC XBRL financials (NVDA, 2026-08-26)」「TWSE financials (2330, 115Q2)」）；EDGAR／XBRL 帶申報日期以區分不同申報，連結指向該公司 EDGAR 申報列表。**已知限制**：source 字串不含 CIK，無法直連單份申報。
+- **檢索偶發落空（「解析檢索結果失敗」）**：兩個獨立原因。(a) 連線池把閒置後被斷開的連線直接借出，加上 `check=ConnectionPool.check_connection`；A/B 手動終止後端連線，無 check 失敗（`AdminShutdown`）、有 check 正常。(b) MCP 回「couldn't get a connection after 2.00 sec」被當成 JSON 解析失敗，推測是主機滿載時建新連線超過 2 秒（未在滿載下重現）；平時建連實測 40～420ms，`timeout` 由 2 秒調為 10 秒。**取捨**：真正的 DB 故障多等最長 8 秒才報錯（推翻 09-03「2 秒內連不上即代表 DB 已掛」的假設——滿載主機上慢不等於掛）。
+- **來源清單可讀性**（`src/app.py`）：SEC-XBRL、TWSE-API 的原始字串改為可讀名稱（如「SEC XBRL financials (NVDA, 2026-08-26)」）；EDGAR／XBRL 帶申報日期以區分不同申報，連結指向該公司 EDGAR 申報列表。**已知限制**：source 字串不含 CIK，無法直連單份申報。
 - **雙掛牌選 both 時圖表漏 ADR**：圖表只畫台股，改用 `_side_by_side`（與 09-24 行情抓取同一個代號來源），正式環境同受影響。
 
 測試 292 passed、4 skipped。
 
 ### 改動內容
 
-| 項目 | 改動說明 | commit |
-|---|---|---|
-| demo 重播頁與錄製腳本 | `docs/demo/`、`scripts/record_demo.py`，README 補 Demo／截圖 | `8125c19` |
-| 補抓迴圈 | `route_after_tools`、`_fetched_companies`、`_stale_companies` | `37c1b0e` |
-| 連線池 | `check_connection` 與 `timeout` 2→10 秒（`src/vectorstore.py`） | `41ff5f8` |
-| 來源清單顯示 | `_format_source`、`_clean_url`、`_source_meta` | `b72b28b` |
-| 雙掛牌圖表 | 改用 `_side_by_side` | `14dcdc2` |
+| 項目 | commit |
+|---|---|
+| demo 重播頁與錄製腳本 | `8125c19` |
+| 補抓迴圈 | `37c1b0e` |
+| 連線池 | `41ff5f8` |
+| 來源清單顯示 | `b72b28b` |
+| 雙掛牌圖表 | `14dcdc2` |
 
 ---
 
@@ -673,7 +668,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ## 2026-10-28　LLM 呼叫上限、相依套件漏洞盤點與觀測／驗證修正　`LangGraph` `可觀測性` `工程品質`
 
-主線是讓失控或失敗的環節可被界定與觀測（第一～三節）；第四節為獨立的相依套件漏洞盤點。
+主線是讓失控或失敗的環節可被界定、觀測，並讓逾時對使用者可見（第一～三節）；第四節為獨立的相依套件漏洞盤點。
 
 ### 一、單次 LLM 呼叫沒有上限
 
@@ -692,13 +687,13 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **實機驗證**：agent 逾時設 5 秒跑「NVDA 最近的營收成長動能是什麼？」，25.5 秒走到 `assemble` 並記下逾時 warning；`OLLAMA_NUM_PREDICT=40` 實跑，`done_reason=length`、`eval_count=40`，回傳截斷答案而非錯誤。
 
-**已知限制**：部分 token 已串流後才逾時，使用者會看到半截答案而非逾時文案（`app.py` 只在串流為空時換文案），暫不做。
+**串流中途逾時**：原本串流已吐出 token 才逾時，使用者會看到半截答案加免責聲明，誤以為是完整回答。改為保留半截內容並加註「生成途中逾時，以上內容不完整」；不整段換成逾時文案，因為已吐出的通常是有效結論。實機未重現 600 秒停滯，只有單元測試覆蓋。
 
 **`extract_filters` 的上限降級**：該節點用 `with_structured_output`，拿不到 `response_metadata`，沒有 token／耗時欄位，撞 `num_predict` 也沒有 warning。原以為撞上限會解析失敗而留下紀錄，**實測推翻**：在真的 Ollama（`qwen3.5:9b`）把 `num_predict` 調到 10，模型輸出殘缺 JSON `{"companies": ["233`、`done_reason=length`，langchain 卻寬鬆解析成功，`parsing_error` 為 None，撞上限完全不留紀錄。
 
 改 `include_raw=True`，從 raw `AIMessage` 取 usage 寫進 log，解析錯誤自行 raise 以沿用原降級；`done_reason=="length"` 直接視為失敗、降級為不過濾，因為正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信。**取捨**：截斷若發生在 `companies` 已完整之後，會丟掉正確代號、變成全庫檢索——答案變廣但不會錯，可接受。
 
-**驗證**：pytest 311 passed、4 skipped；ruff 通過；`num_predict=10` 實測先出 warning、log 記「結構化輸出失敗」、結果降級；image 已重建。
+**驗證**：`num_predict=10` 實測先出 warning、log 記「結構化輸出失敗」、結果降級；image 已重建。
 
 ### 二、`news_since_days` 非數字字串讓 tool 呼叫整個失敗
 
@@ -720,9 +715,8 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 - `pypdf>=6.21.2`：ingest 解析外部下載的財報 PDF，惡意 PDF 可造成 DoS。
 - `mcp>=1.30.0`：舊版 streamable-http 在 stateful 模式下 session 不回收會耗盡記憶體，client 還會跟隨跨站 redirect 而可能把 Bearer token 送到別的 host；本專案 mcp-server 正是 stateful streamable-http 加 Bearer 驗證。
 - CI 在 pytest 之後加 `pip-audit`，新 CVE 公布時轉紅，提醒重建 image。
-- 本機 venv 須用 `pip install -U --upgrade-strategy eager` 才清零（否則間接相依仍有 39 筆）。
 
-**驗證**：app 與 mcp-server 兩個 image 及 venv 的 pip-audit 皆為 0 筆（commit 後複查仍為 0 筆）；ruff 通過，pytest 309 passed、4 skipped；在 app 容器內帶 Bearer token 連 mcp-server，成功列出 3 個 tool，mcp 1.30 handshake 正常。
+**驗證**：app 與 mcp-server 兩個 image 及 venv 的 pip-audit 皆為 0 筆（commit 後複查仍為 0 筆）；在 app 容器內帶 Bearer token 連 mcp-server，成功列出 3 個 tool，mcp 1.30 handshake 正常。
 
 **已知限制**：完整問答沒有在 mcp 1.30 下重跑，只驗到連線與 tool 列表。
 
@@ -735,3 +729,4 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | `no_citation` 規則 | `check_answer_format` 新增規則，log 帶 `companies` | `56c27c1` |
 | 相依套件漏洞盤點 | `requirements.txt` 調高 `pypdf`、`mcp` 下限；CI 加 `pip-audit` 步驟 | `e15c773` |
 | `extract_filters` usage 與上限降級 | `include_raw=True`、撞上限視為失敗降級 | `c89f851` |
+| 串流中途逾時說明 | 串流中途逾時時加註內容不完整 | — |
