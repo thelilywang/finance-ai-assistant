@@ -118,6 +118,22 @@ FILTERS_MODEL = os.getenv("FILTERS_MODEL", "")
 # 在節點間來回切換等於每次都多付一次載入時間。
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 
+# 單次 LLM 呼叫的 HTTP 逾時（秒），擋的是「停滯」（prefill 過久、server 卡死）——因串流，
+# 這是讀取間隔逾時，持續吐 token 的失控生成由下方 OLLAMA_NUM_PREDICT 擋。實測 TSLA 第 4 輪
+# agent 兩次 >900 秒不結束，Ollama 被占住、連 bge-m3 embedding 都排隊卡死；MAX_TOOL_ROUNDS
+# 只限輪數，擋不住「單一輪不結束」。正常最慢單輪 agent 290 秒（見 MAX_TOOL_ROUNDS 註解）、
+# generate 約 170 秒，600 留約兩倍餘裕。逾時後 client 斷線，Ollama 會中止該次生成。
+OLLAMA_TIMEOUT_SECONDS = max(1, int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600")))
+
+# 單次生成的 token 上限。ChatOllama 內部固定串流，httpx timeout 實際是「兩次讀取之間
+# 的間隔」而非總時限：失控生成只要持續吐 token 就永遠不會觸發，timeout 只擋得住停滯
+# （prefill 過久、server 卡死），所以失控生成要靠 token 上限擋。
+# 近 66 天 log 實測：agent output_tokens n=62 中位 194、p95 361、max 629（含推理）；
+# generate n=137 中位 867、p95 1170、max 1344，done_reason 全為 "stop"。
+# 4096 約為 generate 最大值的 3 倍、agent 最大值的 6.5 倍，正常流量碰不到。
+# 撞到上限時 done_reason 會是 "length"，_warn_if_truncated 會記一筆 warning。
+OLLAMA_NUM_PREDICT = max(1, int(os.getenv("OLLAMA_NUM_PREDICT", "4096")))
+
 # tool 呼叫輪數上限。最後一輪常是模型只回一句「我查完了」（tool_calls 0），
 # 實測單輪可達 93 至 290 秒，佔單題三到六成。收緊到 3 能否在不損答案品質的
 # 前提下省下那一輪，須同程式碼同容器 A/B，故拉成可調參數而非改常數。

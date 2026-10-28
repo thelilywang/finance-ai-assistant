@@ -28,6 +28,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from typing import Annotated, Literal, TypedDict
 
+import httpx
+import ollama
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -82,6 +84,17 @@ def _model_of(state: GraphState) -> str:
     return state.get("model") or config.LLM_MODEL
 
 
+# 逾時設定見 config.OLLAMA_TIMEOUT_SECONDS；ChatOllama 的 client_kwargs 會原樣傳給 httpx
+def _client_kwargs() -> dict:
+    return {"timeout": config.OLLAMA_TIMEOUT_SECONDS}
+
+
+# 只重試連線層／server 端的暫態錯誤（模型載入中等）。逾時不重試：停滯會重現，
+# 重試只是把等待放大 3 倍；結構化輸出解析失敗在 temperature 0 下是確定性的，重試
+# 只會得到同一個結果（extract_filters 本來就會對任何例外降級成不過濾）。
+_RETRYABLE = (httpx.ConnectError, httpx.RemoteProtocolError, ollama.ResponseError)
+
+
 @lru_cache(maxsize=8)
 def _llms(model: str) -> dict:
     """建立某個模型的三個實例。lru_cache 讓同一模型的多個 session 共用，換模型才新建。
@@ -91,19 +104,21 @@ def _llms(model: str) -> dict:
     """
     base = ChatOllama(
         model=model, base_url=config.OLLAMA_BASE_URL, temperature=0, reasoning=False,
-        num_ctx=config.OLLAMA_NUM_CTX,
+        num_ctx=config.OLLAMA_NUM_CTX, client_kwargs=_client_kwargs(),
+        num_predict=config.OLLAMA_NUM_PREDICT,
     )
     return {
         # with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
-        "llm": base.with_retry(stop_after_attempt=3),
+        "llm": base.with_retry(retry_if_exception_type=_RETRYABLE, stop_after_attempt=3),
         "filters": base.with_structured_output(ExtractedFilters).with_retry(
-            stop_after_attempt=3
+            retry_if_exception_type=_RETRYABLE, stop_after_attempt=3
         ),
         # tool-calling 專用：reasoning=False 會讓模型把「我要呼叫某工具」寫成文字而非
         # 產生結構化 tool_calls（實測 A/B：關推理時同一情境完全不發 tool call，開啟則
         # 正常），因此 agent 節點不能沿用關掉推理的實例。
         "tool": ChatOllama(model=model, base_url=config.OLLAMA_BASE_URL, temperature=0,
-                           num_ctx=config.OLLAMA_NUM_CTX),
+                           num_ctx=config.OLLAMA_NUM_CTX, client_kwargs=_client_kwargs(),
+                           num_predict=config.OLLAMA_NUM_PREDICT),
     }
 
 
@@ -155,7 +170,14 @@ def _warn_if_truncated(node: str, qid: str, usage: dict) -> None:
 
     仍可能誤報：原始 prompt 剛好落在 limit ±8 以內、沒被截斷，也會被判定成
     截斷。
+
+    輸出端另判：done_reason == "length" 代表撞到 OLLAMA_NUM_PREDICT，答案被截斷
+    （正常流量實測全為 "stop"，見 config 註解），撞到就是失控生成被擋下。
     """
+    if usage.get("done_reason") == "length":
+        log.warning("輸出撞到 token 上限，答案被截斷", extra={"fields": {
+            "node": node, "qid": qid, "output_tokens": usage.get("output_tokens"),
+            "num_predict": config.OLLAMA_NUM_PREDICT}})
     prompt_tokens = usage.get("prompt_tokens")
     if prompt_tokens is None:
         return
@@ -283,7 +305,14 @@ def rewrite_question(state: GraphState) -> GraphState:
 新問題：{state['question']}
 """
     started = time.monotonic()
-    resp = _llms(_model_of(state))["llm"].invoke(prompt)
+    try:
+        resp = _llms(_model_of(state))["llm"].invoke(prompt)
+    except httpx.TimeoutException:
+        # 改寫只是補強：逾時就沿用原問句繼續，不為它卡住整題（不重試，見 _RETRYABLE）
+        log.warning("rewrite_question LLM 呼叫逾時，沿用原問句", extra={"fields": {
+            "node": "rewrite_question", "qid": _qid(state["question"]),
+            "timeout_s": config.OLLAMA_TIMEOUT_SECONDS}})
+        return state
     rewritten = resp.content.strip()
     # qid 以改寫「後」的問句計算：下游節點看到的都是改寫後的問句，用改寫前的算會讓
     # 這筆紀錄掛在一個之後再也不出現的 qid 上，同一題的耗時就串不起來。
@@ -888,12 +917,20 @@ async def agent(state: GraphState) -> GraphState:
             "node": "agent", "stale": [c for c, _ in stale], "missing": missing}})
     messages = messages + directive
     started = time.monotonic()
-    resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(
-        _trim_for_llm(messages)
-    )
     # round 從既有訊息推算，與 agent_route 的算法一致，回測時可看出 tool loop 跑了幾輪、每輪多久
     rounds = sum(1 for m in messages if isinstance(m, AIMessage) and m.tool_calls)
     qid = _qid(state["question"])
+    try:
+        resp = await _llms(_model_of(state))["tool"].bind_tools(tools).ainvoke(
+            _trim_for_llm(messages)
+        )
+    except httpx.TimeoutException:
+        # 停滯逾時（失控生成由 num_predict 擋）：不重試，回一則沒有 tool_calls 的空訊息，
+        # agent_route 會走到 assemble，用已檢索到的資料作答（沒資料就 no_result）
+        log.warning("agent LLM 呼叫逾時，以現有檢索結果收工", extra={"fields": {
+            "node": "agent", "qid": qid, "round": rounds + 1,
+            "timeout_s": config.OLLAMA_TIMEOUT_SECONDS}})
+        return {**state, "messages": directive + [AIMessage(content="")]}
     usage = _ollama_usage(resp)
     log_duration(log, "agent", started, node="agent", model=_model_of(state),
                  qid=qid, round=rounds + 1,
@@ -1522,7 +1559,16 @@ def generate(state: GraphState) -> GraphState:
 {market_block}{dual_block}{history_block}
 使用者問題：{state['question']}
 """
-    resp = _llms(_model_of(state))["llm"].invoke(prompt)
+    try:
+        resp = _llms(_model_of(state))["llm"].invoke(prompt)
+    except httpx.TimeoutException:
+        # 不重試、不跑格式檢查（沒有模型輸出可檢）。注意 app.py 串流已吐出的 token 不會被
+        # 這則 answer 取代；只有逾時前一個 token 都沒送出（如 prefill 停滯）時使用者才看得到它
+        qid = _qid(state["question"])
+        log.warning("generate LLM 呼叫逾時", extra={"fields": {
+            "node": "generate", "qid": qid, "timeout_s": config.OLLAMA_TIMEOUT_SECONDS}})
+        return {**state, "answer": append_disclaimer(t(lang, "generate_timeout"), lang),
+                "allowed_fields": fields}
     # 免責聲明是固定常數，由程式追加而非要模型複誦：實測 40 筆真實回答只有 11 筆
     # 命中，且寬鬆比對（只找「非投資建議」等關鍵詞）僅多撈到 1 筆——不是模型改寫，
     # 是整段「固定追加」區塊沒生出來時跟著一起掉。文案解不了格式契約（同一個坑

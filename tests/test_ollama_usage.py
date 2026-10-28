@@ -84,3 +84,17 @@ def test_warn_if_truncated_no_prompt_tokens_is_silent(caplog):
     with caplog.at_level(logging.WARNING, logger="graph"):
         _warn_if_truncated("extract_filters", "abcd1234", {})
     assert caplog.records == []
+
+
+def test_warn_if_output_hits_num_predict(monkeypatch, caplog):
+    monkeypatch.setattr(config, "OLLAMA_NUM_PREDICT", 40)
+    with caplog.at_level(logging.WARNING, logger="graph"):
+        _warn_if_truncated("generate", "abcd1234", {"output_tokens": 40, "done_reason": "length"})
+    assert caplog.records[-1].fields == {"node": "generate", "qid": "abcd1234",
+                                         "output_tokens": 40, "num_predict": 40}
+
+
+def test_warn_if_output_stop_is_silent(caplog):
+    with caplog.at_level(logging.WARNING, logger="graph"):
+        _warn_if_truncated("generate", "abcd1234", {"output_tokens": 900, "done_reason": "stop"})
+    assert not caplog.records
