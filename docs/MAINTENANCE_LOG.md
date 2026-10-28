@@ -21,6 +21,7 @@
 - **EDGAR／XBRL 來源連結只到該公司申報列表**——source 字串不含 CIK，無法直連單份申報。詳見 2026-10-10 章節第二節。
 - **無簡轉繁後處理**——模型偶爾殘留簡體字，demo 答案未手改；可考慮 OpenCC，需新增依賴，尚未做。詳見 2026-10-10 章節第一節。
 - **`generate` 串流中途停滯逾時，使用者看到半截答案加免責聲明而非逾時文案**（`src/app.py`）——需停滯超過 600 秒才會發生，暫不處理。詳見 2026-10-28 章節第一節。
+- **mcp 升到 1.30 後只驗證連線與 tool 列表**——完整問答沒有重跑。詳見 2026-10-28 章節第四節。
 
 ## 後續方向
 
@@ -672,13 +673,13 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ## 2026-10-28　LLM 呼叫上限、相依套件漏洞盤點與觀測／驗證修正　`LangGraph` `可觀測性` `工程品質`
 
-同一條線是「讓失控或失敗的環節可被界定與觀測」：先替 Ollama 單次呼叫加上限（A/B 時一次不結束的生成拖垮整個服務），補上 `extract_filters` 的上限觀測，再修一個讓 tool 呼叫整個失敗的參數驗證，最後補上無引用答案的觀測規則，並記下為何不用 LLM judge 重生成；另有一條獨立的工程品質線，用 pip-audit 盤點相依套件漏洞（第四節）。
+主線是讓失控或失敗的環節可被界定與觀測（第一～三節）；第四節為獨立的相依套件漏洞盤點。
 
 ### 一、單次 LLM 呼叫沒有上限
 
 **起因**：`route_after_tools` A/B 時，TSLA 關閉捷徑那臂的第 4 輪 agent 兩次都超過 900 秒不結束，Ollama 被占住，連 bge-m3 embedding 都排隊卡死。`MAX_TOOL_ROUNDS` 只限輪數，擋不住單一輪不結束。
 
-**關鍵發現**：`ChatOllama` 內部固定串流，httpx 的 timeout 是「讀取間隔逾時」而非總時限；持續吐 token 的失控生成不會觸發，timeout 只擋停滯（prefill 過久、server 卡死）。因此需要兩道上限：`OLLAMA_TIMEOUT_SECONDS=600` 擋停滯（正常最慢單輪 agent 290 秒、`generate` 約 170 秒），`OLLAMA_NUM_PREDICT=4096` 擋失控生成。後者依據近 66 天 log：
+**關鍵發現**：`ChatOllama` 內部固定串流，httpx 的 timeout 是「讀取間隔逾時」而非總時限，只擋停滯、擋不住持續吐 token 的失控生成。因此需兩道上限：`OLLAMA_TIMEOUT_SECONDS=600` 擋停滯（正常最慢單輪 agent 290 秒、`generate` 約 170 秒），`OLLAMA_NUM_PREDICT=4096` 擋失控生成，依據近 66 天 log：
 
 | 節點 | n | output_tokens 中位 | p95 | max |
 |---|---|---|---|---|
@@ -687,47 +688,43 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 `generate` 的 `done_reason` 全為 `stop`，4096 約為其最大值的 3 倍。
 
-**重試範圍收斂**：`with_retry` 原本重試所有例外，逾時也重試，最壞等 3 倍；改為只重試 `httpx.ConnectError`、`httpx.RemoteProtocolError`、`ollama.ResponseError`。解析失敗在 temperature 0 下是確定性的，不重試。
-
-**逾時降級**：agent 回空訊息直接走 `assemble`；`rewrite_question` 沿用原問句；`extract_filters` 原本就降級成不過濾，現在一次就放棄；`generate` 回固定訊息（`generate_timeout`，中英各一）。撞到 token 上限（`done_reason=length`）時 `_warn_if_truncated` 記 warning。
+**處理**：重試改為只重試 `httpx.ConnectError`、`httpx.RemoteProtocolError`、`ollama.ResponseError`（原本逾時也重試，最壞等 3 倍；解析失敗在 temperature 0 下是確定性的，不重試）。逾時降級：agent 回空訊息直接走 `assemble`，`rewrite_question` 沿用原問句，`extract_filters` 降級成不過濾，`generate` 回固定訊息（`generate_timeout`，中英各一）。撞到 token 上限（`done_reason=length`）時 `_warn_if_truncated` 記 warning。
 
 **實機驗證**：agent 逾時設 5 秒跑「NVDA 最近的營收成長動能是什麼？」，25.5 秒走到 `assemble` 並記下逾時 warning；`OLLAMA_NUM_PREDICT=40` 實跑，`done_reason=length`、`eval_count=40`，回傳截斷答案而非錯誤。
 
-**已知限制**：`generate` 若已串流出部分 token 才停滯逾時，`app.py` 只在串流內容為空時才換成 final answer，使用者會看到半截答案加免責聲明、看不到逾時文案；要處理須改 `app.py` 串流邏輯，暫不做。
+**已知限制**：部分 token 已串流後才逾時，使用者會看到半截答案而非逾時文案（`app.py` 只在串流為空時換文案），暫不做。
 
-**`extract_filters` 的 usage 與上限降級**：該節點用 `with_structured_output`，只回傳解析後物件、拿不到 `response_metadata`，所以沒有 token／耗時欄位，撞 `num_predict` 也沒有 warning。
+**`extract_filters` 的上限降級**：該節點用 `with_structured_output`，拿不到 `response_metadata`，沒有 token／耗時欄位，撞 `num_predict` 也沒有 warning。原以為撞上限會解析失敗而留下紀錄，**實測推翻**：在真的 Ollama（`qwen3.5:9b`）把 `num_predict` 調到 10，模型輸出殘缺 JSON `{"companies": ["233`、`done_reason=length`，langchain 卻寬鬆解析成功，`parsing_error` 為 None，撞上限完全不留紀錄。
 
-**實測推翻原假設**：原以為撞上限會解析失敗而留下失敗紀錄。在真的 Ollama（`qwen3.5:9b`）把 `num_predict` 調到 10，模型輸出殘缺 JSON `{"companies": ["233`、`done_reason=length`，langchain 卻寬鬆解析成功（前段取模型值、後段補預設值），`parsing_error` 為 None——修改前撞上限完全不留紀錄。
-
-**處理**：改 `include_raw=True`，從 raw `AIMessage` 取 usage 寫進 log；`include_raw` 下解析錯誤不再拋出，改自行 raise 以沿用原本的降級。`done_reason=="length"` 直接視為失敗、降級為不過濾，因為本節點正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信。**取捨**：截斷若發生在 `companies` 已完整之後，會丟掉正確代號、變成全庫檢索——答案變廣但不會錯，可接受。
+改 `include_raw=True`，從 raw `AIMessage` 取 usage 寫進 log，解析錯誤自行 raise 以沿用原降級；`done_reason=="length"` 直接視為失敗、降級為不過濾，因為正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信。**取捨**：截斷若發生在 `companies` 已完整之後，會丟掉正確代號、變成全庫檢索——答案變廣但不會錯，可接受。
 
 **驗證**：pytest 311 passed、4 skipped；ruff 通過；`num_predict=10` 實測先出 warning、log 記「結構化輸出失敗」、結果降級；image 已重建。
 
 ### 二、`news_since_days` 非數字字串讓 tool 呼叫整個失敗
 
-型別宣告為 `int`，pydantic 在函式執行前就擋掉 `"最近"`，`mcp_server` 內的防禦性清理根本執行不到；聯發科一題的兩次檢索都失敗、直接 `no_result`。改為 `int | str | None`：純數字字串轉 int，其他視為不過濾；float（如 7.5）仍由 schema 擋。實機驗證：經 MCP client 送 `None`、7、`"7"`、7.0、0、-3、`"最近"`、`"null"` 皆正常回傳，7.5 回 validation error。
+型別宣告為 `int`，pydantic 在函式執行前就擋掉 `"最近"`，`mcp_server` 內的防禦性清理執行不到；聯發科一題的兩次檢索都失敗、直接 `no_result`。改為 `int | str | None`：純數字字串轉 int，其他視為不過濾；float（如 7.5）仍由 schema 擋。經 MCP client 送 `None`、7、`"7"`、7.0、0、-3、`"最近"`、`"null"` 皆正常回傳，7.5 回 validation error。
 
 ### 三、`no_citation` 觀測規則，與不採用 LLM judge 重生成
 
-**背景**：既有已知限制是多標的時 9B 模型不輸出 `[來源N]`（2/2 次），單標的正常（詳見 2026-09-16 章節）。`check_answer_format` 新增 log-only 規則 `no_citation`（有來源卻沒有任何落在範圍內的引用），「決策卡格式違規」log 多帶 `companies`（公司數），可直接驗證「多標的才缺引用」的假設。
+既有已知限制是多標的時 9B 模型不輸出 `[來源N]`（2/2 次），單標的正常（詳見 2026-09-16 章節）。`check_answer_format` 新增 log-only 規則 `no_citation`（有來源卻沒有任何落在範圍內的引用），「決策卡格式違規」log 多帶 `companies`（公司數），可直接驗證「多標的才缺引用」。
 
-**結論：曾評估「RAGAS／LLM-as-judge 檢查 faithfulness、不合格就重生成」，目前不採用。** 同輸入重生成大概率仍無引用，因成因是 context 規模而非隨機性；RAGAS 一題需 N+1 次 LLM 呼叫、新增依賴、中文拆句不可靠，9B 評 9B 可信度也低；答案是串流輸出，事後 judge 時使用者已看完，要擋就得緩衝整段，體感延遲更差。觸發條件是 `no_citation` 實測頻率夠高。屆時方向是處理成因（多標的按公司配額縮 context，或逐家生成再合併），或無引用時加註而非重生成；judge 較適合放離線 eval 搭配 golden set。
-
-測試：pytest 309 passed、4 skipped；ruff 通過。
+**結論：「RAGAS／LLM-as-judge 檢查 faithfulness、不合格就重生成」目前不採用。** 同輸入重生成大概率仍無引用，成因是 context 規模而非隨機性；RAGAS 一題需 N+1 次 LLM 呼叫、新增依賴、中文拆句不可靠，9B 評 9B 可信度也低；答案是串流輸出，事後 judge 時使用者已看完，要擋就得緩衝整段，體感延遲更差。觸發條件是 `no_citation` 實測頻率夠高，屆時方向是處理成因（多標的按公司配額縮 context，或逐家生成再合併），或無引用時加註而非重生成；judge 較適合放離線 eval 搭配 golden set。
 
 ### 四、相依套件漏洞盤點
 
-**起因**：近期資安事件頻傳，用 pip-audit（比對 PyPA／OSV 漏洞資料庫的掃描工具）盤點相依套件。
+**起因**：用 pip-audit（比對 PyPA／OSV 漏洞資料庫的掃描工具）盤點相依套件。
 
-**結論：問題出在已安裝的版本過舊，版本約束本身沒錯。** 舊 image（9 天前 build）有 4 筆：pypdf 6.21.1 有 3 筆（修在 6.21.2）、certifi 2026.10.18 有 1 筆；本機 venv 約 115 筆、涉及 14 個套件。但 `requirements.txt` 照現況重新解析成最新版是 0 筆，且沒有釘版，重新 build image 就會拿到已修好的版本。
+**結論：問題出在已安裝的版本過舊，版本約束本身沒錯。** 舊 image 有 4 筆（pypdf 6.21.1 的 3 筆、certifi 2026.10.18 的 1 筆），本機 venv 約 115 筆、涉及 14 個套件；但 `requirements.txt` 重新解析成最新版是 0 筆。
 
-**處理**：直接相依調高兩個下限，目的是防止退回舊版。`pypdf>=6.21.2`：ingest 解析的是外部下載的財報 PDF，惡意 PDF 可造成 DoS 等問題。`mcp>=1.30.0`：舊版 streamable-http 在 stateful 模式下 session 永不回收會耗盡記憶體，client 又會跟隨跨站 redirect，可能把 Bearer token 送到別的 host；本專案的 mcp-server 正是 stateful streamable-http 加 Bearer 驗證。間接相依（aiohttp、urllib3、pyjwt 等）不逐一釘版。CI 在 pytest 之後加一步 `pip-audit`，新 CVE 公布時轉紅，提醒重建 image。本機 venv 用 `pip install -U` 只升級直接列出的套件，間接相依仍有 39 筆，須加 `--upgrade-strategy eager` 才清零，並順手移除沒有任何套件依賴的 pillow、brotli。
+**處理**：實際修掉漏洞的是重建 image（requirements 沒有釘版，裝到 pypdf 6.21.3、mcp 1.30.0、certifi 2026.10.23）；調高下限只是防止退回舊版。
+- `pypdf>=6.21.2`：ingest 解析外部下載的財報 PDF，惡意 PDF 可造成 DoS。
+- `mcp>=1.30.0`：舊版 streamable-http 在 stateful 模式下 session 不回收會耗盡記憶體，client 還會跟隨跨站 redirect 而可能把 Bearer token 送到別的 host；本專案 mcp-server 正是 stateful streamable-http 加 Bearer 驗證。
+- CI 在 pytest 之後加 `pip-audit`，新 CVE 公布時轉紅，提醒重建 image。
+- 本機 venv 須用 `pip install -U --upgrade-strategy eager` 才清零（否則間接相依仍有 39 筆）。
 
-**驗證**：重建後 app 與 mcp-server 兩個 image 的 pip-audit 皆為 0 筆（pypdf 6.21.3、mcp 1.30.0、certifi 2026.10.23），venv 亦為 0 筆；ruff 通過，pytest 309 passed、4 skipped。在 app 容器內帶 Bearer token 連 mcp-server，成功列出 3 個 tool，確認 mcp 1.30 的 handshake 正常。
+**驗證**：app 與 mcp-server 兩個 image 及 venv 的 pip-audit 皆為 0 筆（commit 後複查仍為 0 筆）；ruff 通過，pytest 309 passed、4 skipped；在 app 容器內帶 Bearer token 連 mcp-server，成功列出 3 個 tool，mcp 1.30 handshake 正常。
 
 **已知限制**：完整問答沒有在 mcp 1.30 下重跑，只驗到連線與 tool 列表。
-
-**不採用 lockfile／hash 釘版、base image 釘 digest**：目前重建即可取得修補，釘版反而要自己追更新。觸發條件是需要可重現的 build 時。
 
 ### 改動內容
 
