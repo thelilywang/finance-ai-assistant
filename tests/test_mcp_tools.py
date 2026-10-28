@@ -254,3 +254,34 @@ def test_bearer_auth_rejects_missing_and_wrong_token(monkeypatch):
     assert c.get("/").status_code == 401
     assert c.get("/", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert c.get("/", headers={"Authorization": "Bearer secret"}).status_code == 200
+
+
+def _capture_n(monkeypatch):
+    seen = {}
+
+    def fake(q, c=None, d=None, n=None, m=None):
+        seen["n"] = n
+        return CHUNKS
+
+    monkeypatch.setattr(mcp_server, "retrieve_context", fake)
+    return seen
+
+
+def test_news_since_days_str_is_sanitized(monkeypatch):
+    # 非數字字串視為不過濾，數字字串轉 int（schema 收 str，清理邏輯才執行得到）
+    seen = _capture_n(monkeypatch)
+    asyncio.run(mcp_server.search_knowledge_base("x", "AAPL", None, "最近"))
+    assert seen["n"] is None
+    asyncio.run(mcp_server.search_knowledge_base("x", "AAPL", None, " 90 "))
+    assert seen["n"] == 90
+
+
+def test_news_since_days_non_numeric_passes_mcp_validation(monkeypatch):
+    # 經 FastMCP 的 pydantic 驗證層："最近" 不能讓整個 tool 呼叫失敗（實測曾回 validation error）
+    seen = _capture_n(monkeypatch)
+    out = asyncio.run(mcp_server.mcp.call_tool(
+        "search_knowledge_base",
+        {"question": "x", "company": "AAPL", "news_since_days": "最近"},
+    ))
+    assert "summary_for_llm" in str(out)
+    assert seen["n"] is None

@@ -52,7 +52,7 @@ mcp = FastMCP(
 @mcp.tool()
 async def search_knowledge_base(
     question: str, company: str | None = None, doc_type: str | None = None,
-    news_since_days: int | None = None, market: str | None = None,
+    news_since_days: int | str | None = None, market: str | None = None,
 ) -> str:
     """在向量資料庫中檢索與問題相關的財報/新聞片段。只做檢索，不會自動補抓資料。
 
@@ -87,7 +87,13 @@ async def search_knowledge_base(
     # 只認單一合法值，其餘（含多值、空字串）一律視為不過濾
     if doc_type not in ("financial_report", "news"):
         doc_type = None
-    # 同理，天數也可能收到字串或 0/負數，非正整數一律視為不過濾
+    # 同理，天數也可能收到字串或 0/負數，非正整數一律視為不過濾。
+    # schema 刻意收 str：若只宣告 int，pydantic 會在函式之前擋掉非數字字串，整個 tool
+    # 呼叫失敗，比「不過濾」更糟（實測 "最近" 讓聯發科一題兩次檢索都失敗、直接 no_result）。
+    # LLM 常傳 "90" 這類數字字串，轉 int 後照常過濾。
+    if isinstance(news_since_days, str):
+        s = news_since_days.strip()
+        news_since_days = int(s) if s.isdigit() else None
     if not isinstance(news_since_days, int) or isinstance(news_since_days, bool) or news_since_days < 1:
         news_since_days = None
     # 同上：只認兩個合法值。"both"／"TW"／亂填一律視為不限市場——猜錯市場會過濾出
