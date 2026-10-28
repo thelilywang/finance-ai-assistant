@@ -43,6 +43,7 @@
 | 補抓軌別拆成獨立 MCP tool | 拆分早已完成，進一步拆分無法降低主要成本 | log 量到不必要軌別的浪費佔比 | 2026-09-21 |
 | 分段量測並縮短 prompt、KV cache | 延遲已列入已知限制；縮 prompt 有決策卡欄位與引用退化風險，收益須實測確認 | 部署正式環境或使用者反映等待過久 | 2026-10-07 |
 | 雙掛牌對照表改為 API 查詢＋落地快取 | 對照表實際有 12 檔且帶業務判定，改為 API 查詢僅能涵蓋一半 | 主表檔數成長到人工維護成本過高，或找到完整端點 | 2026-09-21 |
+| lockfile／hash 釘版、base image 釘 digest | 目前重建 image 即可取得修補，暫不釘版 | 需要可重現的 build | 2026-10-28 |
 | 無引用答案以 RAGAS／LLM-as-judge 檢查後重生成 | 重生成大概率仍無引用（成因是 context 規模），且成本高、串流下無法事前攔截 | `no_citation` 實測頻率夠高 | 2026-10-28 |
 
 ---
@@ -669,9 +670,9 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ---
 
-## 2026-10-28　單次 LLM 呼叫上限與兩項觀測／驗證修正　`LangGraph` `可觀測性`
+## 2026-10-28　LLM 呼叫上限、相依套件漏洞盤點與觀測／驗證修正　`LangGraph` `可觀測性` `工程品質`
 
-同一條線是「讓失控或失敗的環節可被界定與觀測」：先替 Ollama 單次呼叫加上限（A/B 時一次不結束的生成拖垮整個服務），再修一個讓 tool 呼叫整個失敗的參數驗證，最後補上無引用答案的觀測規則，並記下為何不用 LLM judge 重生成。
+同一條線是「讓失控或失敗的環節可被界定與觀測」：先替 Ollama 單次呼叫加上限（A/B 時一次不結束的生成拖垮整個服務），補上 `extract_filters` 的上限觀測，再修一個讓 tool 呼叫整個失敗的參數驗證，最後補上無引用答案的觀測規則，並記下為何不用 LLM judge 重生成；另有一條獨立的工程品質線，用 pip-audit 盤點相依套件漏洞（第四節）。
 
 ### 一、單次 LLM 呼叫沒有上限
 
@@ -692,7 +693,15 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **實機驗證**：agent 逾時設 5 秒跑「NVDA 最近的營收成長動能是什麼？」，25.5 秒走到 `assemble` 並記下逾時 warning；`OLLAMA_NUM_PREDICT=40` 實跑，`done_reason=length`、`eval_count=40`，回傳截斷答案而非錯誤。
 
-**已知限制**：`generate` 若已串流出部分 token 才停滯逾時，`app.py` 只在串流內容為空時才換成 final answer，使用者會看到半截答案加免責聲明、看不到逾時文案；要處理須改 `app.py` 串流邏輯，暫不做。另 `extract_filters` 拿不到 usage，撞上限不會出 warning。
+**已知限制**：`generate` 若已串流出部分 token 才停滯逾時，`app.py` 只在串流內容為空時才換成 final answer，使用者會看到半截答案加免責聲明、看不到逾時文案；要處理須改 `app.py` 串流邏輯，暫不做。
+
+**`extract_filters` 的 usage 與上限降級**：該節點用 `with_structured_output`，只回傳解析後物件、拿不到 `response_metadata`，所以沒有 token／耗時欄位，撞 `num_predict` 也沒有 warning。
+
+**實測推翻原假設**：原以為撞上限會解析失敗而留下失敗紀錄。在真的 Ollama（`qwen3.5:9b`）把 `num_predict` 調到 10，模型輸出殘缺 JSON `{"companies": ["233`、`done_reason=length`，langchain 卻寬鬆解析成功（前段取模型值、後段補預設值），`parsing_error` 為 None——修改前撞上限完全不留紀錄。
+
+**處理**：改 `include_raw=True`，從 raw `AIMessage` 取 usage 寫進 log；`include_raw` 下解析錯誤不再拋出，改自行 raise 以沿用原本的降級。`done_reason=="length"` 直接視為失敗、降級為不過濾，因為本節點正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信。**取捨**：截斷若發生在 `companies` 已完整之後，會丟掉正確代號、變成全庫檢索——答案變廣但不會錯，可接受。
+
+**驗證**：pytest 311 passed、4 skipped；ruff 通過；`num_predict=10` 實測先出 warning、log 記「結構化輸出失敗」、結果降級；image 已重建。
 
 ### 二、`news_since_days` 非數字字串讓 tool 呼叫整個失敗
 
@@ -706,6 +715,20 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 測試：pytest 309 passed、4 skipped；ruff 通過。
 
+### 四、相依套件漏洞盤點
+
+**起因**：近期資安事件頻傳，用 pip-audit（比對 PyPA／OSV 漏洞資料庫的掃描工具）盤點相依套件。
+
+**結論：問題出在已安裝的版本過舊，版本約束本身沒錯。** 舊 image（9 天前 build）有 4 筆：pypdf 6.21.1 有 3 筆（修在 6.21.2）、certifi 2026.10.18 有 1 筆；本機 venv 約 115 筆、涉及 14 個套件。但 `requirements.txt` 照現況重新解析成最新版是 0 筆，且沒有釘版，重新 build image 就會拿到已修好的版本。
+
+**處理**：直接相依調高兩個下限，目的是防止退回舊版。`pypdf>=6.21.2`：ingest 解析的是外部下載的財報 PDF，惡意 PDF 可造成 DoS 等問題。`mcp>=1.30.0`：舊版 streamable-http 在 stateful 模式下 session 永不回收會耗盡記憶體，client 又會跟隨跨站 redirect，可能把 Bearer token 送到別的 host；本專案的 mcp-server 正是 stateful streamable-http 加 Bearer 驗證。間接相依（aiohttp、urllib3、pyjwt 等）不逐一釘版。CI 在 pytest 之後加一步 `pip-audit`，新 CVE 公布時轉紅，提醒重建 image。本機 venv 用 `pip install -U` 只升級直接列出的套件，間接相依仍有 39 筆，須加 `--upgrade-strategy eager` 才清零，並順手移除沒有任何套件依賴的 pillow、brotli。
+
+**驗證**：重建後 app 與 mcp-server 兩個 image 的 pip-audit 皆為 0 筆（pypdf 6.21.3、mcp 1.30.0、certifi 2026.10.23），venv 亦為 0 筆；ruff 通過，pytest 309 passed、4 skipped。在 app 容器內帶 Bearer token 連 mcp-server，成功列出 3 個 tool，確認 mcp 1.30 的 handshake 正常。
+
+**已知限制**：完整問答沒有在 mcp 1.30 下重跑，只驗到連線與 tool 列表。
+
+**不採用 lockfile／hash 釘版、base image 釘 digest**：目前重建即可取得修補，釘版反而要自己追更新。觸發條件是需要可重現的 build 時。
+
 ### 改動內容
 
 | 項目 | 改動說明 | commit |
@@ -713,3 +736,5 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | Ollama 呼叫上限 | `OLLAMA_TIMEOUT_SECONDS`、`OLLAMA_NUM_PREDICT`、重試範圍收斂、逾時降級、`_warn_if_truncated` | `172667d` |
 | `news_since_days` 驗證 | 型別改 `int \| str \| None`，非數字字串視為不過濾 | `4d541e6` |
 | `no_citation` 規則 | `check_answer_format` 新增規則，log 帶 `companies` | `56c27c1` |
+| 相依套件漏洞盤點 | `requirements.txt` 調高 `pypdf`、`mcp` 下限；CI 加 `pip-audit` 步驟 | `e15c773` |
+| `extract_filters` usage 與上限降級 | `include_raw=True`、撞上限視為失敗降級 | `c89f851` |
