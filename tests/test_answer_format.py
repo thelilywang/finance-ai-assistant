@@ -166,3 +166,21 @@ def test_rogue_citation_marker_still_caught():
     assert "即時市場數據" in next(
         v["detail"] for v in check_answer_format(rogue, FIELDS, 3, "zh")
         if v["rule"] == "unknown_citation_marker")
+
+
+def test_no_citation_when_sources_but_none_cited():
+    # 多標的時 9B 模型常完全不輸出 [來源N]（MAINTENANCE_LOG 已知限制）
+    bare = GOOD_ZH.replace("[來源1]", "").replace("[來源2]", "")
+    violations = check_answer_format(bare, FIELDS, 3, "zh")
+    assert next(v["detail"] for v in violations if v["rule"] == "no_citation") == {"sources": 3}
+
+
+def test_no_citation_when_only_out_of_range():
+    only_bad = GOOD_ZH.replace("[來源1]", "[來源8]").replace("[來源2]", "[來源9]")
+    assert {"citation_out_of_range", "no_citation"} <= _rule_names(
+        check_answer_format(only_bad, FIELDS, 3, "zh"))
+
+
+def test_no_citation_skipped_without_sources():
+    bare = GOOD_ZH.replace("[來源1]", "").replace("[來源2]", "")
+    assert "no_citation" not in _rule_names(check_answer_format(bare, FIELDS, 0, "zh"))

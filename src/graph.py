@@ -1204,6 +1204,14 @@ def check_answer_format(answer: str, fields: list[str], ordered_count: int, lang
     if out_of_range:
         violations.append({"rule": "citation_out_of_range", "detail": out_of_range})
 
+    # 有來源卻一個有效引用都沒有：MAINTENANCE_LOG:295 已知限制——多標的時 9B 模型
+    # 不輸出 [來源N]（2/2 次），單標的正常。先量真實頻率（搭配 generate 違規 log 的
+    # companies 欄），再決定要不要做 judge／重生成；同樣只寫 log。
+    if ordered_count > 0 and not any(
+        1 <= int(n) <= ordered_count for n in citation_re.findall(answer)
+    ):
+        violations.append({"rule": "no_citation", "detail": {"sources": ordered_count}})
+
     bracket_re = re.compile(r"[\[【]([^\]】]+)[\]】](?!\()")
     unknown = sorted({
         m.group(1) for m in bracket_re.finditer(answer)
@@ -1537,7 +1545,8 @@ def generate(state: GraphState) -> GraphState:
     if violations:
         log.warning("決策卡格式違規", extra={"fields": {
             "node": "generate", "qid": _qid(state["question"]),
-            "violations": violations, "allowed_fields": fields}})
+            "violations": violations, "allowed_fields": fields,
+            "companies": len(state.get("companies") or [])}})
     return {**state, "answer": answer, "allowed_fields": fields}
 
 
