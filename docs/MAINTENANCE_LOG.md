@@ -668,7 +668,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ## 2026-10-28　LLM 呼叫上限、相依套件漏洞盤點與觀測／驗證修正　`LangGraph` `可觀測性` `工程品質`
 
-主線是讓失控或失敗的環節可被界定、觀測，並讓逾時對使用者可見（第一～三節）；第四節為獨立的相依套件漏洞盤點。
+主線是讓失控或失敗的環節可被界定、觀測，並讓逾時對使用者可見（第一～三節）；第四節為獨立的相依套件漏洞盤點；第五節補上第一節降級路徑漏掉的市場鎖定。
 
 ### 一、單次 LLM 呼叫沒有上限
 
@@ -720,6 +720,14 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **已知限制**：完整問答沒有在 mcp 1.30 下重跑，只驗到連線與 tool 列表。
 
+### 五、`extract_filters` 降級時保留市場鎖定
+
+**問題**：`extract_filters` 結構化輸出失敗（含 `done_reason=length` 截斷，見第一節）時降級為 `companies=[]`、`market=None`，連帶 `resolve_market` 找不到公司：不反問雙掛牌市場、不做問句市場校正；`_seed_prompt` 不帶公司與市場，MCP 檢索的 market 留空而跨市場檢索。「台積電營收多少？」可能混入 2330 與 TSM 兩邊資料。`in_scope` 降級為 True，不會誤判離題（已確認）。
+
+**處理**：降級分支用既有的 `_last_dual_listed` 從問句撿回雙掛牌公司、`_market_in_question` 撿回明講的市場，`resolve_market` 照常反問或鎖市場。**取捨**：非雙掛牌公司只在單一市場、沒有外洩風險，所以不撿回，代價是降級時答得較泛。
+
+**驗證**：新增兩個測試（降級仍反問；「台積電美股營收」降級後對到 TSM／us），相關測試 34 passed、4 skipped。**已知限制**：`test_market_filter` 的外洩測試需 DB，本次未實跑。
+
 ### 改動內容
 
 | 項目 | 改動說明 | commit |
@@ -729,4 +737,5 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | `no_citation` 規則 | `check_answer_format` 新增規則，log 帶 `companies` | `56c27c1` |
 | 相依套件漏洞盤點 | `requirements.txt` 調高 `pypdf`、`mcp` 下限；CI 加 `pip-audit` 步驟 | `e15c773` |
 | `extract_filters` usage 與上限降級 | `include_raw=True`、撞上限視為失敗降級 | `c89f851` |
-| 串流中途逾時說明 | 串流中途逾時時加註內容不完整 | — |
+| 串流中途逾時說明 | 串流中途逾時時加註內容不完整 | `47c6c4c` |
+| `extract_filters` 降級保留市場鎖定 | 降級分支以 `_last_dual_listed`、`_market_in_question` 撿回雙掛牌公司與市場；新增 2 個測試 | `795f8f8` |
