@@ -20,6 +20,7 @@
 - **補抓時效仍以檢索回來的 top-k chunk 判斷，而非 DB 內最新新聞**（`route_after_tools`）——第一次檢索可能多一次不必要的補抓；本輪補抓過的公司不再判過期，以此避免反覆補抓。詳見 2026-10-10 章節第二節。
 - **EDGAR／XBRL 來源連結只到該公司申報列表**——source 字串不含 CIK，無法直連單份申報。詳見 2026-10-10 章節第二節。
 - **無簡轉繁後處理**——模型偶爾殘留簡體字，demo 答案未手改；可考慮 OpenCC，需新增依賴，尚未做。詳見 2026-10-10 章節第一節。
+- **`generate` 串流中途停滯逾時，使用者看到半截答案加免責聲明而非逾時文案**（`src/app.py`）——需停滯超過 600 秒才會發生，暫不處理。詳見 2026-10-28 章節第一節。
 
 ## 後續方向
 
@@ -42,6 +43,7 @@
 | 補抓軌別拆成獨立 MCP tool | 拆分早已完成，進一步拆分無法降低主要成本 | log 量到不必要軌別的浪費佔比 | 2026-09-21 |
 | 分段量測並縮短 prompt、KV cache | 延遲已列入已知限制；縮 prompt 有決策卡欄位與引用退化風險，收益須實測確認 | 部署正式環境或使用者反映等待過久 | 2026-10-07 |
 | 雙掛牌對照表改為 API 查詢＋落地快取 | 對照表實際有 12 檔且帶業務判定，改為 API 查詢僅能涵蓋一半 | 主表檔數成長到人工維護成本過高，或找到完整端點 | 2026-09-21 |
+| 無引用答案以 RAGAS／LLM-as-judge 檢查後重生成 | 重生成大概率仍無引用（成因是 context 規模），且成本高、串流下無法事前攔截 | `no_citation` 實測頻率夠高 | 2026-10-28 |
 
 ---
 
@@ -664,3 +666,50 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | CI | `5f26ebd` |
 | MCP 驗證 | `dc07435` |
 | 時效門檻 | `dd7750a` |
+
+---
+
+## 2026-10-28　單次 LLM 呼叫上限與兩項觀測／驗證修正　`LangGraph` `可觀測性`
+
+同一條線是「讓失控或失敗的環節可被界定與觀測」：先替 Ollama 單次呼叫加上限（A/B 時一次不結束的生成拖垮整個服務），再修一個讓 tool 呼叫整個失敗的參數驗證，最後補上無引用答案的觀測規則，並記下為何不用 LLM judge 重生成。
+
+### 一、單次 LLM 呼叫沒有上限
+
+**起因**：`route_after_tools` A/B 時，TSLA 關閉捷徑那臂的第 4 輪 agent 兩次都超過 900 秒不結束，Ollama 被占住，連 bge-m3 embedding 都排隊卡死。`MAX_TOOL_ROUNDS` 只限輪數，擋不住單一輪不結束。
+
+**關鍵發現**：`ChatOllama` 內部固定串流，httpx 的 timeout 是「讀取間隔逾時」而非總時限；持續吐 token 的失控生成不會觸發，timeout 只擋停滯（prefill 過久、server 卡死）。因此需要兩道上限：`OLLAMA_TIMEOUT_SECONDS=600` 擋停滯（正常最慢單輪 agent 290 秒、`generate` 約 170 秒），`OLLAMA_NUM_PREDICT=4096` 擋失控生成。後者依據近 66 天 log：
+
+| 節點 | n | output_tokens 中位 | p95 | max |
+|---|---|---|---|---|
+| agent | 62 | 194 | 361 | 629 |
+| generate | 137 | 867 | 1170 | 1344 |
+
+`generate` 的 `done_reason` 全為 `stop`，4096 約為其最大值的 3 倍。
+
+**重試範圍收斂**：`with_retry` 原本重試所有例外，逾時也重試，最壞等 3 倍；改為只重試 `httpx.ConnectError`、`httpx.RemoteProtocolError`、`ollama.ResponseError`。解析失敗在 temperature 0 下是確定性的，不重試。
+
+**逾時降級**：agent 回空訊息直接走 `assemble`；`rewrite_question` 沿用原問句；`extract_filters` 原本就降級成不過濾，現在一次就放棄；`generate` 回固定訊息（`generate_timeout`，中英各一）。撞到 token 上限（`done_reason=length`）時 `_warn_if_truncated` 記 warning。
+
+**實機驗證**：agent 逾時設 5 秒跑「NVDA 最近的營收成長動能是什麼？」，25.5 秒走到 `assemble` 並記下逾時 warning；`OLLAMA_NUM_PREDICT=40` 實跑，`done_reason=length`、`eval_count=40`，回傳截斷答案而非錯誤。
+
+**已知限制**：`generate` 若已串流出部分 token 才停滯逾時，`app.py` 只在串流內容為空時才換成 final answer，使用者會看到半截答案加免責聲明、看不到逾時文案；要處理須改 `app.py` 串流邏輯，暫不做。另 `extract_filters` 拿不到 usage，撞上限不會出 warning。
+
+### 二、`news_since_days` 非數字字串讓 tool 呼叫整個失敗
+
+型別宣告為 `int`，pydantic 在函式執行前就擋掉 `"最近"`，`mcp_server` 內的防禦性清理根本執行不到；聯發科一題的兩次檢索都失敗、直接 `no_result`。改為 `int | str | None`：純數字字串轉 int，其他視為不過濾；float（如 7.5）仍由 schema 擋。實機驗證：經 MCP client 送 `None`、7、`"7"`、7.0、0、-3、`"最近"`、`"null"` 皆正常回傳，7.5 回 validation error。
+
+### 三、`no_citation` 觀測規則，與不採用 LLM judge 重生成
+
+**背景**：既有已知限制是多標的時 9B 模型不輸出 `[來源N]`（2/2 次），單標的正常（詳見 2026-09-16 章節）。`check_answer_format` 新增 log-only 規則 `no_citation`（有來源卻沒有任何落在範圍內的引用），「決策卡格式違規」log 多帶 `companies`（公司數），可直接驗證「多標的才缺引用」的假設。
+
+**結論：曾評估「RAGAS／LLM-as-judge 檢查 faithfulness、不合格就重生成」，目前不採用。** 同輸入重生成大概率仍無引用，因成因是 context 規模而非隨機性；RAGAS 一題需 N+1 次 LLM 呼叫、新增依賴、中文拆句不可靠，9B 評 9B 可信度也低；答案是串流輸出，事後 judge 時使用者已看完，要擋就得緩衝整段，體感延遲更差。觸發條件是 `no_citation` 實測頻率夠高。屆時方向是處理成因（多標的按公司配額縮 context，或逐家生成再合併），或無引用時加註而非重生成；judge 較適合放離線 eval 搭配 golden set。
+
+測試：pytest 309 passed、4 skipped；ruff 通過。
+
+### 改動內容
+
+| 項目 | 改動說明 | commit |
+|---|---|---|
+| Ollama 呼叫上限 | `OLLAMA_TIMEOUT_SECONDS`、`OLLAMA_NUM_PREDICT`、重試範圍收斂、逾時降級、`_warn_if_truncated` | `172667d` |
+| `news_since_days` 驗證 | 型別改 `int \| str \| None`，非數字字串視為不過濾 | `4d541e6` |
+| `no_citation` 規則 | `check_answer_format` 新增規則，log 帶 `companies` | `56c27c1` |
