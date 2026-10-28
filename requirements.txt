@@ -5,7 +5,8 @@ langchain-community>=0.3.0
 psycopg[binary]>=3.1.0
 psycopg[pool]>=3.1.0
 pgvector>=0.3.0
-pypdf>=4.0.0
+# 6.21.2 以下有惡意 PDF 造成 DoS 等漏洞（pip-audit 2026-10-28），ingest 解析的是外部下載的 PDF
+pypdf>=6.21.2
 python-dotenv>=1.0.0
 tiktoken>=0.7.0
 # chunk 以 token 計數時載 embedding 模型自己的 tokenizer（見 config.CHUNK_UNIT）。
@@ -24,6 +25,7 @@ plotly<6
 markdown
 # kaleido 1.x 需要 plotly >= 6.1.1，與上面的 plotly<6 互斥；0.2.1 是配 plotly 5 的版本
 kaleido==0.2.1
-mcp>=1.28.0
+# 1.30.0 修正 streamable-http session 永不回收、client 跟隨跨站 redirect 等漏洞（pip-audit 2026-10-28）
+mcp>=1.30.0
 langchain-mcp-adapters>=0.3.2
 langfuse>=4,<5

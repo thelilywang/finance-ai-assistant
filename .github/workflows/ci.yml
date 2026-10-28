@@ -19,3 +19,5 @@ jobs:
       - run: ruff check .
       # 沒有 Postgres / Ollama：需要 DB 的測試會自動 skip，LLM 呼叫在測試裡已用 monkeypatch 取代
       - run: pytest -q
+      # 已知漏洞掃描：新 CVE 公布時 CI 會轉紅，提醒重建 image
+      - run: pip install pip-audit && pip-audit
