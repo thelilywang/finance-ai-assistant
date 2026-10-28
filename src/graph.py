@@ -63,6 +63,7 @@ class GraphState(TypedDict):
     lang: str
     model: str  # 本輪使用的 Ollama 模型，由 UI 選單決定；空值則用 config.LLM_MODEL
     market: str | None  # 使用者明講的市場（tw/us/both），沒講則 None
+    generate_timed_out: bool  # generate 呼叫逾時；app 串流已有半截內容時據此補逾時說明
     ask_market: bool  # 雙掛牌但沒指明市場，需先反問使用者
     market_confirmed: bool  # 使用者已透過反問按鈕明確指定市場，不得再被重抽或問句校正覆蓋
     in_scope: bool  # extract_filters 判定問題是否屬財經範疇
@@ -1572,13 +1573,14 @@ def generate(state: GraphState) -> GraphState:
     try:
         resp = _llms(_model_of(state))["llm"].invoke(prompt)
     except httpx.TimeoutException:
-        # 不重試、不跑格式檢查（沒有模型輸出可檢）。注意 app.py 串流已吐出的 token 不會被
-        # 這則 answer 取代；只有逾時前一個 token 都沒送出（如 prefill 停滯）時使用者才看得到它
+        # 不重試、不跑格式檢查（沒有模型輸出可檢）。app.py 串流已吐出的 token 不會被這則
+        # answer 取代；逾時前一個 token 都沒送出（如 prefill 停滯）時才直接顯示它，
+        # 否則由 app.py 依 generate_timed_out 在半截內容後補逾時說明
         qid = _qid(state["question"])
         log.warning("generate LLM 呼叫逾時", extra={"fields": {
             "node": "generate", "qid": qid, "timeout_s": config.OLLAMA_TIMEOUT_SECONDS}})
         return {**state, "answer": append_disclaimer(t(lang, "generate_timeout"), lang),
-                "allowed_fields": fields}
+                "allowed_fields": fields, "generate_timed_out": True}
     # 免責聲明是固定常數，由程式追加而非要模型複誦：實測 40 筆真實回答只有 11 筆
     # 命中，且寬鬆比對（只找「非投資建議」等關鍵詞）僅多撈到 1 筆——不是模型改寫，
     # 是整段「固定追加」區塊沒生出來時跟著一起掉。文案解不了格式契約（同一個坑

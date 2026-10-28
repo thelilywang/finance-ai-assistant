@@ -149,6 +149,19 @@ def _link_citations(body: str, label: str, lang: str, urls: list[str | None]) ->
     return body
 
 
+def _compose_final_content(streamed: str, answer: str, timed_out: bool, lang: str) -> str:
+    """組最終訊息本文：串流內容為空用 final state 的 answer，否則補逾時說明（如有）與免責聲明。"""
+    if not streamed:
+        # no_result 路徑沒有 generate token，用 final state 的 answer 補上
+        return answer
+    # 串流端拿到的是模型吐的 token，不含 generate 補的免責聲明，這裡補在
+    # 來源列之前——免責聲明屬於回答本體，附在來源清單後面讀起來像註腳。
+    # 半截內容若不加說明，使用者會把它當完整回答，故逾時時先接逾時說明。
+    if timed_out:
+        streamed = f"{streamed}\n\n{t(lang, 'generate_timeout_partial')}"
+    return append_disclaimer(streamed, lang)
+
+
 def _trim_for_history(answer: str) -> str:
     """存入 history 前去掉趨勢觀點段落並截斷長度，控制 rewrite/generate prompt 的 token 消耗。"""
     answer = answer.split("## 📈", 1)[0].rstrip()
@@ -451,13 +464,9 @@ async def on_message(message: cl.Message):
             )
 
     answer = final_state["answer"] if final_state else ""
-    if not msg.content:
-        # no_result 路徑沒有 generate token，用 final state 的 answer 補上
-        msg.content = answer
-    else:
-        # 串流端拿到的是模型吐的 token，不含 generate 補的免責聲明，這裡補在
-        # 來源列之前——免責聲明屬於回答本體，附在來源清單後面讀起來像註腳。
-        msg.content = append_disclaimer(msg.content, content_lang)
+    msg.content = _compose_final_content(
+        msg.content, answer, bool(final_state and final_state.get("generate_timed_out")),
+        content_lang)
 
     if final_state:
         await _send_with_sources(msg, final_state, message.content, content_lang)

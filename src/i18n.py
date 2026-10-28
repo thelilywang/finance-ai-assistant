@@ -64,6 +64,7 @@ STRINGS = {
             "也可以手動匯入：python -m src.ingest --file <路徑> --company <代號>，或換個問法。"
         ),
         "generate_timeout": "回答生成逾時，未能完成。下方來源清單仍可參考，請稍後再試或縮小問題範圍。",
+        "generate_timeout_partial": "⚠️ 回答在生成途中逾時，以上內容不完整。請稍後再試或縮小問題範圍。",
         "off_topic": (
             "這個問題看起來不在財經資料的範圍內。本助理只回答上市公司的財報與新聞相關問題。\n\n"
             "請改問特定公司的財務表現、營運狀況或市場動態，例如「台積電最新一季毛利率如何」"
@@ -238,6 +239,10 @@ STRINGS = {
         "generate_timeout": (
             "Answer generation timed out and could not be completed. The source list below is still "
             "usable; please try again later or narrow the question."
+        ),
+        "generate_timeout_partial": (
+            "⚠️ The answer timed out mid-generation; the content above is incomplete. "
+            "Please try again later or narrow the question."
         ),
         "off_topic": (
             "This question appears to fall outside the scope of financial data. "
