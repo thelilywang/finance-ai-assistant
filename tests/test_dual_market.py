@@ -1,4 +1,6 @@
 """雙掛牌標的的市場確認流程。"""
+from langchain_core.messages import AIMessage
+
 import src.graph as _g
 from src.graph import (
     _last_dual_listed,
@@ -130,7 +132,8 @@ def test_ui_button_market_not_overridden_by_reextraction(monkeypatch):
 
     monkeypatch.setattr(
         _g, "_llms",
-        lambda m: {"filters": type("F", (), {"invoke": lambda self, p: _FakeParsed()})()},
+        lambda m: {"filters": type("F", (), {"invoke": lambda self, p: {
+            "raw": AIMessage(content=""), "parsed": _FakeParsed(), "parsing_error": None}})()},
     )
     out = _g.extract_filters({"question": "台積電EPS?", "companies": ["2330"], "market": "us",
                               "lang": "zh", "model": ""})

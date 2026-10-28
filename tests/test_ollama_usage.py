@@ -80,7 +80,7 @@ def test_warn_if_truncated_11338_under_32768_is_silent(monkeypatch, caplog):
 
 
 def test_warn_if_truncated_no_prompt_tokens_is_silent(caplog):
-    # extract_filters 目前拿不到 usage，usage 可能是空 dict
+    # stub LLM 或非 Ollama provider 時 usage 可能是空 dict
     with caplog.at_level(logging.WARNING, logger="graph"):
         _warn_if_truncated("extract_filters", "abcd1234", {})
     assert caplog.records == []

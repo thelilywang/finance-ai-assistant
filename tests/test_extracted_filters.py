@@ -3,6 +3,10 @@
 這個值會直接進 similarity_search 的 SQL 日期比較，本地模型回 0 或負數會讓條件
 變成「未來的新聞」而查出空結果，所以邊界要固定住。
 """
+import logging
+
+from langchain_core.messages import AIMessage
+
 import src.config as config
 import src.graph as graph
 from src.graph import ExtractedFilters
@@ -50,7 +54,8 @@ def test_extract_filters_model_switch(monkeypatch):
 
     class _FakeFilters:
         def invoke(self, prompt):
-            return ExtractedFilters(companies=["AAPL"])
+            return {"raw": AIMessage(content=""), "parsed": ExtractedFilters(companies=["AAPL"]),
+                    "parsing_error": None}
 
     def _fake_llms(model):
         calls.append(model)
@@ -75,3 +80,33 @@ def test_extract_filters_model_switch(monkeypatch):
     monkeypatch.setattr(config, "FILTERS_MODEL", "")
     graph.extract_filters({**state, "model": ""})
     assert calls[-1] == config.LLM_MODEL, calls
+
+
+def _run_filters(monkeypatch, out):
+    monkeypatch.setattr(graph, "_llms", lambda m: {"filters": type(
+        "F", (), {"invoke": lambda self, p: out})()})
+    return graph.extract_filters({"question": "蘋果財報？", "companies": [], "market": None,
+                                  "model": "m"})
+
+
+def test_extract_filters_truncated_output_warns_and_degrades(monkeypatch, caplog):
+    # 撞 num_predict 上限：殘缺 JSON 實測會被寬鬆解析成功（無 parsing_error），
+    # 仍要降級且留下截斷警告
+    raw = AIMessage(content='{"companies": ["233',
+                    response_metadata={"done_reason": "length", "eval_count": 4096})
+    with caplog.at_level(logging.WARNING, logger="graph"):
+        res = _run_filters(monkeypatch, {"raw": raw, "parsed": ExtractedFilters(companies=["2330"]),
+                                         "parsing_error": None})
+    assert res["companies"] == [] and res["in_scope"] is True and res["answer_shape"] == "full"
+    assert any(
+        getattr(r, "fields", {}).get("node") == "extract_filters"
+        and r.fields.get("output_tokens") == 4096 for r in caplog.records), caplog.records
+
+
+def test_extract_filters_normal_no_warning(monkeypatch, caplog):
+    raw = AIMessage(content="", response_metadata={"done_reason": "stop", "eval_count": 20})
+    with caplog.at_level(logging.WARNING, logger="graph"):
+        res = _run_filters(monkeypatch, {"raw": raw, "parsed": ExtractedFilters(companies=["AAPL"]),
+                                         "parsing_error": None})
+    assert res["companies"] == ["AAPL"]
+    assert caplog.records == []

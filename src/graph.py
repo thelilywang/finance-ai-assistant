@@ -110,7 +110,7 @@ def _llms(model: str) -> dict:
     return {
         # with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
         "llm": base.with_retry(retry_if_exception_type=_RETRYABLE, stop_after_attempt=3),
-        "filters": base.with_structured_output(ExtractedFilters).with_retry(
+        "filters": base.with_structured_output(ExtractedFilters, include_raw=True).with_retry(
             retry_if_exception_type=_RETRYABLE, stop_after_attempt=3
         ),
         # tool-calling 專用：reasoning=False 會讓模型把「我要呼叫某工具」寫成文字而非
@@ -436,21 +436,31 @@ def extract_filters(state: GraphState) -> GraphState:
     # _llms 以模型名為 key，換模型只是多一個快取項，不必另建實例管理。
     model = config.FILTERS_MODEL or _model_of(state)
     started = time.monotonic()
-    # 本節點目前拿不到 usage：with_structured_output 預設只回傳解析後的 Pydantic
-    # 物件，原始 AIMessage（含 response_metadata）不在回傳值裡。改成
-    # with_structured_output(..., include_raw=True) 可以拿到，但回傳型態會變成
-    # {"raw","parsed","parsing_error"} 的 dict，下面 parsed.companies 等既有呼叫
-    # 與對應測試都要跟著改——這會動到既有行為，故本次先不做，留給下次要補這個
-    # 節點的 usage 時再處理。
+    usage: dict = {}
     try:
-        parsed = _llms(model)["filters"].invoke(prompt)
+        # include_raw=True 才拿得到原始 AIMessage（usage）；代價是解析失敗不再丟例外而是放進
+        # parsing_error，所以下面要自己 raise，讓 except 照舊降級成不過濾
+        out = _llms(model)["filters"].invoke(prompt)
+        if out.get("raw") is not None:
+            usage = _ollama_usage(out["raw"])
+        # 輸出撞 num_predict 上限會產生截斷的壞 JSON，要在判斷解析失敗前先標記
+        _warn_if_truncated("extract_filters", qid, usage)
+        # 截斷的 JSON 會被寬鬆解析成「前段模型值＋後段預設值」且不報錯（實測），
+        # 本節點正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信，一律降級
+        if usage.get("done_reason") == "length":
+            raise ValueError("輸出撞到 num_predict 上限")
+        if out.get("parsing_error"):
+            raise out["parsing_error"]
+        parsed = out.get("parsed")
+        if parsed is None:
+            raise ValueError("structured output 無解析結果")
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
         log_duration(log, "extract_filters 結構化輸出失敗", started, node="extract_filters",
-                     model=model, qid=qid, ok=False, error=str(e))
+                     model=model, qid=qid, ok=False, error=str(e), **usage)
         return {**state, "companies": [], "doc_type": None, "news_since_days": None,
                 "market": None, "in_scope": True, "answer_shape": "full"}
     log_duration(log, "extract_filters", started, node="extract_filters",
-                 model=model, qid=qid, ok=True)
+                 model=model, qid=qid, ok=True, **usage)
 
     # 呼叫端已指定市場（UI 按鈕點選）時不得被重抽的結果蓋掉——問句本身沒有市場字樣，
     # 重抽必然回 None，等於把使用者剛按下的選擇丟掉又問一次
