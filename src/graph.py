@@ -455,11 +455,17 @@ def extract_filters(state: GraphState) -> GraphState:
         parsed = out.get("parsed")
         if parsed is None:
             raise ValueError("structured output 無解析結果")
-    except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級成不過濾
+    except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級
         log_duration(log, "extract_filters 結構化輸出失敗", started, node="extract_filters",
                      model=model, qid=qid, ok=False, error=str(e), **usage)
-        return {**state, "companies": [], "doc_type": None, "news_since_days": None,
-                "market": None, "in_scope": True, "answer_shape": "full"}
+        # ponytail: 降級時只用對照表撿回雙掛牌公司，讓 resolve_market 照常反問／鎖市場，
+        # 避免跨市場檢索；非雙掛牌公司只在單一市場、沒有外洩風險，不救（代價是答得較泛）。
+        q = state["question"]
+        dual = _last_dual_listed([(q, "")])
+        return {**state, "companies": [dual] if dual else [], "doc_type": None,
+                "news_since_days": None,
+                "market": state.get("market") or _market_in_question(q),
+                "in_scope": True, "answer_shape": "full"}
     log_duration(log, "extract_filters", started, node="extract_filters",
                  model=model, qid=qid, ok=True, **usage)
 

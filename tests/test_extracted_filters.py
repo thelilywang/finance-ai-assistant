@@ -82,10 +82,10 @@ def test_extract_filters_model_switch(monkeypatch):
     assert calls[-1] == config.LLM_MODEL, calls
 
 
-def _run_filters(monkeypatch, out):
+def _run_filters(monkeypatch, out, question="蘋果財報？"):
     monkeypatch.setattr(graph, "_llms", lambda m: {"filters": type(
         "F", (), {"invoke": lambda self, p: out})()})
-    return graph.extract_filters({"question": "蘋果財報？", "companies": [], "market": None,
+    return graph.extract_filters({"question": question, "companies": [], "market": None,
                                   "model": "m"})
 
 
@@ -101,6 +101,24 @@ def test_extract_filters_truncated_output_warns_and_degrades(monkeypatch, caplog
     assert any(
         getattr(r, "fields", {}).get("node") == "extract_filters"
         and r.fields.get("output_tokens") == 4096 for r in caplog.records), caplog.records
+
+
+def _truncated(monkeypatch, question):
+    raw = AIMessage(content='{"companies": ["233',
+                    response_metadata={"done_reason": "length", "eval_count": 4096})
+    return _run_filters(monkeypatch, {"raw": raw, "parsed": None, "parsing_error": None}, question)
+
+
+def test_degraded_dual_listed_still_asks_market(monkeypatch):
+    # 降級仍撿回雙掛牌公司，resolve_market 才會反問而不是跨市場檢索
+    res = _truncated(monkeypatch, "台積電營收多少？")
+    assert res["companies"] == ["2330"]
+    assert graph.resolve_market(res)["ask_market"] is True
+
+
+def test_degraded_dual_listed_keeps_stated_market(monkeypatch):
+    res = graph.resolve_market(_truncated(monkeypatch, "台積電美股營收"))
+    assert res["companies"] == ["TSM"] and res["market"] == "us"
 
 
 def test_extract_filters_normal_no_warning(monkeypatch, caplog):
