@@ -1,6 +1,6 @@
 """集中設定 logging：stdout 照舊，另外每日一檔寫 JSON Lines 供事後回測。
 
-各服務進入點呼叫一次：`setup_logging("app")` / `setup_logging("mcp")` / `setup_logging("update")`。
+各服務進入點呼叫一次：`setup_logging("app")` / `setup_logging("mcp")` / `setup_logging("update")` / `setup_logging("ingest")`。
 之後各模組用 `logging.getLogger(__name__)` 取得 logger 即可，不需再設定。
 
 **新增任何 __main__ / CLI 進入點都要呼叫一次**，否則 root logger 沒有 handler，

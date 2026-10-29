@@ -83,7 +83,7 @@ flowchart TD
 | `i18n.py` | Centralized bilingual (zh/en) UI and prompt strings, no i18n library |
 | `graph.py` | LangGraph pipeline described above; `build_graph()` returns the compiled app |
 | `tracing.py` | Langfuse tracing of LangGraph LLM calls; never raises, missing keys or an unreachable Langfuse just means no trace |
-| `logging_setup.py` | Central logging: stdout plus a daily JSON Lines file under `LOG_DIR` (retention `LOG_BACKUP_DAYS`); each entry point calls `setup_logging("app"\|"mcp"\|"update")` once |
+| `logging_setup.py` | Central logging: stdout plus a daily JSON Lines file under `LOG_DIR` (retention `LOG_BACKUP_DAYS`); each entry point calls `setup_logging("app"\|"mcp"\|"update"\|"ingest")` once |
 | `cli.py` | Terminal chat (single-turn) |
 | `app.py` | Chainlit web UI: token streaming, multi-turn (last 5 rounds in session memory), interactive charts under each answer (`cl.Plotly`), downloadable PDF report per answer (falls back to `.md` when PDF generation fails) |
 
@@ -233,7 +233,7 @@ flowchart TD
 | `i18n.py` | 集中管理雙語(中/英)介面與 prompt 字串,不引入 i18n 套件 |
 | `graph.py` | 上述 LangGraph 流程;`build_graph()` 回傳編譯後的 app |
 | `tracing.py` | 以 Langfuse 追蹤 LangGraph 的 LLM 呼叫;不會拋錯,缺少金鑰或 Langfuse 連不上時僅不產生 trace |
-| `logging_setup.py` | 集中式日誌:輸出至 stdout,並於 `LOG_DIR` 下寫入每日 JSON Lines 檔(保留天數 `LOG_BACKUP_DAYS`);各進入點啟動時呼叫一次 `setup_logging("app"\|"mcp"\|"update")` |
+| `logging_setup.py` | 集中式日誌:輸出至 stdout,並於 `LOG_DIR` 下寫入每日 JSON Lines 檔(保留天數 `LOG_BACKUP_DAYS`);各進入點啟動時呼叫一次 `setup_logging("app"\|"mcp"\|"update"\|"ingest")` |
 | `cli.py` | 終端聊天(單輪) |
 | `app.py` | Chainlit 網頁介面:token 逐字串流、多輪對話(session 記憶體保留最近 5 輪)、回答下方附互動圖表(`cl.Plotly`)、每則回答附可下載 PDF 報告(PDF 生成失敗時退回 `.md`) |
 
