@@ -19,3 +19,8 @@ def test_partial_not_timed_out_unchanged():
 def test_empty_stream_uses_answer():
     assert _compose_final_content("", "answer", True, "zh") == "answer"
     assert _compose_final_content("", "answer", False, "zh") == "answer"
+
+
+def test_partial_truncated_gets_notice():
+    out = _compose_final_content("半截內容", "x", False, "zh", truncated=True)
+    assert out == append_disclaimer("半截內容\n\n" + t("zh", "generate_truncated"), "zh")

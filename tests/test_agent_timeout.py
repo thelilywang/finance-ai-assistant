@@ -87,3 +87,16 @@ def test_generate_timeout_returns_fallback_answer(monkeypatch):
              "retrieved": [{"source": "s1", "content": "c", "company": "TSLA"}]}
     out = graph.generate(state)
     assert t("zh", "generate_timeout") in out["answer"]
+
+
+def test_generate_truncated_flags_and_notices(monkeypatch):
+    # done_reason=length：答案是半截的，answer 要帶截斷說明、state 要帶旗標給 app 串流端
+    resp = graph.AIMessage(content="半截", response_metadata={"done_reason": "length", "eval_count": 4096})
+    monkeypatch.setattr(graph, "_llms", lambda model: {"llm": type("L", (), {"invoke": lambda s, p: resp})()})
+    monkeypatch.setattr(graph, "get_market_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(graph, "get_market_snapshots", lambda *a, **k: {})
+    state = {"question": "TSLA 如何", "companies": ["TSLA"], "lang": "zh", "model": "",
+             "retrieved": [{"source": "s1", "content": "c", "company": "TSLA"}]}
+    out = graph.generate(state)
+    assert out["generate_truncated"] is True
+    assert out["answer"].startswith("半截\n\n" + t("zh", "generate_truncated"))

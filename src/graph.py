@@ -63,6 +63,7 @@ class GraphState(TypedDict):
     model: str  # 本輪使用的 Ollama 模型，由 UI 選單決定；空值則用 config.LLM_MODEL
     market: str | None  # 使用者明講的市場（tw/us/both），沒講則 None
     generate_timed_out: bool  # generate 呼叫逾時；app 串流已有半截內容時據此補逾時說明
+    generate_truncated: bool  # generate 撞 num_predict 上限（done_reason=length）；app 據此補截斷說明
     filters_degraded: bool  # extract_filters 降級（LLM 輸出失敗）；撿不回公司時由 ask_company 反問
     ask_market: bool  # 雙掛牌但沒指明市場，需先反問使用者
     market_confirmed: bool  # 使用者已透過反問按鈕明確指定市場，不得再被重抽或問句校正覆蓋
@@ -1628,11 +1629,16 @@ def generate(state: GraphState) -> GraphState:
     # 命中，且寬鬆比對（只找「非投資建議」等關鍵詞）僅多撈到 1 筆——不是模型改寫，
     # 是整段「固定追加」區塊沒生出來時跟著一起掉。文案解不了格式契約（同一個坑
     # 09-09、09-18 已踩過兩次），故從 prompt 移除、改在這裡補。
-    answer = append_disclaimer(resp.content or "", lang)
+    # 撞 num_predict 上限時答案是半截的，跟逾時一樣要讓使用者知道（app.py 串流端另補一次）
+    usage = _ollama_usage(resp)
+    truncated = usage.get("done_reason") == "length"
+    body = resp.content or ""
+    if truncated:
+        body = f"{body}\n\n{t(lang, 'generate_truncated')}" if body else t(lang, "generate_truncated")
+    answer = append_disclaimer(body, lang)
     # 已知端到端瓶頸在本地模型生成，prompt/回應長度是判斷「慢在輸入還是輸出」的依據；
     # 只記長度不記內容，避免把提問寫進 log（保留策略未定前先不落地個資）
     qid = _qid(state["question"])
-    usage = _ollama_usage(resp)
     log_duration(log, "generate", started, node="generate", model=_model_of(state),
                  qid=qid, prompt_chars=len(prompt),
                  answer_chars=len(answer), retrieved=len(state.get("retrieved") or []),
@@ -1648,7 +1654,7 @@ def generate(state: GraphState) -> GraphState:
             "node": "generate", "qid": _qid(state["question"]),
             "violations": violations, "allowed_fields": fields,
             "companies": len(state.get("companies") or [])}})
-    return {**state, "answer": answer, "allowed_fields": fields}
+    return {**state, "answer": answer, "allowed_fields": fields, "generate_truncated": truncated}
 
 
 def no_result(state: GraphState) -> GraphState:
