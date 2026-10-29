@@ -107,7 +107,7 @@ flowchart TD
 ### Testing
 
 ```bash
-venv/bin/pip install -r requirements.lock && venv/bin/pip install -r requirements-dev.txt   # separate runs: the lock is hashed, pytest is not; dev deps are not in the Docker image
+venv/bin/pip install --require-hashes -r requirements-dev.lock   # requirements.lock + pytest/ruff/pip-audit, all pinned + hashed; dev deps are not in the Docker image
 venv/bin/pytest                                 # run all (config: pyproject.toml)
 venv/bin/pytest tests/test_fetch.py             # single file
 venv/bin/pytest tests/test_fetch.py::test_fetch_missing_data_keeps_all_source_messages   # single test
@@ -237,7 +237,7 @@ flowchart TD
 ### 測試
 
 ```bash
-venv/bin/pip install -r requirements.lock && venv/bin/pip install -r requirements-dev.txt   # 分兩次裝:lock 有 hash、pytest 沒有;Docker image 內未含
+venv/bin/pip install --require-hashes -r requirements-dev.lock   # requirements.lock 加 pytest/ruff/pip-audit,全部釘版+hash;Docker image 內未含
 venv/bin/pytest                                 # 跑全部(設定見 pyproject.toml)
 venv/bin/pytest tests/test_fetch.py             # 只跑單一檔案
 venv/bin/pytest tests/test_fetch.py::test_fetch_missing_data_keeps_all_source_messages   # 只跑單一測試

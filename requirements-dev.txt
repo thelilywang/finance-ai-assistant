@@ -1,3 +1,6 @@
-# 由 requirements.lock 之後安裝（lock 為 hash 模式，不能混入未 hash 的行）
+# 由 requirements-dev.lock 安裝（含 requirements.txt 全部套件，版本受 requirements.lock 約束）
+# 重新產生：uv pip compile requirements.txt requirements-dev.txt -c requirements.lock --universal --python-version 3.11 --generate-hashes -o requirements-dev.lock
 pytest
 pytest-cov
+ruff
+pip-audit
