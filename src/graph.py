@@ -191,7 +191,8 @@ def _warn_if_truncated(node: str, qid: str, usage: dict) -> None:
             "num_ctx": config.OLLAMA_NUM_CTX, "limit": limit}})
 
 
-embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
+embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL,
+                              client_kwargs=_client_kwargs())
 
 log = logging.getLogger("graph")
 

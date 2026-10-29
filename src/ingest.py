@@ -149,7 +149,8 @@ def ingest_text(
     delete_by_source(source)
     delete_ms = round((time.monotonic() - delete_started) * 1000)
 
-    embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL)
+    embeddings = OllamaEmbeddings(model=config.EMBEDDING_MODEL, base_url=config.OLLAMA_BASE_URL,
+                                  client_kwargs={"timeout": config.OLLAMA_TIMEOUT_SECONDS})
     chunks = chunk_text(text)
     log.info("開始 embedding", extra={"fields": {
         "source": source, "company": company, "chunks": len(chunks)}})
