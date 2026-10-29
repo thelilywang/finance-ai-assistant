@@ -103,7 +103,9 @@ def test_extract_filters_truncated_output_warns_and_degrades(monkeypatch, caplog
         and r.fields.get("output_tokens") == 4096 for r in caplog.records), caplog.records
 
 
-def _truncated(monkeypatch, question):
+def _truncated(monkeypatch, question, known=lambda cands: []):
+    # 預設不碰 DB：沒有候選代號通過驗證
+    monkeypatch.setattr(graph, "_known_companies", known)
     raw = AIMessage(content='{"companies": ["233',
                     response_metadata={"done_reason": "length", "eval_count": 4096})
     return _run_filters(monkeypatch, {"raw": raw, "parsed": None, "parsing_error": None}, question)
@@ -114,11 +116,43 @@ def test_degraded_dual_listed_still_asks_market(monkeypatch):
     res = _truncated(monkeypatch, "台積電營收多少？")
     assert res["companies"] == ["2330"]
     assert graph.resolve_market(res)["ask_market"] is True
+    assert graph.route_after_resolve_market(graph.resolve_market(res)) == "ask_market"
 
 
 def test_degraded_dual_listed_keeps_stated_market(monkeypatch):
     res = graph.resolve_market(_truncated(monkeypatch, "台積電美股營收"))
     assert res["companies"] == ["TSM"] and res["market"] == "us"
+
+
+def test_degraded_unknown_company_asks_company(monkeypatch):
+    # 名稱抽不出來又沒寫代號：fail closed 反問，不退到全庫檢索
+    res = _truncated(monkeypatch, "輝達最近財報表現？")
+    assert res["companies"] == [] and res["filters_degraded"] is True
+    assert graph.route_after_resolve_market(graph.resolve_market(res)) == "ask_company"
+
+
+def test_degraded_explicit_ticker_verified_by_db(monkeypatch):
+    res = _truncated(monkeypatch, "NVDA 美股最新財報",
+                     known=lambda cands: [c for c in cands if c == "NVDA"])
+    res = graph.resolve_market(res)
+    assert res["companies"] == ["NVDA"] and res["market"] == "us"
+    assert graph.route_after_resolve_market(res) == "agent"
+
+
+def test_degraded_lookalike_words_blocked_by_db(monkeypatch):
+    seen = []
+    res = _truncated(monkeypatch, "2026 年 EPS 展望",
+                     known=lambda cands: seen.append(cands) or [])
+    assert {"2026", "EPS"} <= set(seen[0])
+    assert graph.route_after_resolve_market(graph.resolve_market(res)) == "ask_company"
+
+
+def test_normal_path_without_company_goes_agent(monkeypatch):
+    raw = AIMessage(content="", response_metadata={"done_reason": "stop", "eval_count": 20})
+    res = _run_filters(monkeypatch, {"raw": raw, "parsed": ExtractedFilters(),
+                                     "parsing_error": None})
+    assert res["companies"] == [] and res["in_scope"] is True and res["filters_degraded"] is False
+    assert graph.route_after_resolve_market(graph.resolve_market(res)) == "agent"
 
 
 def test_extract_filters_normal_no_warning(monkeypatch, caplog):

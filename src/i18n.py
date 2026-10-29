@@ -70,6 +70,10 @@ STRINGS = {
             "請改問特定公司的財務表現、營運狀況或市場動態，例如「台積電最新一季毛利率如何」"
             "或「NVDA 近期有什麼新聞」。"
         ),
+        "ask_company": (
+            "這次沒能辨識出你問的是哪家公司。為避免用別家公司的資料回答，"
+            "請改用股票代號再問一次，例如「2454 最近營收如何」或「NVDA 最新財報重點」。"
+        ),
         "answer_lang_rule": "- 全文以繁體中文回答",
         "trend_header": (
             "## 📈 投資決策參考\n"
@@ -250,6 +254,11 @@ STRINGS = {
             "Please ask about a specific company's financial performance, operations, or market "
             "activity, such as \"What was TSMC's gross margin last quarter?\" or "
             "\"Any recent news on NVDA?\"."
+        ),
+        "ask_company": (
+            "I couldn't tell which company you're asking about. To avoid answering with another "
+            "company's data, please ask again using the ticker, such as \"2454 recent revenue\" "
+            "or \"NVDA latest earnings highlights\"."
         ),
         "answer_lang_rule": "- Answer entirely in English",
         "trend_header": (

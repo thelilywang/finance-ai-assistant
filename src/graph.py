@@ -64,6 +64,7 @@ class GraphState(TypedDict):
     model: str  # 本輪使用的 Ollama 模型，由 UI 選單決定；空值則用 config.LLM_MODEL
     market: str | None  # 使用者明講的市場（tw/us/both），沒講則 None
     generate_timed_out: bool  # generate 呼叫逾時；app 串流已有半截內容時據此補逾時說明
+    filters_degraded: bool  # extract_filters 降級（LLM 輸出失敗）；撿不回公司時由 ask_company 反問
     ask_market: bool  # 雙掛牌但沒指明市場，需先反問使用者
     market_confirmed: bool  # 使用者已透過反問按鈕明確指定市場，不得再被重抽或問句校正覆蓋
     in_scope: bool  # extract_filters 判定問題是否屬財經範疇
@@ -392,6 +393,33 @@ def _collapse_dual_listing(companies: list[str]) -> list[str]:
     return companies
 
 
+# 問句裡明寫的代號：大寫英文 1-5 碼，或 4-6 碼數字可帶 1 碼大寫字母。中文問句無空白，
+# 所以用 lookbehind/lookahead 擋掉黏在英數字中間的片段，而不是 \b
+_TICKER_IN_TEXT = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z]{1,5}|\d{4,6}[A-Z]?)(?![A-Za-z0-9])")
+
+
+def _known_companies(cands: list[str]) -> list[str]:
+    """回傳候選代號中 DB 真的有資料的，依候選原順序。
+
+    這一步是擋 EPS / ADR / 2026 這類長得像代號的字：regex 只看形狀，DB 裡沒有的
+    就不是我們有資料的公司。查詢失敗回 []（fail closed，由 ask_company 反問）。
+    """
+    if not cands:
+        return []
+    try:
+        pool.open()  # 已開過是 no-op
+        with pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT company FROM doc_chunks WHERE company = ANY(%s)", (cands,)
+            ).fetchall()
+    except Exception as e:  # noqa: BLE001  DB 不可用時不能讓降級路徑再炸
+        log.warning("降級撿代號查 DB 失敗", extra={"fields": {
+            "node": "extract_filters", "candidates": cands, "error": str(e)}})
+        return []
+    found = {r[0] for r in rows}
+    return [c for c in cands if c in found]
+
+
 def extract_filters(state: GraphState) -> GraphState:
     """從問題中抽取公司代號 / 文件類型 / 新聞時效窗，抽不出來就設為 None（不過濾）。"""
     # 反問按鈕選完後的重跑：companies 與 market 上一輪都已定案，重抽只會得到同樣的
@@ -458,14 +486,18 @@ def extract_filters(state: GraphState) -> GraphState:
     except Exception as e:  # noqa: BLE001  結構化輸出解析失敗（模型偏離格式）時降級
         log_duration(log, "extract_filters 結構化輸出失敗", started, node="extract_filters",
                      model=model, qid=qid, ok=False, error=str(e), **usage)
-        # ponytail: 降級時只用對照表撿回雙掛牌公司，讓 resolve_market 照常反問／鎖市場，
-        # 避免跨市場檢索；非雙掛牌公司只在單一市場、沒有外洩風險，不救（代價是答得較泛）。
+        # ponytail: 降級只撿確定性的兩種：雙掛牌名稱/代號、問句明寫且 DB 有的代號；撿不回
+        # 就由 ask_company 反問，不退到全庫檢索（寧可少給，同 vectorstore.py 市場過濾的
+        # 原則）。名稱表刻意不建：維護成本高、永遠收不全，且降級極少發生。
         q = state["question"]
         dual = _last_dual_listed([(q, "")])
-        return {**state, "companies": [dual] if dual else [], "doc_type": None,
+        cands = list(dict.fromkeys(
+            n for raw in _TICKER_IN_TEXT.findall(q) if (n := normalize_ticker(raw))))
+        companies = list(dict.fromkeys(([dual] if dual else []) + _known_companies(cands)))
+        return {**state, "companies": _collapse_dual_listing(companies), "doc_type": None,
                 "news_since_days": None,
                 "market": state.get("market") or _market_in_question(q),
-                "in_scope": True, "answer_shape": "full"}
+                "in_scope": True, "answer_shape": "full", "filters_degraded": True}
     log_duration(log, "extract_filters", started, node="extract_filters",
                  model=model, qid=qid, ok=True, **usage)
 
@@ -476,7 +508,8 @@ def extract_filters(state: GraphState) -> GraphState:
     companies = _collapse_dual_listing(companies)
     return {**state, "companies": companies, "doc_type": parsed.doc_type,
             "news_since_days": parsed.news_since_days, "market": market,
-            "in_scope": parsed.in_scope, "answer_shape": parsed.answer_shape}
+            "in_scope": parsed.in_scope, "answer_shape": parsed.answer_shape,
+            "filters_degraded": False}
 
 
 def _last_dual_listed(history: list[tuple[str, str]]) -> str | None:
@@ -1359,9 +1392,11 @@ def route_after_assemble(state: GraphState) -> str:
 
 
 def route_after_resolve_market(state: GraphState) -> str:
-    """本輪要不要檢索。兩種「先回問使用者就收工」的情況集中在這裡分岔。"""
+    """本輪要不要檢索。三種「先回問使用者就收工」的情況集中在這裡分岔。"""
     if state.get("ask_market"):
         return "ask_market"
+    if state.get("filters_degraded") and not state.get("companies"):
+        return "ask_company"
     if state.get("off_topic"):
         return "off_topic"
     return "agent"
@@ -1636,6 +1671,15 @@ def off_topic(state: GraphState) -> GraphState:
     return {**state, "answer": t(state.get("lang", "zh"), "off_topic"), "retrieved": []}
 
 
+def ask_company(state: GraphState) -> GraphState:
+    """抽取降級且撿不回公司：請使用者改用代號再問，本輪不檢索也不補抓。
+
+    刻意不猜、也不退到全庫檢索——沒有公司過濾時會撈到別家公司的 chunk，
+    答案看似合理卻是錯的公司，比多問一句的代價高得多。
+    """
+    return {**state, "answer": t(state.get("lang", "zh"), "ask_company"), "retrieved": []}
+
+
 def ask_market(state: GraphState) -> GraphState:
     """雙掛牌但沒指明市場：直接回問使用者要看哪一邊，本輪不檢索也不抓資料。
 
@@ -1663,6 +1707,7 @@ async def build_graph():
     graph.add_node("resolve_market", node_span(resolve_market))
     graph.add_node("ask_market", node_span(ask_market))
     graph.add_node("off_topic", node_span(off_topic))
+    graph.add_node("ask_company", node_span(ask_company))
     graph.add_node("agent", node_span(agent))
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("assemble", node_span(assemble))
@@ -1675,7 +1720,8 @@ async def build_graph():
     # 雙掛牌又沒指明市場就先反問，本輪不檢索——猜錯市場給的是看似合理的錯誤數字
     graph.add_conditional_edges(
         "resolve_market", route_after_resolve_market,
-        {"ask_market": "ask_market", "off_topic": "off_topic", "agent": "agent"},
+        {"ask_market": "ask_market", "ask_company": "ask_company",
+         "off_topic": "off_topic", "agent": "agent"},
     )
     graph.add_conditional_edges(
         "agent", agent_route, {"tools": "tools", "assemble": "assemble"},
@@ -1692,5 +1738,6 @@ async def build_graph():
     graph.add_edge("no_result", END)
     graph.add_edge("ask_market", END)
     graph.add_edge("off_topic", END)
+    graph.add_edge("ask_company", END)
 
     return graph.compile()
