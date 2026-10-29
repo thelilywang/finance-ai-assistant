@@ -5,6 +5,7 @@
 """
 import logging
 
+import pytest
 from langchain_core.messages import AIMessage
 
 import src.config as config
@@ -162,3 +163,19 @@ def test_extract_filters_normal_no_warning(monkeypatch, caplog):
                                          "parsing_error": None})
     assert res["companies"] == ["AAPL"]
     assert caplog.records == []
+
+
+@pytest.mark.parametrize("out, error", [
+    ({"parsed": None, "parsing_error": ValueError("bad json")}, "bad json"),
+    ({"parsed": None, "parsing_error": None}, "structured output 無解析結果"),
+])
+def test_extract_filters_parse_failure_degrades(monkeypatch, caplog, out, error):
+    # done_reason=stop：走的是 parsing_error／parsed is None 分支，而非撞上限那條
+    monkeypatch.setattr(graph, "_known_companies", lambda cands: [])
+    raw = AIMessage(content="not json", response_metadata={"done_reason": "stop", "eval_count": 5})
+    with caplog.at_level(logging.INFO, logger="graph"):
+        res = _run_filters(monkeypatch, {"raw": raw, **out}, "輝達最近財報表現？")
+    assert res["companies"] == [] and res["filters_degraded"] is True
+    assert any(
+        getattr(r, "fields", {}).get("ok") is False and r.fields.get("error") == error
+        for r in caplog.records), caplog.records
