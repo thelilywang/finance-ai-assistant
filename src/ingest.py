@@ -17,7 +17,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
 from . import config
-from .logging_setup import log_duration
+from .logging_setup import log_duration, setup_logging
 from .tickers import is_tw_ticker
 from .vectorstore import delete_by_source, insert_chunks
 
@@ -186,6 +186,7 @@ def ingest_file(path: str, company: str, doc_type: str, published_at: str) -> No
 
 
 def main() -> None:
+    setup_logging("ingest")
     parser = argparse.ArgumentParser(description="匯入財報/新聞文件到 pgvector")
     parser.add_argument("--file", required=True, help="PDF 或 txt 檔路徑")
     parser.add_argument("--company", default=None, help="公司代號，例如 2330")
