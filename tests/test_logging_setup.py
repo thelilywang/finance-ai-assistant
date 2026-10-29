@@ -68,3 +68,8 @@ def test_logging_setup(monkeypatch):
 
         for h in logging.getLogger().handlers:
             h.close()
+
+
+def test_pytest_does_not_write_production_logs():
+    # conftest 把 LOG_DIR 導到暫存目錄；否則 stub 紀錄會污染正式 log 的統計
+    assert config.LOG_DIR != "data/logs", config.LOG_DIR
