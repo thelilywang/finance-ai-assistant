@@ -27,7 +27,7 @@ docker compose up -d
 # 3. Python env
 python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock   # pinned + hashed; regenerate: uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes -o requirements.lock
 cp .env.example .env       # uses PGVECTOR_URL for the DB connection
 psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # enables thumbs up/down feedback + threads/history tables
                             # (docker-compose already applies this on a fresh volume;
@@ -107,7 +107,7 @@ flowchart TD
 ### Testing
 
 ```bash
-venv/bin/pip install -r requirements-dev.txt   # requirements.txt + pytest; not in the Docker image
+venv/bin/pip install -r requirements.lock && venv/bin/pip install -r requirements-dev.txt   # separate runs: the lock is hashed, pytest is not; dev deps are not in the Docker image
 venv/bin/pytest                                 # run all (config: pyproject.toml)
 venv/bin/pytest tests/test_fetch.py             # single file
 venv/bin/pytest tests/test_fetch.py::test_fetch_missing_data_keeps_all_source_messages   # single test
@@ -151,7 +151,7 @@ docker compose up -d
 # 3. Python 環境
 python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock   # 已釘版+hash;重新產生:uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes -o requirements.lock
 cp .env.example .env       # DB 連線用 PGVECTOR_URL(避免與 chainlit 的 DATABASE_URL 名稱衝突)
 psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # 套用後才能按讚/倒讚、對話歷史才有 threads 等表
                             # (全新 volume 已由 docker-compose 自動套用;
@@ -237,7 +237,7 @@ flowchart TD
 ### 測試
 
 ```bash
-venv/bin/pip install -r requirements-dev.txt   # requirements.txt + pytest,Docker image 內未含
+venv/bin/pip install -r requirements.lock && venv/bin/pip install -r requirements-dev.txt   # 分兩次裝:lock 有 hash、pytest 沒有;Docker image 內未含
 venv/bin/pytest                                 # 跑全部(設定見 pyproject.toml)
 venv/bin/pytest tests/test_fetch.py             # 只跑單一檔案
 venv/bin/pytest tests/test_fetch.py::test_fetch_missing_data_keeps_all_source_messages   # 只跑單一測試

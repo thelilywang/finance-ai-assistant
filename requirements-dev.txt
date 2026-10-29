@@ -1,3 +1,3 @@
--r requirements.txt
+# 由 requirements.lock 之後安裝（lock 為 hash 模式，不能混入未 hash 的行）
 pytest
 pytest-cov

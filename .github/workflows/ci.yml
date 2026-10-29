@@ -14,10 +14,14 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements*.txt
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+      - run: pip install --require-hashes -r requirements.lock
       - run: pip install -r requirements-dev.txt ruff
       - run: ruff check .
       # 沒有 Postgres / Ollama：需要 DB 的測試會自動 skip，LLM 呼叫在測試裡已用 monkeypatch 取代
       - run: pytest -q
-      # 已知漏洞掃描：新 CVE 公布時 CI 會轉紅，提醒重建 image
-      - run: pip install pip-audit && pip-audit
+      # 掃 lock 檔而非 CI 當下裝到的版本（不重新 resolve）。新 CVE 公布時 CI 會轉紅：
+      # 用 uv pip compile ... --upgrade-package <套件> 重產 requirements.lock，再重建 image
+      - run: pip install pip-audit && pip-audit --disable-pip --require-hashes -r requirements.lock
