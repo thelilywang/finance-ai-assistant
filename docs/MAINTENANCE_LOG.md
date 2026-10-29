@@ -16,7 +16,7 @@
 - **補抓時效仍以檢索回來的 top-k chunk 判斷，而非 DB 內最新新聞**（`route_after_tools`）——第一次檢索可能多一次不必要的補抓；本輪補抓過的公司不再判過期，以此避免反覆補抓。詳見 2026-10-10 章節第二節。
 - **EDGAR／XBRL 來源連結只到該公司申報列表**——source 字串不含 CIK，無法直連單份申報。詳見 2026-10-10 章節第二節。
 - **無簡轉繁後處理**——模型偶爾殘留簡體字，demo 答案未手改；可考慮 OpenCC，需新增依賴，尚未做。詳見 2026-10-10 章節第一節。
-- **mcp 升到 1.30 後只驗證連線與 tool 列表**——完整問答沒有重跑。詳見 2026-10-28 章節第四節。
+- **釘版後 GitHub Actions 尚未實跑；Dockerfile 的 `Tokenizer.from_pretrained('BAAI/bge-m3')` 未釘 revision**——build 仍可能隨上游模型更新而不同。目前 `CHUNK_UNIT=char` 不載入此 tokenizer，不受影響；切成 token 時須一併釘 revision（Dockerfile 與 `src/ingest.py` 兩處 `from_pretrained`）。詳見 2026-10-28 章節第四節。
 
 ## 後續方向
 
@@ -39,7 +39,6 @@
 | 補抓軌別拆成獨立 MCP tool | 拆分早已完成，進一步拆分無法降低主要成本 | log 量到不必要軌別的浪費佔比 | 2026-09-21 |
 | 分段量測並縮短 prompt、KV cache | 延遲已列入已知限制；縮 prompt 有決策卡欄位與引用退化風險，收益須實測確認 | 部署正式環境或使用者反映等待過久 | 2026-10-07 |
 | 雙掛牌對照表改為 API 查詢＋落地快取 | 對照表實際有 12 檔且帶業務判定，改為 API 查詢僅能涵蓋一半 | 主表檔數成長到人工維護成本過高，或找到完整端點 | 2026-09-21 |
-| lockfile／hash 釘版、base image 釘 digest | 目前重建 image 即可取得修補，暫不釘版 | 需要可重現的 build | 2026-10-28 |
 | 無引用答案以 RAGAS／LLM-as-judge 檢查後重生成 | 重生成大概率仍無引用（成因是 context 規模），且成本高、串流下無法事前攔截 | `no_citation` 實測頻率夠高 | 2026-10-28 |
 
 ---
@@ -718,7 +717,11 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **驗證**：app 與 mcp-server 兩個 image 及 venv 的 pip-audit 皆為 0 筆（commit 後複查仍為 0 筆）；在 app 容器內帶 Bearer token 連 mcp-server，成功列出 3 個 tool，mcp 1.30 handshake 正常。
 
-**已知限制**：完整問答沒有在 mcp 1.30 下重跑，只驗到連線與 tool 列表。
+端到端另以 streamable-http 對照 mcp 1.28.0 與 1.30.0：正常查詢、`news_since_days` 非數字、缺必填參數三種情況輸出相同，未見回傳格式或錯誤處理改變。AAPL 新聞題與 2317 鴻海財報題的完整問答，tool 呼叫皆成功，產出有引用來源的回答與決策卡。**已知限制**：鴻海題端到端 530 秒（AAPL 題 192 秒），高於單一標的區間，尚未細查。
+
+**後續：釘版**：上面「重建 image 才修掉」同時說明 build 不可重現——同一 commit 在不同日子會裝到不同版本，`pip-audit` 掃的也不是實際出貨的內容。`requirements.txt` 維持手寫的寬鬆約束，另以 `uv pip compile --universal --generate-hashes` 產生 `requirements.lock`（版本加 hash，同時涵蓋 mac 開發機與 Linux 的 Docker／CI）；Dockerfile 與 CI 改用 `pip install --require-hashes -r requirements.lock`，base image 釘 digest，`pip-audit` 改掃 lock。**取捨**：換到可重現的 build 與審計對象一致，代價是升版要手動重產 lock（單一套件用 `--upgrade-package`）、base image digest 要手動更新。
+
+**驗證**：對 lock 跑 pip-audit 為 0 筆；全新 venv 以 `--require-hashes` 安裝成功且 `pip check` 無衝突；兩個 image 重建成功，容器內 `pip check` 與 import 正常；pytest 316 passed、4 skipped。**已知限制**：GitHub Actions 尚未實跑；Dockerfile 載入 `BAAI/bge-m3` tokenizer 未釘 revision。
 
 ### 五、`extract_filters` 降級時保留市場鎖定
 
@@ -738,4 +741,5 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | 相依套件漏洞盤點 | `requirements.txt` 調高 `pypdf`、`mcp` 下限；CI 加 `pip-audit` 步驟 | `e15c773` |
 | `extract_filters` usage 與上限降級 | `include_raw=True`、撞上限視為失敗降級 | `c89f851` |
 | 串流中途逾時說明 | 串流中途逾時時加註內容不完整 | `47c6c4c` |
+| 相依套件釘版 | 新增 `requirements.lock`（uv，含 hash）；Dockerfile、CI 改裝 lock，base image 釘 digest；`pip-audit` 改掃 lock；`requirements-dev.txt` 移除 `-r requirements.txt` | `21e25b8` |
 | `extract_filters` 降級保留市場鎖定 | 降級分支以 `_last_dual_listed`、`_market_in_question` 撿回雙掛牌公司與市場；新增 2 個測試 | `795f8f8` |
