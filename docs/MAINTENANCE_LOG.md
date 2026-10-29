@@ -12,11 +12,10 @@
 - **LLM 選用 tool 的正確性沒有自動化測試**（`_tool_llm`）——模型行為不保證重現，目前以多次端到端手動驗證確認。詳見 2026-09-08 章節。
 - **`market IS NULL` 殘留 165 筆**——cmoney 137 筆須重新抓取才能修正；udn／cnyes 28 筆來自未納管版面。詳見 2026-09-21 章節第三節。
 - **`_select_exhibit` 取最大 htm 的啟發式**（`src/update.py`）——目前未出現誤選，並以入庫字數警示作為後備防線。詳見 2026-09-09 章節。
-- **`extract_filters` 降級時一律反問公司**（`ask_company`）——只認問句明寫的代號，中文名稱需改用代號重問，連全市場題也會被反問；實測降級 0／75 次（已排除 pytest stub）。詳見 2026-10-28 章節第五節。
+- **`extract_filters` 降級時一律反問公司**（`ask_company`）——只認問句明寫的代號，中文名稱需改用代號重問，連全市場題也會被反問；實測降級 0／80 次（已排除 pytest stub）。詳見 2026-10-28 章節第五節。
 - **補抓判斷有兩個盲點**（`route_after_tools`、`src/mcp_server.py`）——新聞時效看檢索回來的 top-k chunk 而非 DB 最新新聞，第一次檢索可能多補抓一次；`has_report` 只看最新財報日期，MOPS 失敗後會被數字財報擋住重抓，以 `python -m src.update report --market tw --company <代號>` 手動補救。詳見 2026-10-10 章節第二節、2026-10-28 章節第六節。
 - **EDGAR／XBRL 來源連結只到該公司申報列表**——source 字串不含 CIK，無法直連單份申報。詳見 2026-10-10 章節第二節。
 - **無簡轉繁後處理**——模型偶爾殘留簡體字，demo 答案未手改；可考慮 OpenCC，需新增依賴，尚未做。詳見 2026-10-10 章節第一節。
-- **2026-10-29 以前的 `data/logs/app*.log` 混有 pytest stub 假紀錄**（含容器內 app-2026-09-19、10-10、10-28）——統計前須用 qid 指紋排除：在 `tests/conftest.py` 生效下跑一次 pytest，從暫存 `LOG_DIR` 收集 qid；不能以「缺 model 欄位」判斷，正式紀錄本來就沒有該欄位。詳見 2026-10-29 章節（二、pytest 不再寫入正式 log）。
 
 ## 後續方向
 
@@ -675,18 +674,16 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **起因**：`route_after_tools` A/B 時，TSLA 關閉捷徑那臂的第 4 輪 agent 兩次都超過 900 秒不結束，Ollama 被占住，連 bge-m3 embedding 都排隊卡死。`MAX_TOOL_ROUNDS` 只限輪數，擋不住單一輪不結束。
 
-**關鍵發現**：`ChatOllama` 內部固定串流，httpx 的 timeout 是「讀取間隔逾時」而非總時限，只擋停滯、擋不住持續吐 token 的失控生成。因此需兩道上限：`OLLAMA_TIMEOUT_SECONDS=600` 擋停滯（正常最慢單輪 agent 290 秒、`generate` 約 170 秒），`OLLAMA_NUM_PREDICT=4096` 擋失控生成，依據近 66 天 log：
+**關鍵發現**：`ChatOllama` 內部固定串流，httpx 的 timeout 是「讀取間隔逾時」而非總時限，只擋停滯、擋不住持續吐 token 的失控生成。因此需兩道上限：`OLLAMA_TIMEOUT_SECONDS=600` 擋停滯（正常最慢單輪 agent 290 秒、`generate` 約 170 秒），`OLLAMA_NUM_PREDICT=4096` 擋失控生成，依 10-07～10-28 的 log（已排除 pytest stub）：
 
 | 節點 | n | output_tokens 中位 | p95 | max |
 |---|---|---|---|---|
-| agent | 62 | 194 | 361 | 629 |
-| generate | 137 | 867 | 1170 | 1344 |
-
-**已知限制**：此表統計於排除 pytest stub 之前（詳見 10-29），尚未重算。
+| agent | 68 | 189 | 361 | 629 |
+| generate | 139 | 866 | 1123 | 1344 |
 
 `generate` 的 `done_reason` 全為 `stop`，4096 約為其最大值的 3 倍。
 
-**處理**：重試改為只重試 `httpx.ConnectError`、`httpx.RemoteProtocolError`、`ollama.ResponseError`（原本逾時也重試，最壞等 3 倍；解析失敗在 temperature 0 下是確定性的，不重試）。（10-29 再收斂為只重試 `ConnectError`，見 10-29。）逾時降級：agent 回空訊息直接走 `assemble`，`rewrite_question` 沿用原問句，`extract_filters` 降級（見第五節），`generate` 回固定訊息（`generate_timeout`，中英各一）。撞到 token 上限（`done_reason=length`）時 `_warn_if_truncated` 記 warning。
+**處理**：重試改為只重試 `httpx.ConnectError`、`httpx.RemoteProtocolError`、`ollama.ResponseError`（原本逾時也重試，最壞等 3 倍；解析失敗在 temperature 0 下是確定性的，不重試）。（10-29 再收斂為只重試 `ConnectError`，詳見 2026-10-29 章節第一節。）逾時降級：agent 回空訊息直接走 `assemble`，`rewrite_question` 沿用原問句，`extract_filters` 降級（見第五節），`generate` 回固定訊息（`generate_timeout`，中英各一）。撞到 token 上限（`done_reason=length`）時 `_warn_if_truncated` 記 warning。
 
 **實機驗證**：agent 逾時設 5 秒跑「NVDA 最近的營收成長動能是什麼？」，25.5 秒走到 `assemble` 並記下逾時 warning；`OLLAMA_NUM_PREDICT=40` 實跑，`done_reason=length`、`eval_count=40`，回傳截斷答案而非錯誤。
 
@@ -696,7 +693,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 改 `include_raw=True`，從 raw `AIMessage` 取 usage 寫進 log，解析錯誤自行 raise 以沿用原降級；`done_reason=="length"` 直接視為失敗並降級，因為正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信。**取捨**：截斷若發生在 `companies` 已完整之後，會丟掉模型抽出的代號，改由降級分支從問句撿回；撿不回則反問公司，不退到全庫檢索。詳見第五節。
 
-**驗證**：`num_predict=10` 實測先出 warning、log 記「結構化輸出失敗」、結果降級；image 已重建。
+**驗證**：`num_predict=10` 實測先出 warning、log 記「結構化輸出失敗」、結果降級。
 
 ### 二、`news_since_days` 非數字字串讓 tool 呼叫整個失敗
 
@@ -735,13 +732,11 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **處理**：降級分支先用既有的 `_last_dual_listed` 撿回雙掛牌公司、`_market_in_question` 撿回明講的市場；再掃問句明寫的代號（大寫英文 1-5 碼、4-6 碼數字），經 `normalize_ticker` 後以 `_known_companies` 查 `doc_chunks` 驗證存在，擋掉 EPS、ADR、2026 這類偽代號。仍撿不回公司則設 `filters_degraded`，`route_after_resolve_market` 導向新節點 `ask_company`，請使用者改用代號重問，不退到全庫檢索。
 
-**取捨**：不建中文名稱→代號表（要長期維護、永遠收不全，表外仍需退路）；代價是降級時連全市場題（如「最近半導體新聞」）也會被反問，換取不跨公司。依據是 log 75 次真實 `extract_filters` 呼叫降級 0 次（原寫約 700 次，含 pytest stub，10-29 更正），反問成本低。
+**取捨**：不建中文名稱→代號表（要長期維護、永遠收不全，表外仍需退路）；代價是降級時連全市場題（如「最近半導體新聞」）也會被反問，換取不跨公司。依據是 log 80 次真實 `extract_filters` 呼叫降級 0 次（原寫約 700 次，含 pytest stub，10-29 更正），反問成本低。
 
-**驗證**：市場鎖定新增 2 個測試（降級仍反問；「台積電美股營收」降級後對到 TSM／us），相關測試 34 passed、4 skipped；`test_market_filter` 的外洩測試接本機 Postgres 實跑 4/4 通過。公司鎖定新增 4 個測試（降級時輝達→反問、NVDA→對到 NVDA／us、2026 EPS→反問；非降級無公司→照常檢索），本機 pytest 320 passed、4 skipped，容器帶 DB 324 passed。stub 模擬降級跑 6 題：聯發科、輝達→反問；NVDA→只撈到 NVDA／us 8 張；台積電→反問市場。
+**驗證**：市場鎖定新增 2 個測試（降級仍反問；「台積電美股營收」降級後對到 TSM／us），`test_market_filter` 的外洩測試接本機 Postgres 實跑 4/4 通過。公司鎖定新增 4 個測試（降級時輝達→反問、NVDA→對到 NVDA／us、2026 EPS→反問；非降級無公司→照常檢索），容器帶 DB 的 pytest 324 passed。stub 模擬降級跑 6 題：聯發科、輝達→反問；NVDA→只撈到 NVDA／us 8 張；台積電→反問市場。
 
 ### 六、鴻海財報 embedding 超時
-
-第四節端到端驗證時，鴻海題耗時 530 秒、AAPL 題 192 秒，原因如下。
 
 **鴻海 530 秒：MOPS 財報 embedding 超時**：2317 的 MOPS 財報 PDF 切成 413 塊，原 `EMBED_BATCH_SIZE=400` 的單次 embed 請求超過 Ollama 約 75～80 秒的上限而斷線（tokenize EOF，status 400）；重試一次也失敗，兩次共約 320 秒，財報也沒入庫。JPM 英文約 0.13 秒／塊，400 塊約 51 秒能過；鴻海中文約 0.2 秒／塊，400 塊會超時。實際門檻是單次請求的耗時（約 75～80 秒）而非塊數，修正了 2026-09-19 第四節 `_embed_in_batches` docstring「資源／超時型、沒有可查表的門檻」的說法。只做 embedding、413 塊的實測：
 
@@ -751,7 +746,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | 200 | 2/2 成功 | 每批約 44 秒，總計約 85 秒 |
 | 400 | 連同首次端到端共 3/3 失敗 | 皆在 75～80 秒斷線 |
 
-**處理**：`src/config.py` 的 `EMBED_BATCH_SIZE` 預設值由 400 改為 100。**驗證**：rebuild image 後在 mcp 容器重新入庫 2317 PDF，413 塊全部寫入，5 批全部成功、無重試，總計 96 秒（embedding 約 88 秒）。**已知限制**：端到端未重測——16GB 主機上 Docker VM 8GB、`qwen3.5:9b`（`num_ctx` 32768，6.6GB）與瀏覽器同時開著會用盡記憶體（macOS 跳出強制結束視窗）；且 2317 現在已判定有財報，端到端不會再走到 MOPS embedding 這一段。`has_report` 被數字財報擋住重抓則列為已知限制：不能直接排除 TWSE-API，因 MOPS 上 2317／2454 最新 PDF 為 202602、已逾 120 天，排除後每次提問都會重抓 MOPS，須改看抓取時間等設計。
+**處理**：`src/config.py` 的 `EMBED_BATCH_SIZE` 預設值由 400 改為 100。**驗證**：rebuild image 後在 mcp 容器重新入庫 2317 PDF，413 塊全部寫入，5 批全部成功、無重試，總計 96 秒（embedding 約 88 秒）。**已知限制**：端到端未重測——16GB 主機上 Docker VM 8GB、`qwen3.5:9b`（`num_ctx` 32768，6.6GB）與瀏覽器同時開著會用盡記憶體；且 2317 現在已判定有財報，端到端不會再走到 MOPS embedding 這一段。`has_report` 被數字財報擋住重抓則列為已知限制：不能直接排除 TWSE-API，因 MOPS 上 2317／2454 最新 PDF 為 202602、已逾 120 天，排除後每次提問都會重抓 MOPS，須改看抓取時間等設計。
 
 ### 改動內容
 
@@ -777,13 +772,13 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ### 一、LLM 重試範圍與失敗收尾
 
-實測發現 10-28 保留的 `RemoteProtocolError`、`ollama.ResponseError` 仍會造成錯誤行為，且重試用完後的失敗沒有收尾。
+**問題**：10-28 保留重試的兩類錯誤仍會造成錯誤行為。(a) `ollama.ResponseError` 含 404 模型不存在、OOM／載入失敗的 5xx，屬永久錯誤，被白重試 3 次。(b) `generate` 串流途中的 `RemoteProtocolError` 被 `with_retry` 重試時，langgraph messages 串流不對 token 去重，已送出的 token 會再串一次；以假 chat model（吐 A、B、C 後丟 `RemoteProtocolError`）實測，舊設定 UI 收到 `ABCABCABC`，新設定為 `ABC`。(c) 重試用完的例外 `on_message` 沒接，使用者只看到 Chainlit 通用錯誤，step 沒關，也沒有 JSON log。
 
-**問題**：(a) `ollama.ResponseError` 含 404 模型不存在、OOM／載入失敗的 5xx，屬永久錯誤，被白重試 3 次。(b) `generate` 串流途中的 `RemoteProtocolError` 被 `with_retry` 重試時，langgraph messages 串流不對 token 去重，已送出的 token 會再串一次；以假 chat model（吐 A、B、C 後丟 `RemoteProtocolError`）實測，舊設定 UI 收到 `ABCABCABC`，新設定為 `ABC`。(c) 重試用完的例外 `on_message` 沒接，使用者只看到 Chainlit 通用錯誤，step 沒關，也沒有 JSON log。
-
-**處理**：`_RETRYABLE` 收斂為 `(httpx.ConnectError,)`；連線被拒時一個 token 都沒送出，重試無副作用，且已實測 `ChatOllama` 連不上丟的就是 `httpx.ConnectError`。`on_message` 用一個 try 包住整段回答流程，失敗時寫 JSON log（qid、model、error、exc）、關 step、在已串流內容後接 i18n `answer_failed`，不寫入 history。
+**處理**：`_RETRYABLE` 收斂為 `(httpx.ConnectError,)`；連線被拒時一個 token 都沒送出，重試無副作用，且已實測 `ChatOllama` 連不上丟的就是 `httpx.ConnectError`。重試用完的失敗改由 `on_message` 統一收尾，細項見改動內容。
 
 **取捨**：串流中斷與 5xx 不再自動重試，換來不重複輸出與永久錯誤不空等，代價是使用者須自行重問；`extract_filters` 遇到這類錯誤沿用既有降級。
+
+**同類缺口**：`generate` 撞 `num_predict` 上限時，10-28 只記 warning，使用者看到的半截答案沒有任何標示；改為與串流中途逾時相同，在答案後加註「超過長度上限被截斷」（兩者同時發生時以逾時說明為準）。`OllamaEmbeddings`（檢索與 ingest）原本沒有 timeout，embed 呼叫停滯會讓檢索或入庫無限期卡住，改沿用 `OLLAMA_TIMEOUT_SECONDS`。
 
 **驗證**：新增 2 個測試（串流前失敗→只顯示 `answer_failed`、不寫 history、關 step；串流途中失敗→保留已串出內容再接提示）；本機與容器帶 DB 的 pytest 全數通過，ruff 無警告。
 
@@ -795,18 +790,16 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 | 統計項 | stub／總數 |
 |---|---|
-| `extract_filters` | 584／659 |
-| `generate` | 540／622 |
+| `extract_filters` | 579／659 |
+| `generate` | 537／622 |
 | 「輸出撞到 token 上限」 | 60／60 |
 | 「prompt 疑似被截斷」 | 162／162 |
 
-其餘從 app log 統計的項目（`retrieve_context`、`resolve_market`、各節點逾時等）同樣大量混入。
+其餘從 app log 統計的項目（`retrieve_context`、`resolve_market`、各節點逾時等）同樣大量混入；bench jsonl 與直接量測的數字不受影響。本檔引用的 log 統計已排除 stub 重算。
 
-凡是從 app log 統計出來的數字都要重算；bench jsonl 與直接量測的數字不受影響。
+10-29 以前的 `data/logs/app*.log`（含容器內 app-2026-09-19、10-10、10-28）統計前以 qid 指紋排除 stub：在 `tests/conftest.py` 下跑 pytest 收集 qid；qid 是問題文字 hash，同文會撞，須再以 `elapsed_ms` 佐證（stub 0–11 ms、真實 ≥1 秒）。
 
-**修法**：新增 `tests/conftest.py`，在 import `src` 之前把 `LOG_DIR` 設成暫存目錄；`tests/test_logging_setup.py` 新增 `test_pytest_does_not_write_production_logs` 防止再犯。**驗證**：pytest 323 passed，前後 `app-local.log` 行數都是 1562。
-
-**心得**：數字反常時，先懷疑量測管線，再懷疑系統。
+**修法**：新增 `tests/conftest.py`，在 import `src` 之前把 `LOG_DIR` 設成暫存目錄，並加回歸測試防止再犯。**驗證**：pytest 323 passed，前後 `app-local.log` 行數都是 1562。
 
 ### 改動內容
 
@@ -815,3 +808,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | 重試範圍收斂 | `_RETRYABLE` 改為 `(httpx.ConnectError,)` | `65d8972` |
 | 回答失敗收尾 | `on_message` try 包整段流程；寫 JSON log、關 step、接 `answer_failed`、不寫 history | `65d8972` |
 | pytest 不寫正式 log | 新增 `tests/conftest.py` 於 import `src` 前設暫存 `LOG_DIR`；新增 `test_pytest_does_not_write_production_logs` | `f729b6f` |
+| embedding 逾時 | `graph`、`ingest` 的 `OllamaEmbeddings` 帶 `OLLAMA_TIMEOUT_SECONDS` | `d3b44a0` |
+| 截斷提示 | `generate` 撞 `num_predict` 時加註 i18n `generate_truncated`，並設 `generate_truncated` 讓 app 串流端同樣補上 | `9fea171` |
+| `extract_filters` 測試補齊 | 補 `parsing_error`、`parsed=None` 兩個降級分支的測試 | `9188191` |
+| 開發工具釘版 | 新增 `requirements-dev.lock`（以 `requirements.lock` 為約束，含 hash）；CI 改裝 lock | `e4fbbc4` |
