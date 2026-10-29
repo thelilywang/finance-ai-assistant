@@ -19,7 +19,7 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.input_widget import Select
 
 from src import config, tracing
-from src.graph import _side_by_side, append_disclaimer, build_graph, is_fetching, unique_sources
+from src.graph import _qid, _side_by_side, append_disclaimer, build_graph, is_fetching, unique_sources
 from src.i18n import STRINGS, detect_lang, detect_question_lang, t
 from src.logging_setup import setup_logging
 from src.tickers import is_tw_ticker
@@ -442,26 +442,36 @@ async def on_message(message: cl.Message):
     tracker = _StepTracker(ui_lang)
     await tracker.start()
 
-    final_state = await _stream_answer(state, msg, tracker)
+    try:
+        final_state = await _stream_answer(state, msg, tracker)
 
-    # 雙掛牌反問：給按鈕讓使用者直接點，選了就帶著市場重跑一次，省掉再過一輪 LLM 改寫
-    if final_state and final_state.get("ask_market"):
-        picked = await _pick_market(final_state, ui_lang)
-        if picked:
-            tracker = _StepTracker(ui_lang)
-            await tracker.start()
-            msg = cl.Message(content="")
-            final_state = await _stream_answer(
-                # market_confirmed 讓 rewrite_question 與 extract_filters 早退：問句沒變、
-                # 市場已定，兩次 LLM 呼叫都是白跑。其餘抽取欄位沿用上一輪的結果。
-                {**state, "market": picked, "companies": final_state["companies"],
-                 "ask_market": False, "messages": [], "market_confirmed": True,
-                 "doc_type": final_state.get("doc_type"),
-                 "news_since_days": final_state.get("news_since_days"),
-                 "answer_shape": final_state.get("answer_shape", "full"),
-                 "in_scope": final_state.get("in_scope", True)},
-                msg, tracker,
-            )
+        # 雙掛牌反問：給按鈕讓使用者直接點，選了就帶著市場重跑一次，省掉再過一輪 LLM 改寫
+        if final_state and final_state.get("ask_market"):
+            picked = await _pick_market(final_state, ui_lang)
+            if picked:
+                tracker = _StepTracker(ui_lang)
+                await tracker.start()
+                msg = cl.Message(content="")
+                final_state = await _stream_answer(
+                    # market_confirmed 讓 rewrite_question 與 extract_filters 早退：問句沒變、
+                    # 市場已定，兩次 LLM 呼叫都是白跑。其餘抽取欄位沿用上一輪的結果。
+                    {**state, "market": picked, "companies": final_state["companies"],
+                     "ask_market": False, "messages": [], "market_confirmed": True,
+                     "doc_type": final_state.get("doc_type"),
+                     "news_since_days": final_state.get("news_since_days"),
+                     "answer_shape": final_state.get("answer_shape", "full"),
+                     "in_scope": final_state.get("in_scope", True)},
+                    msg, tracker,
+                )
+    except Exception as e:  # noqa: BLE001
+        # 重試只涵蓋連線被拒，其餘例外（串流中斷、agent 失敗）到這裡收尾，不丟給 Chainlit 的通用錯誤畫面
+        log.exception("回答流程失敗", extra={"fields": {
+            "qid": _qid(message.content), "model": state["model"], "error": str(e)}})
+        await tracker.close()
+        failed = t(content_lang, "answer_failed")
+        msg.content = f"{msg.content}\n\n{failed}" if msg.content else failed
+        await msg.send()
+        return
 
     answer = final_state["answer"] if final_state else ""
     msg.content = _compose_final_content(

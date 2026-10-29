@@ -29,7 +29,6 @@ from functools import lru_cache
 from typing import Annotated, Literal, TypedDict
 
 import httpx
-import ollama
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -91,10 +90,12 @@ def _client_kwargs() -> dict:
     return {"timeout": config.OLLAMA_TIMEOUT_SECONDS}
 
 
-# 只重試連線層／server 端的暫態錯誤（模型載入中等）。逾時不重試：停滯會重現，
-# 重試只是把等待放大 3 倍；結構化輸出解析失敗在 temperature 0 下是確定性的，重試
-# 只會得到同一個結果（extract_filters 本來就會對任何例外降級成不過濾）。
-_RETRYABLE = (httpx.ConnectError, httpx.RemoteProtocolError, ollama.ResponseError)
+# 只重試連線被拒（Ollama 尚未就緒）——此時一個 token 都還沒送出，重試沒有副作用。
+# 逾時不重試（停滯會重現，重試只放大等待）；ResponseError 多為 404 模型不存在或 OOM/載入失敗，
+# 重試會重現；串流途中斷線（RemoteProtocolError）重試會把已送出的 token 再串一次，UI 出現重複文字。
+# 結構化輸出解析失敗在 temperature 0 下是確定性的，重試只會得到同一個結果
+# （extract_filters 本來就會對任何例外降級成不過濾）。
+_RETRYABLE = (httpx.ConnectError,)
 
 
 @lru_cache(maxsize=8)
@@ -110,7 +111,7 @@ def _llms(model: str) -> dict:
         num_predict=config.OLLAMA_NUM_PREDICT,
     )
     return {
-        # with_retry：Ollama 模型冷啟動/短暫逾時時重試，避免整個 graph 節點直接中斷對話
+        # with_retry：Ollama 尚未就緒（連線被拒）時重試，見 _RETRYABLE
         "llm": base.with_retry(retry_if_exception_type=_RETRYABLE, stop_after_attempt=3),
         "filters": base.with_structured_output(ExtractedFilters, include_raw=True).with_retry(
             retry_if_exception_type=_RETRYABLE, stop_after_attempt=3

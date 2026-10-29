@@ -64,6 +64,7 @@ STRINGS = {
             "也可以手動匯入：python -m src.ingest --file <路徑> --company <代號>，或換個問法。"
         ),
         "generate_timeout": "回答生成逾時，未能完成。下方來源清單仍可參考，請稍後再試或縮小問題範圍。",
+        "answer_failed": "回答時與模型的連線中斷，未能完成。請稍後再試一次。",
         "generate_timeout_partial": "⚠️ 回答在生成途中逾時，以上內容不完整。請稍後再試或縮小問題範圍。",
         "off_topic": (
             "這個問題看起來不在財經資料的範圍內。本助理只回答上市公司的財報與新聞相關問題。\n\n"
@@ -243,6 +244,10 @@ STRINGS = {
         "generate_timeout": (
             "Answer generation timed out and could not be completed. The source list below is still "
             "usable; please try again later or narrow the question."
+        ),
+        "answer_failed": (
+            "The connection to the model was interrupted before the answer finished. "
+            "Please try again shortly."
         ),
         "generate_timeout_partial": (
             "⚠️ The answer timed out mid-generation; the content above is incomplete. "
