@@ -444,9 +444,9 @@ def extract_filters(state: GraphState) -> GraphState:
         out = _llms(model)["filters"].invoke(prompt)
         if out.get("raw") is not None:
             usage = _ollama_usage(out["raw"])
-        # 輸出撞 num_predict 上限會產生截斷的壞 JSON，要在判斷解析失敗前先標記
         _warn_if_truncated("extract_filters", qid, usage)
-        # 截斷的 JSON 會被寬鬆解析成「前段模型值＋後段預設值」且不報錯（實測），
+        # 撞 num_predict 上限時，截斷的 JSON 會被寬鬆解析成「前段模型值＋後段預設值」，
+        # parsing_error 為 None、不留任何紀錄（實測），所以要靠 done_reason 自己判斷。
         # 本節點正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信，一律降級
         if usage.get("done_reason") == "length":
             raise ValueError("輸出撞到 num_predict 上限")
