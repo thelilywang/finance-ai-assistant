@@ -16,7 +16,7 @@
 - **補抓時效仍以檢索回來的 top-k chunk 判斷，而非 DB 內最新新聞**（`route_after_tools`）——第一次檢索可能多一次不必要的補抓；本輪補抓過的公司不再判過期，以此避免反覆補抓。詳見 2026-10-10 章節第二節。
 - **EDGAR／XBRL 來源連結只到該公司申報列表**——source 字串不含 CIK，無法直連單份申報。詳見 2026-10-10 章節第二節。
 - **無簡轉繁後處理**——模型偶爾殘留簡體字，demo 答案未手改；可考慮 OpenCC，需新增依賴，尚未做。詳見 2026-10-10 章節第一節。
-- **釘版後 GitHub Actions 尚未實跑；Dockerfile 的 `Tokenizer.from_pretrained('BAAI/bge-m3')` 未釘 revision**——build 仍可能隨上游模型更新而不同。目前 `CHUNK_UNIT=char` 不載入此 tokenizer，不受影響；切成 token 時須一併釘 revision（Dockerfile 與 `src/ingest.py` 兩處 `from_pretrained`）。詳見 2026-10-28 章節第四節。
+- **bge-m3 tokenizer 未釘 revision**（Dockerfile、`src/ingest.py`）——目前 `CHUNK_UNIT=char` 不受影響，切成 token 時須一併釘。詳見 2026-10-28 章節第四節。
 
 ## 後續方向
 
@@ -721,7 +721,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **後續：釘版**：上面「重建 image 才修掉」同時說明 build 不可重現——同一 commit 在不同日子會裝到不同版本，`pip-audit` 掃的也不是實際出貨的內容。`requirements.txt` 維持手寫的寬鬆約束，另以 `uv pip compile --universal --generate-hashes` 產生 `requirements.lock`（版本加 hash，同時涵蓋 mac 開發機與 Linux 的 Docker／CI）；Dockerfile 與 CI 改用 `pip install --require-hashes -r requirements.lock`，base image 釘 digest，`pip-audit` 改掃 lock。**取捨**：換到可重現的 build 與審計對象一致，代價是升版要手動重產 lock（單一套件用 `--upgrade-package`）、base image digest 要手動更新。
 
-**驗證**：對 lock 跑 pip-audit 為 0 筆；全新 venv 以 `--require-hashes` 安裝成功且 `pip check` 無衝突；兩個 image 重建成功，容器內 `pip check` 與 import 正常；pytest 316 passed、4 skipped。**已知限制**：GitHub Actions 尚未實跑；Dockerfile 載入 `BAAI/bge-m3` tokenizer 未釘 revision。
+**驗證**：對 lock 跑 pip-audit 為 0 筆；全新 venv 以 `--require-hashes` 安裝成功且 `pip check` 無衝突；兩個 image 重建成功，容器內 `pip check` 與 import 正常；pytest 316 passed、4 skipped。GitHub Actions 實跑通過（`604f837`）。**已知限制**：Dockerfile 載入 `BAAI/bge-m3` tokenizer 未釘 revision。
 
 ### 五、`extract_filters` 降級時保留市場鎖定
 
