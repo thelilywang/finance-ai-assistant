@@ -42,7 +42,7 @@ from .i18n import t
 from .logging_setup import log_duration
 from .market import get_adr_premium, get_market_snapshot, get_market_snapshots
 from .tickers import (
-    ADR_RATIO, DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
+    ADR_RATIO, COMPANY_NAMES, DUAL_LISTED_NAMES, OTC_ONLY_NAMES, TW_US_DUAL_LISTED, dual_listed_peer, is_tw_ticker,
     normalize_ticker, otc_adr_of,
 )
 from .tracing import node_span
@@ -373,6 +373,7 @@ def _known_codes_block() -> str:
     lines = [f"   - {name}：{tw}（美股 {TW_US_DUAL_LISTED[tw]}）"
              for tw, name in DUAL_LISTED_NAMES.items()]
     lines += [f"   - {name}：{tw}" for tw, name in OTC_ONLY_NAMES.items()]
+    lines += [f"   - {name}：{code}" for code, name in COMPANY_NAMES.items()]
     return "\n".join(lines)
 
 
