@@ -975,4 +975,5 @@ prompt 變長後有 4 題輸出位移，逐一確認沒有下游影響：
 | golden set | 新增 `tests/eval_retrieval_golden.py`、`tests/eval_data/retrieval_golden.json` | `e9786f3` |
 | 文件 | 本章節；更新「已知限制」TTFT 與「後續方向」golden set 項 | `e9786f3` |
 | 引用正確率 eval | 新增 `tests/eval_citation_accuracy.py`；本章節第三節，「已知限制」補公司抽取一項 | `51defef` |
+| 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10；本章節第四節 | `26cf0d0` |
 | 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10；本章節第四節 | 本 commit |
