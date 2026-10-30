@@ -124,7 +124,11 @@ async def search_knowledge_base(
                 news_ages.append(age)
         else:
             when = "發布日期：不明"
-        blocks.append(f"[{kind}｜{d['source']}]（{when}）\n{d['content']}")
+        content = d["content"]
+        if config.INJECTION_GUARD == "on":
+            # ponytail: 分隔字串是靜態的，攻擊者可在內文偽造結束標記；升級路徑是每次請求用隨機 nonce 標記
+            content = f"<<<來源內容開始>>>\n{content}\n<<<來源內容結束>>>"
+        blocks.append(f"[{kind}｜{d['source']}]（{when}）\n{content}")
 
     # 時效判斷只看新聞（財報本來就是季度發布，幾十天前很正常），所以直接把
     # 「最新新聞距今幾天」算好放在開頭，免得模型拿財報的天數去套新聞的門檻

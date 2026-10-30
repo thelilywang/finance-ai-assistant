@@ -1490,6 +1490,9 @@ def generate(state: GraphState) -> GraphState:
         if parts[0] == "TWSE-API" and len(parts) > 2 and parts[2][-2:] in ("Q2", "Q3", "Q4"):
             q = int(parts[2][-1])
             header += "\n" + t(lang, "tw_cumulative_note", year=parts[2][:-2], month=q * 3, q=q)
+        # ponytail: 分隔字串是靜態的，攻擊者可在內文偽造結束標記；升級路徑是每次請求用隨機 nonce 標記
+        if config.INJECTION_GUARD == "on":
+            contents = f"{t(lang, 'src_start')}\n{contents}\n{t(lang, 'src_end')}"
         context_blocks.append(f"{header}\n{contents}")
     context = "\n\n".join(context_blocks)
 
@@ -1591,10 +1594,11 @@ def generate(state: GraphState) -> GraphState:
         + (guard if config.CROSS_MARKET_GUARD == "common" else ""),
     ])
 
+    injection_rule = f"- {t(lang, 'injection_rule')}\n" if config.INJECTION_GUARD == "on" else ""
     prompt = f"""你是專業的財經分析助理。請根據下方參考資料回答使用者問題。
 規則：
 - 只根據參考資料回答，不要編造資料中沒有的數字或事實
-- 回答中明確標示引用的來源編號，例如「根據[{src_label}1]...」
+{injection_rule}- 回答中明確標示引用的來源編號，例如「根據[{src_label}1]...」
 - 引用編號僅限 [{src_label}1] 到 [{src_label}{len(ordered)}]，不得使用其他編號
 - 如果參考資料不足以完整回答，誠實說明還缺什麼資訊
 - 回答務必簡潔：先給結論，最多 2-3 段、每段不超過 3 句，段落間空一行，不要展示推敲過程
