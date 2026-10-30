@@ -30,6 +30,8 @@ ignore = [
 # 以及 update.py 的 inventory() 報表與 MOPS 手動下載指引。
 # AI 執行路徑上的紀錄一律走 logging（見 logging_setup.py），不在此列。
 "src/cli.py" = ["T20"]
+# CLI 輸出簽好的 token 給人複製，不是日誌
+"src/api/issue_token.py" = ["T20"]
 "src/update.py" = ["T20"]
 "src/charts.py" = ["T20"]
 # __main__ 區塊是 assert 自我檢查，與 tests/ 同性質
