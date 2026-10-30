@@ -8,7 +8,7 @@
 
 ## 已知限制
 
-- **回應延遲與記憶體屬本機硬體限制，而非架構問題**（`generate` 節點）——單一標的 186～470 秒，雙掛牌併陳或多標的比較 520～640 秒；本機 Ollama 跑 `qwen3.5:9b` 約每秒 10 字，11k token 的 prompt 僅讀取即需約 130 秒，首字延遲（TTFT）尚未量測。16GB 主機同時跑 Docker VM 8GB、9b 與瀏覽器會用盡記憶體，端到端量測前先把 Docker VM 調到約 4GB。詳見 2026-09-17、09-19、10-07（第二節）、10-28（第六節）章節。
+- **回應延遲與記憶體屬本機硬體限制，而非架構問題**（`generate` 節點）——單一標的 186～470 秒，雙掛牌併陳或多標的比較 520～640 秒；本機 Ollama 跑 `qwen3.5:9b` 約每秒 10 字，11k token 的 prompt 僅讀取即需約 130 秒，首字延遲（TTFT）中位 274 秒、p90 552 秒，約在總耗時 65% 處才出第一個字（2026-10-30 指標補測章節）。16GB 主機同時跑 Docker VM 8GB、9b 與瀏覽器會用盡記憶體，端到端量測前先把 Docker VM 調到約 4GB。詳見 2026-09-17、09-19、10-07（第二節）、10-28（第六節）章節。
 - **LLM 選用 tool 的正確性沒有自動化測試**（`_tool_llm`）——模型行為不保證重現，目前以多次端到端手動驗證確認。詳見 2026-09-08 章節。
 - **`market IS NULL` 殘留 165 筆**——cmoney 137 筆須重新抓取才能修正；udn／cnyes 28 筆來自未納管版面。詳見 2026-09-21 章節第三節。
 - **`_select_exhibit` 取最大 htm 的啟發式**（`src/update.py`）——目前未出現誤選，並以入庫字數警示作為後備防線。詳見 2026-09-09 章節。
@@ -20,7 +20,7 @@
 
 ## 後續方向
 
-- **golden set（共同前置）→ chunk 策略擴充＋數字類查詢直答通道**——缺乏檢索品質指標，無法選定 chunk 參數，也無法驗證改動成效。規格與兩項的評估詳見 2026-09-21 章節第六節。
+- **chunk 策略擴充＋數字類查詢直答通道**——golden set 已建立（`tests/eval_retrieval_golden.py`，基準 Hit@5 77%、Recall@5 0.47），可用來比較 chunk 參數與驗證改動成效；兩項的評估詳見 2026-09-21 章節第六節，基準見 2026-10-30 指標補測章節。
 - **按來源重跑 ingest**——單一標的可手動用 `python -m src.update report --market us|tw --company X` 重抓（寫入前會先 `delete_by_source`）；尚缺批次分派與本地 PDF 來源支援。詳見 2026-09-21 章節第七節。
 - **補抓延遲上升的兩項假設（GIL／Ollama 排隊）**——已加入觀測點，待 log 累積後驗證。詳見 2026-09-24 章節。
 
@@ -855,3 +855,67 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 |---|---|---|
 | `INJECTION_GUARD` 開關 | `src/config.py` 新增（預設 off）；`generate` 與 `search_knowledge_base` 的 `summary_for_llm` 依開關加分隔與規則句；`src/i18n.py` 補文案 | `285ee00` |
 | 測試 | 新增 `tests/test_injection_guard.py` | `285ee00` |
+
+---
+
+## 2026-10-30　指標補測：檢索品質、首字延遲、省下的呼叫與 ADR 重測　`RAG` `效能` `可觀測性`
+
+補齊先前只有估計、沒有量測的指標，並重跑兩組舊結論。**結論：檢索的瓶頸在向量排序本身而非近似索引（HNSW 與精確排序結果相同）；首字要等到總耗時約 65% 才出現；ADR EPS 換算的 A/B 結論在 `num_ctx=32768` 下仍成立。**
+
+**實測條件**：2026-10-30，`qwen3.5:9b`、`bge-m3`，`temperature 0`，於 app 容器內執行；log 統計取自 `data/logs/`，已排除 pytest stub（`elapsed_ms < 2000`）與 bench 重跑。
+
+### 一、檢索品質 golden set
+
+新增 `tests/eval_retrieval_golden.py` 與 26 題標注檔（`tests/eval_data/retrieval_golden.json`）。標注不寫死 chunk id，改用「公司＋類型＋內容 regex」界定相關塊，重灌後仍可用；公司與類型直接給正確值，只量向量排序（抽取正確率另見第五節）。
+
+| 臂 | Hit@5 | Recall@5 | MRR@5 |
+|---|---|---|---|
+| hnsw（正式路徑） | 77% | 0.47 | 0.63 |
+| exact（關掉索引） | 77% | 0.47 | 0.63 |
+| context（`retrieve_context` 整段） | 任一塊相關 81% | — | — |
+
+- HNSW 與精確排序完全相同，**過濾條件下近似索引沒有漏召回**，改善要從 embedding 或 chunk 下手。
+- 未命中 6 題：G01、G25（NVDA 資料中心，中英各一）、G03、G09、G13、G18。
+- 前 5 名中 XBRL 標籤攤平的雜訊塊 5/130；語料中這類塊 692/6718。
+
+### 二、首字延遲（TTFT）
+
+n=23：中位 274 秒、p90 552 秒，首字約出現在總耗時 65% 處，也就是多數時間花在出第一個字之前。
+
+### 三、省下的 LLM 呼叫
+
+`route_after_tools` 的收工捷徑（`29967c5`）：107 題中 79 題由程式判定資料已足直接收工、22 題由 LLM 自行停止、6 題撞到輪數上限，約省下 26% 的 agent 呼叫。
+
+### 四、Embedding 快取與並行檢索
+
+- 查詢 embedding 快取命中 57/123（46%）；log 含 bench 與 demo 重跑同題，實際使用下應偏低。
+- 並行檢索：
+
+| 情境 | 循序 | 並行 |
+|---|---|---|
+| 無快取 | 103.7 ms | 51.8 ms |
+| 有快取 | 9.2 ms | 13.6 ms |
+
+有快取時並行反而慢約 4 ms，相對整題數百秒可忽略，不另做分支。
+
+### 五、重測：`extract_filters` 與 ADR EPS
+
+**`extract_filters`**（`tests/eval_extract_filters.py`，28 題）：全欄皆對 26/28；`companies` 28/28、`in_scope` 28/28、`answer_shape` 26/26、`market` 26/28。單題中位 10.6 秒。兩題失敗為同一種偏差：S2「現在該不該買微軟？」與 N8「微軟與 Google 誰的雲端業務成長比較快？」把 `market` 填成 `us`（預期 None），公司在美股就順手限定市場。
+
+**ADR EPS 換算 A/B**（`num_ctx=32768`、`ADR_COMPARE_RULE=on`，每題 1 次）：
+
+| 臂 | 引用 EPS 換算值 | 決策卡欄位 | prompt token |
+|---|---|---|---|
+| `ADR_PREMIUM` 開 | 3/3 | 9 欄 | 5885～9950 |
+| `ADR_PREMIUM=block` | 0/3 | 9 欄 | 5763～9828 |
+
+與 2026-10-07 的 3/3 對 0/3 一致，三題 prompt 皆遠低於 32768、無截斷。
+
+**已知限制**：每題只跑 1 次；eps2 的 `decode_ms=2109974` 與該題總耗時 127.7 秒矛盾，視為計數異常不採用；兩臂各有 2～3 題出現「決策卡格式違規」警告，未逐題分析。
+
+### 改動內容
+
+| 項目 | 改動說明 | commit |
+|---|---|---|
+| golden set | 新增 `tests/eval_retrieval_golden.py`、`tests/eval_data/retrieval_golden.json` | 本 commit |
+| 文件 | 本章節；更新「已知限制」TTFT 與「後續方向」golden set 項 | 本 commit |
