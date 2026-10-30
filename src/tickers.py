@@ -85,6 +85,28 @@ OTC_ONLY_NAMES = {
     "2409": "友達光電",
 }
 
+# 庫內常問、但不在上面兩張表的公司。9b 對公司名轉代號的記憶不可靠：實測「Google
+# Cloud」「Meta 廣告」「禮來」「SpaceX」抽不到公司、還連帶被判離題拒答，「大立光」
+# 被填成 3712（正確 3008）。列進 prompt 讓模型照抄。
+# ponytail: 靜態表，只收 DB 有財報的公司；新增公司時一併補一行，漏補只是退回靠記憶。
+COMPANY_NAMES = {
+    "2308": "台達電",
+    "2379": "瑞昱",
+    "2454": "聯發科",
+    "3008": "大立光",
+    "AAPL": "蘋果／Apple",
+    "ASML": "艾司摩爾／ASML",
+    "DELL": "戴爾／Dell",
+    "GOOGL": "Google／Alphabet／谷歌",
+    "JPM": "摩根大通／JPMorgan",
+    "LLY": "禮來／Eli Lilly",
+    "META": "Meta／臉書／Facebook",
+    "MSFT": "微軟／Microsoft",
+    "NVDA": "輝達／NVIDIA",
+    "SPCX": "SpaceX",
+    "TSLA": "特斯拉／Tesla",
+}
+
 
 def dual_listed_peer(company: str) -> str | None:
     """回傳同一家公司在另一個市場的代號；非雙掛牌標的回 None。

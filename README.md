@@ -58,6 +58,7 @@ See steps 1-4 of Quick Start above (Ollama models, database, Python env, Google 
 - **Interactive charts under each answer** (real data, no LLM involved): 6-month price line with a next-earnings-date marker, and 8-quarter EPS estimate vs actual grouped bars colored by beat (green) / miss (red)
 - **One-command data updates**: US filings on two tracks (SEC XBRL API for figures, incl. `ifrs-full` for foreign issuers; SEC EDGAR filing text incl. 6-K/20-F), TW filings on two tracks (official TWSE/TPEx OpenAPI for figures, MOPS PDFs for narrative), Yahoo Finance RSS (news), market-news sweep from udn/cmoney/cnyes listings; idempotent re-runs
 - **Auto-fetch on demand**: ask about a company not yet in the DB and it fetches its data automatically (listed companies only); company questions whose newest news is stale (>3 days, or not from today when you ask for "latest/today") re-fetch news once; company-less questions trigger a market-news sweep instead
+- **HTTP API (FastAPI)**: `python -m src.api.main`, JWT auth, answers streamed over SSE; interactive docs at `/docs`
 - **Chainlit web UI**: ChatGPT-style token streaming, multi-turn chat, downloadable PDF report per answer (charts embedded, rendered via headless Chrome; falls back to `.md` when no browser is found)
 - **Honest no-result path**: says "no data" instead of hallucinating
 
@@ -182,6 +183,7 @@ chainlit run src/app.py -w    # 開 http://localhost:8000,用 Google 帳號登�
 - **回答附兩張互動圖表**(全部真資料,LLM 不參與畫圖):6 個月股價走勢線圖(含下次財報日標記)、近 8 季 EPS 預估 vs 實際 grouped bar(beat 綠/miss 紅)
 - **一鍵抓取更新**:美股財報兩軌(SEC XBRL API 取數字,外國發行人走 ifrs-full;SEC EDGAR 取申報全文,含 6-K/20-F)、台股財報兩軌(證交所/櫃買官方 OpenAPI 取數字、MOPS 取文字敘述)、Yahoo Finance RSS(新聞)、udn/cmoney/鉅亨網 cnyes 市場新聞列表頁掃描;重跑同一來源自動去重
 - **自動抓取**:問到未匯入的公司會自動抓取其財報/新聞(僅限上市公司);最新新聞過期時(超過 3 天,或問「最新/今天」(時間窗 7 天內)時新聞不是今天的)自動重抓一次;沒指定公司的問題則觸發市場新聞掃描
+- **HTTP API(FastAPI)**:`python -m src.api.main` 啟動,JWT 驗證,以 SSE 串流回答;互動文件在 `/docs`
 - **Chainlit 網頁介面**:ChatGPT 風格逐字串流、多輪對話、每則回答附可下載 PDF 報告(內嵌圖表,headless Chrome 渲染;找不到瀏覽器時退回 `.md`)
 - **查無資料時誠實告知**,不幻覺
 
