@@ -21,7 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .. import tracing
 from ..graph import build_graph
 from ..logging_setup import log_duration, setup_logging
-from .routers import ask, health
+from .routers import ask, health, jobs
 from .schemas import ErrorBody, ErrorResponse
 from .settings import settings
 
@@ -106,6 +106,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.include_router(health.router)
     app.include_router(ask.router)
+    app.include_router(jobs.router)
     return app
 
 
