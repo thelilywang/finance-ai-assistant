@@ -50,6 +50,7 @@ flowchart TD
     EF --> RM[resolve_market]
     RM -->|<條件標籤>| OT[off_topic]
     RM -->|<條件標籤>| AM[ask_market]
+    RM -->|<條件標籤>| AC[ask_company]
     RM -->|<條件標籤>| AG[agent]
     AG -->|<條件標籤>| TL[tools]
     AG -->|<條件標籤>| AS[assemble]
@@ -61,6 +62,7 @@ flowchart TD
     NR --> B[誠實告知查無資料 + 市場快照]
     OT --> C[請使用者改問財經相關問題]
     AM --> D[反問要看台股還是美股]
+    AC --> E[請使用者改用股票代號再問]
 
     subgraph 資料管線
         SRC[<目前 MARKET_SOURCES/財報/新聞來源摘要>] --> UP[src/update.py]

@@ -14,21 +14,22 @@ A financial report & news RAG assistant for individual stocks, built with LangGr
 
 ### Quick Start
 
-Requirements: Python 3.10+, Docker, [Ollama](https://ollama.com).
+Requirements: Python 3.11+, Docker, [Ollama](https://ollama.com).
 
 ```bash
 # 1. Ollama models
 ollama pull qwen3.5:9b     # LLM
 ollama pull bge-m3         # embeddings (multilingual)
 
-# 2. Database (Postgres + pgvector)
+# 2. Config + database (Postgres + pgvector)
+cp .env.example .env       # uses PGVECTOR_URL for the DB connection
+python -c "import secrets; print(secrets.token_urlsafe(32))"   # paste into API_JWT_SECRET in .env (the api container refuses to start without it)
 docker compose up -d
 
 # 3. Python env
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.lock   # pinned + hashed; regenerate: uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes -o requirements.lock
-cp .env.example .env       # uses PGVECTOR_URL for the DB connection
 psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # enables thumbs up/down feedback + threads/history tables
                             # (docker-compose already applies this on a fresh volume;
                             #  only needed manually for a volume created before this file existed)
@@ -71,17 +72,19 @@ flowchart TD
     EF --> RM[resolve_market]
     RM -->|"off-topic (not a finance question)"| OT[off_topic]
     RM -->|"dual-listed, market not stated"| AM[ask_market]
+    RM -->|"filter extraction failed, no company recognized"| AC[ask_company]
     RM -->|otherwise| AG[agent]
     AG -->|LLM picks a tool| TL[tools]
     AG -->|no tool call, or round limit reached| AS[assemble]
-    TL -->|"news fresh enough (<=3d; must be today's when asked for 'latest')"| AS
-    TL -->|"empty, news missing, stale, or just fetched"| AG
+    TL -->|"news fresh enough (<=3d; must be today's when asked for 'latest'), or already re-fetched"| AS
+    TL -->|"empty, news missing, stale and not yet re-fetched, or just fetched"| AG
     AS -->|has chunks| GEN[generate]
     AS -->|nothing retrieved| NR[no_result]
     GEN --> A[Answer + sources + decision card]
     NR --> B["Honest 'no data' reply + market snapshot"]
     OT --> C[Ask the user to rephrase as a finance question]
     AM --> D[Ask which market: TW or US]
+    AC --> E[Ask the user to retry with a ticker]
 
     subgraph Data pipeline
         SRC[EDGAR / TWSE+TPEx API / MOPS / Yahoo RSS / udn+cmoney+cnyes sweep] --> UP[src/update.py]
@@ -103,6 +106,8 @@ flowchart TD
 | `python -m src.update prune --days 180` | Delete news chunks older than N days (reports are never pruned) |
 | `python -m src.ingest --file data/x.pdf --company 2330 --doc-type financial_report --date 2026-07-15` | Import a local PDF/txt manually |
 | `python -m src.cli` | Terminal chat (single-turn) |
+| `python -m src.api.main` | HTTP API at http://localhost:8001 (interactive docs at `/docs`) |
+| `python -m src.api.issue_token --sub <name> [--days 30]` | Issue a JWT for the HTTP API (needs `API_JWT_SECRET`) |
 | `chainlit run src/app.py -w` | Web chat UI at http://localhost:8000 |
 
 ### Testing
@@ -139,21 +144,22 @@ For architecture, design decisions, and the full AI Product Case Study (CRISP-DM
 
 ### 快速開始
 
-環境需求:Python 3.10+、Docker、[Ollama](https://ollama.com)。
+環境需求:Python 3.11+、Docker、[Ollama](https://ollama.com)。
 
 ```bash
 # 1. 安裝 Ollama 模型
 ollama pull qwen3.5:9b     # 生成用的 LLM
 ollama pull bge-m3         # embedding 模型(支援中文)
 
-# 2. 啟動資料庫(Postgres + pgvector)
+# 2. 設定檔 + 啟動資料庫(Postgres + pgvector)
+cp .env.example .env       # DB 連線用 PGVECTOR_URL(避免與 chainlit 的 DATABASE_URL 名稱衝突)
+python -c "import secrets; print(secrets.token_urlsafe(32))"   # 結果貼到 .env 的 API_JWT_SECRET（沒設 api 容器會拒絕啟動）
 docker compose up -d
 
 # 3. Python 環境
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.lock   # 已釘版+hash;重新產生:uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes -o requirements.lock
-cp .env.example .env       # DB 連線用 PGVECTOR_URL(避免與 chainlit 的 DATABASE_URL 名稱衝突)
 psql "$PGVECTOR_URL" -f db/chainlit_schema.sql   # 套用後才能按讚/倒讚、對話歷史才有 threads 等表
                             # (全新 volume 已由 docker-compose 自動套用;
                             #  只有本檔案上線前就建立的既有 volume 才需要手動跑一次)
@@ -196,17 +202,19 @@ flowchart TD
     EF --> RM[resolve_market]
     RM -->|"離題（非財經問題）"| OT[off_topic]
     RM -->|"雙掛牌且未指明市場"| AM[ask_market]
+    RM -->|"條件抽取失敗且認不出公司"| AC[ask_company]
     RM -->|其餘情況| AG[agent]
     AG -->|LLM 選定要呼叫的 tool| TL[tools]
     AG -->|不再呼叫 tool 或已達輪數上限| AS[assemble]
-    TL -->|"新聞夠新（3 天內；問「最新」時須為今日）"| AS
-    TL -->|"全空、缺新聞、已過期或剛補抓完"| AG
+    TL -->|"新聞夠新（3 天內；問「最新」時須為今日）或本輪已補抓"| AS
+    TL -->|"全空、缺新聞、過期且未補抓或剛補抓完"| AG
     AS -->|有檢索結果| GEN[generate]
     AS -->|完全沒有檢索結果| NR[no_result]
     GEN --> A[回答 + 引用來源 + 決策卡]
     NR --> B[誠實告知查無資料 + 市場快照]
     OT --> C[請使用者改問財經相關問題]
     AM --> D[反問要看台股還是美股]
+    AC --> E[請使用者改用股票代號再問]
 
     subgraph 資料管線
         SRC[EDGAR / 證交所+櫃買 API / MOPS / Yahoo RSS / udn+cmoney+cnyes 掃描] --> UP[src/update.py]
@@ -228,6 +236,8 @@ flowchart TD
 | `python -m src.update prune --days 180` | 刪除超過 N 天的新聞 chunk(財報一律保留) |
 | `python -m src.ingest --file data/x.pdf --company 2330 --doc-type financial_report --date 2026-07-15` | 手動匯入本地 PDF/txt |
 | `python -m src.cli` | 終端問答(單輪) |
+| `python -m src.api.main` | HTTP API,http://localhost:8001(互動文件在 /docs) |
+| `python -m src.api.issue_token --sub <name> [--days 30]` | 簽發 HTTP API 用的 JWT(需先設 API_JWT_SECRET) |
 | `chainlit run src/app.py -w` | 網頁聊天介面 http://localhost:8000 |
 
 範例問題:
