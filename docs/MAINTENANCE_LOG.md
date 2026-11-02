@@ -969,7 +969,7 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 
 ## 2026-11-02　FastAPI HTTP API　`API` `部署`
 
-在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。
+在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。當天另外處理了一件獨立的事：升級 pypdf 以修補新公布的 CVE。
 
 ### 架構與端點
 
@@ -1004,6 +1004,10 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 
 **已知限制**：job 存在記憶體，重啟消失、只能單一 worker；存取 log 的 `elapsed_ms` 對 SSE 只記到回應開始送出；本機 Ollama 一次跑一題，同時進來的請求會排隊。
 
+### 相依套件 CVE 更新
+
+CI 的 `pip-audit` 步驟轉紅：`requirements.lock` 裡的 pypdf 6.21.3 有 3 個新公布的 CVE（CVE-2026-119203、CVE-2026-119204、CVE-2026-119205），6.21.4 已修正。這與 HTTP API 的改動無關，是 2026-10-28 章節（第四節）設計的機制在運作：新 CVE 公布時 CI 轉紅。處理方式是把 `requirements.txt` 的 pypdf 下限調為 `>=6.21.4`，並以 `uv pip compile --upgrade-package pypdf` 重新產生兩個 lock，只有 pypdf 變動；兩個 lock 的 pip-audit 皆為 0 筆，PR 的 CI 通過。
+
 ### 改動內容
 
 | 項目 | 改動說明 | commit |
@@ -1013,5 +1017,6 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 | Middleware | `X-Request-ID`、JSON Lines 存取 log、可選 CORS | `60c54f2` |
 | 部署 | `docker-compose.yml` 新增 `api` service 與 healthcheck；SSE 加 no-buffering headers（`Cache-Control: no-cache`、`X-Accel-Buffering: no`） | `c0e1bc8` |
 | 錯誤處理 | 未處理例外回 500（`internal_error`，帶 `X-Request-ID`）；API 的 prompt 拿掉「請點選下方按鈕」，只在 Chainlit 加上，graph 回的文字不含 | `c358659` |
-| job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `e81d9c9` |
+| job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `4bdf1bf` |
+| pypdf 升版 | `requirements.txt` 下限調為 `>=6.21.4`，重新產生兩個 lock | `41043e4` |
 | 文件 | 本章節；索引補 HTTP API 狀態與已知限制 | — |
