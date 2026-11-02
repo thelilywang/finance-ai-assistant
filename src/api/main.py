@@ -7,23 +7,28 @@
 多開 worker 只會搶同一張 GPU，所以固定單一 worker。
 """
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import tracing
 from ..graph import build_graph
-from ..logging_setup import setup_logging
+from ..logging_setup import log_duration, setup_logging
 from .routers import ask, health
 from .schemas import ErrorBody, ErrorResponse
 from .settings import settings
 
 log = logging.getLogger("api")
 _IN_DOCKER = Path("/.dockerenv").exists()
+# compose healthcheck 每 30 秒打一次這兩個路徑，記進 access log 會洗版
+_QUIET_PATHS = {"/health", "/ready"}
 
 
 def _check_secret() -> None:
@@ -63,8 +68,40 @@ async def _validation_error(_: Request, exc: RequestValidationError):
     return _error(422, "validation_error", msg)
 
 
+async def _request_context(request: Request, call_next):
+    """帶入或產生 X-Request-ID、回寫到 response header，並記一筆 access log。"""
+    # client 帶的值不可信，截斷避免超長字串寫進 log
+    request_id = request.headers.get("X-Request-ID", "")[:64] or uuid.uuid4().hex
+    started = time.monotonic()
+    status = 500  # 未處理的例外會由外層轉成 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception:
+        log.exception("unhandled error", extra={"fields": {"request_id": request_id}})
+        raise
+    finally:
+        if request.url.path not in _QUIET_PATHS:
+            # SSE（/api/v1/ask）的 elapsed_ms 量到 response 開始送出（TTFB），不含整段串流
+            log_duration(log, "request", started, request_id=request_id,
+                         method=request.method, path=request.url.path, status=status)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Finance AI Assistant API", lifespan=lifespan)
+    # 只有設定了來源才啟用 CORS；空清單＝不允許跨來源
+    if settings.API_CORS_ORIGINS:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.API_CORS_ORIGINS,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+            expose_headers=["X-Request-ID"],
+        )
+    # 後註冊的在最外層：preflight 由 CORS 直接回應，也要帶 X-Request-ID 並記 log
+    app.middleware("http")(_request_context)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.include_router(health.router)
@@ -80,4 +117,4 @@ if __name__ == "__main__":
 
     # 容器內要讓其他 service 連得到，必須綁全介面；無驗證的情況已在 lifespan 擋掉
     host = "0.0.0.0" if _IN_DOCKER else settings.API_HOST  # noqa: S104
-    uvicorn.run(app, host=host, port=settings.API_PORT)
+    uvicorn.run(app, host=host, port=settings.API_PORT, access_log=False)

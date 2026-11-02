@@ -93,3 +93,58 @@ def test_graph_error_becomes_error_event(client):
 def test_empty_secret_disables_auth(client, monkeypatch):
     monkeypatch.setattr(settings, "API_JWT_SECRET", "")
     assert _ask(client).status_code == 200
+
+
+def test_request_id_generated_and_echoed(client):
+    assert len(client.get("/health").headers["X-Request-ID"]) == 32
+    r = client.get("/health", headers={"X-Request-ID": "abc-123"})
+    assert r.headers["X-Request-ID"] == "abc-123"
+    r = client.get("/health", headers={"X-Request-ID": "x" * 500})
+    assert r.headers["X-Request-ID"] == "x" * 64
+
+
+def test_access_log_for_business_endpoint_not_health(client, caplog):
+    with caplog.at_level("INFO", logger="api"):
+        client.get("/health")
+        assert not [r for r in caplog.records if r.message == "request"]
+        r = _ask(client, _token())
+    (rec,) = [x for x in caplog.records if x.message == "request"]
+    f = rec.fields
+    assert f["request_id"] == r.headers["X-Request-ID"]
+    assert (f["method"], f["path"], f["status"]) == ("POST", "/api/v1/ask", 200)
+    assert isinstance(f["elapsed_ms"], int)
+
+
+def test_cors_enabled_only_when_configured(client, monkeypatch):
+    origin = "http://localhost:3000"
+    assert "access-control-allow-origin" not in client.get("/health", headers={"Origin": origin}).headers
+
+    monkeypatch.setattr(settings, "API_CORS_ORIGINS", [origin])
+    with TestClient(main.create_app()) as c:
+        r = c.options("/api/v1/ask", headers={
+            "Origin": origin, "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization"})
+        assert r.headers["access-control-allow-origin"] == origin
+        assert "X-Request-ID" in r.headers
+        r = c.get("/health", headers={"Origin": origin})
+        assert r.headers["access-control-allow-origin"] == origin
+        assert "X-Request-ID" in r.headers["access-control-expose-headers"]
+
+
+def test_unhandled_error_logged_as_500(monkeypatch, caplog):
+    async def fake_build():
+        return FakeGraph()
+
+    monkeypatch.setattr(main, "build_graph", fake_build)
+    app = main.create_app()
+
+    @app.get("/boom")
+    async def boom():
+        raise RuntimeError("boom")
+
+    with TestClient(app, raise_server_exceptions=False) as c, caplog.at_level("INFO", logger="api"):
+        assert c.get("/boom", headers={"X-Request-ID": "err-1"}).status_code == 500
+    (err,) = [r for r in caplog.records if r.message == "unhandled error"]
+    assert err.exc_info and err.fields == {"request_id": "err-1"}
+    (rec,) = [r for r in caplog.records if r.message == "request"]
+    assert (rec.fields["request_id"], rec.fields["status"]) == ("err-1", 500)
