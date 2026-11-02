@@ -956,7 +956,7 @@ n=23：中位 274 秒、p90 552 秒，首字約出現在總耗時 65% 處，也�
 
 ## 2026-11-02　FastAPI HTTP API 與入口補齊　`API` `部署` `可觀測性`
 
-在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。當天另外處理兩件獨立的事：升級 pypdf 以修補新公布的 CVE，以及補上 CLI 入口漏掉的 logging。
+在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。當天另外處理 pypdf CVE 升版、CLI 入口補 logging，以及 db 對 host 開放後的完整測試與覆蓋率。
 
 ### 架構與端點
 
@@ -1003,6 +1003,21 @@ CI 的 `pip-audit` 因 `requirements.lock` 的 pypdf 6.21.3 有 3 個新公布�
 
 **驗證**：pytest 351 passed、4 skipped；容器內 CLI 問一題，終端 0 行 INFO，`cli.log` 含各節點 `model` 與 `elapsed_ms`。模型同上方實測改用 `qwen3.5:4b`。
 
+### 完整測試與覆蓋率
+
+**db 對 host 開放**：compose 的 db 改對 host 開 5433，compose 內的服務仍走 `db:5432`；`PGVECTOR_URL` 預設值改指 5433，host 端的 pytest 也連得到 DB。
+
+**容器內完整測試**：以 `c300723` 重建 api image，另開一次性容器裝 `requirements-dev.lock`（image 本身不含 pytest），接 compose 的 db 跑 pytest：355 passed、0 skipped（含 API 的 20 個與 4 個 DB 整合測試）。host 的 venv 接 DB 結果相同。
+
+**覆蓋率**（`pytest --cov=src --cov-branch`，host 接 DB，含 `src/api/`）：
+
+| 範圍 | branch coverage |
+|---|---|
+| 整體 | 72%（2660 stmts、786 branches） |
+| `graph.py` | 90% |
+| `src/api/` | router 100%、`main.py` 86%、`service.py` 67%、`issue_token.py` 0% |
+| 偏低 | `cli.py` 0%、`i18n.py` 32%、`charts.py` 48%、`app.py` 50%、`vectorstore.py` 54% |
+
 ### 改動內容
 
 | 項目 | 改動說明 | commit |
@@ -1012,7 +1027,8 @@ CI 的 `pip-audit` 因 `requirements.lock` 的 pypdf 6.21.3 有 3 個新公布�
 | Middleware | `X-Request-ID`、JSON Lines 存取 log、可選 CORS | `60c54f2` |
 | 部署 | `docker-compose.yml` 新增 `api` service 與 healthcheck；SSE 加 no-buffering headers（`Cache-Control: no-cache`、`X-Accel-Buffering: no`） | `c0e1bc8` |
 | 錯誤處理 | 未處理例外回 500（`internal_error`，帶 `X-Request-ID`）；API 的 prompt 不含按鈕提示 | `c358659` |
-| job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `4bdf1bf` |
+| job 清理 | 完成的 job 逾時清除 | `4bdf1bf` |
 | pypdf 升版 | `requirements.txt` 下限調為 `>=6.21.4`，重新產生兩個 lock | `41043e4` |
 | CLI logging | `setup_logging` 新增 `stream_level`；`src/cli.py` 啟動時呼叫並傳 `logging.WARNING` | `17e8fc7` |
 | 文件 | `PROJECT.md` 補 HTTP API；維護日誌精簡、10-28 MCP 補驗 | `a90ccf8` |
+| db 對 host 開放 | `docker-compose.yml` db 加 `5433:5432`；`config.py`、`.env.example` 的 `PGVECTOR_URL` 預設改為 5433 | `c7c32ec` |
