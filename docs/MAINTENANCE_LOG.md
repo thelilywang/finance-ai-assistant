@@ -952,6 +952,8 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 - 腳本判 7 筆找不到，人工複核：G08「247.6 億」是 24,768 百萬取到小數一位，屬評分誤判；其餘 4 筆是單位換算錯（來源 24,768 百萬讀成「2,476 億」「2,476 百萬」，半年 44,796 百萬寫成「4,479.6 億」）；G16 的 44%／21% 是模型自行拆分 65% 後掛上引用的推算值。
 - 合併第三節：27 題、156 筆數字引用，人工複核後正確 139 筆（89%）；換算錯與編造（含推算）共 12 筆（8%）。
 
+**驗證**（11-02）：全套 335 個測試通過；本機 331 passed、4 skipped，skip 的 `test_market_filter` 外洩測試在 app 容器內接 Postgres 與 `bge-m3` 4/4 通過。
+
 **已知限制**：`COMPANY_NAMES` 是靜態表，新增公司時漏補一行就會退回靠記憶；每題只跑 1 次。
 
 ### 改動內容
@@ -960,16 +962,16 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 |---|---|---|
 | `INJECTION_GUARD` 開關 | `src/config.py` 新增（預設 off）；`generate` 與 `search_knowledge_base` 的 `summary_for_llm` 依開關加分隔與規則句；`src/i18n.py` 補文案 | `285ee00` |
 | 測試 | 新增 `tests/test_injection_guard.py` | `285ee00` |
-| golden set | 新增 `tests/eval_retrieval_golden.py`、`tests/eval_data/retrieval_golden.json` | `e9786f3` |
-| 文件 | 本章節；更新「已知限制」TTFT 與「後續方向」golden set 項 | `e9786f3` |
-| 引用正確率 eval | 新增 `tests/eval_citation_accuracy.py`；本章節第三節，「已知限制」補公司抽取一項 | `51defef` |
-| 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10；本章節第四節 | `26cf0d0` |
+| golden set | 新增 `tests/eval_retrieval_golden.py`、`tests/eval_data/retrieval_golden.json` | `558c8fe` |
+| 文件 | 本章節；更新「已知限制」TTFT 與「後續方向」golden set 項 | `558c8fe` |
+| 引用正確率 eval | 新增 `tests/eval_citation_accuracy.py`；本章節第三節，「已知限制」補公司抽取一項 | `558c8fe` |
+| 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10；本章節第四節 | `558c8fe` |
 
 ---
 
 ## 2026-11-02　FastAPI HTTP API　`API` `部署`
 
-在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。
+在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。當天另外處理了一件獨立的事：升級 pypdf 以修補新公布的 CVE。
 
 ### 架構與端點
 
@@ -1004,6 +1006,10 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 
 **已知限制**：job 存在記憶體，重啟消失、只能單一 worker；存取 log 的 `elapsed_ms` 對 SSE 只記到回應開始送出；本機 Ollama 一次跑一題，同時進來的請求會排隊。
 
+### 相依套件 CVE 更新
+
+CI 的 `pip-audit` 步驟轉紅：`requirements.lock` 裡的 pypdf 6.21.3 有 3 個新公布的 CVE（CVE-2026-119203、CVE-2026-119204、CVE-2026-119205），6.21.4 已修正。這與 HTTP API 的改動無關，是 2026-10-28 章節（第四節）設計的機制在運作：新 CVE 公布時 CI 轉紅。處理方式是把 `requirements.txt` 的 pypdf 下限調為 `>=6.21.4`，並以 `uv pip compile --upgrade-package pypdf` 重新產生兩個 lock，只有 pypdf 變動；兩個 lock 的 pip-audit 皆為 0 筆，PR 的 CI 通過。
+
 ### 改動內容
 
 | 項目 | 改動說明 | commit |
@@ -1013,5 +1019,6 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 | Middleware | `X-Request-ID`、JSON Lines 存取 log、可選 CORS | `60c54f2` |
 | 部署 | `docker-compose.yml` 新增 `api` service 與 healthcheck；SSE 加 no-buffering headers（`Cache-Control: no-cache`、`X-Accel-Buffering: no`） | `c0e1bc8` |
 | 錯誤處理 | 未處理例外回 500（`internal_error`，帶 `X-Request-ID`）；API 的 prompt 拿掉「請點選下方按鈕」，只在 Chainlit 加上，graph 回的文字不含 | `c358659` |
-| job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `e81d9c9` |
+| job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `4bdf1bf` |
+| pypdf 升版 | `requirements.txt` 下限調為 `>=6.21.4`，重新產生兩個 lock | `41043e4` |
 | 文件 | 本章節；索引補 HTTP API 狀態與已知限制 | — |
