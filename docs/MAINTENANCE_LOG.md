@@ -676,7 +676,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ## 2026-10-28　LLM 呼叫上限與降級路徑收斂　`LangGraph` `可觀測性` `工程品質`
 
-主線是讓失控或失敗的環節可被界定、觀測，並讓逾時對使用者可見。`extract_filters` 撞上限的觀測缺口與降級後的公司、市場鎖定合在第五節（上限本身見第一節）；鴻海題偏慢的原因（第六節）出自第四節的端到端驗證；第四節的相依套件盤點為獨立工作。
+主線是讓失控或失敗的 LLM 呼叫可被界定、觀測，並讓逾時對使用者可見（第一、三、五節）；相依套件盤點（第四節）為獨立工作，其端到端驗證中發現鴻海題偏慢，成因見第六節。
 
 ### 一、單次 LLM 呼叫沒有上限
 
@@ -726,13 +726,15 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **驗證**：對 lock 跑 pip-audit 為 0 筆；全新 venv 以 `--require-hashes` 安裝成功；兩個 image 重建成功。GitHub Actions 實跑通過（`604f837`）。`BAAI/bge-m3` tokenizer 未釘 revision 列入已評估不採用。
 
+**驗證：完整 tool 呼叫路徑（2026-11-02 補驗）**：上面的 handshake 與直接呼叫 tool 沒走過 agent；這次驗完整路徑：LLM agent 選 tool → `langchain-mcp-adapters` 0.3.2（`MultiServerMCPClient`）→ mcp-server（mcp 1.30.0，streamable-http，Bearer 驗證）→ `ToolMessage` 回到 graph。條件：`qwen3.5:9b`，在 app 容器跑 `python -m src.cli` 問兩題。「AAPL 最近的財報重點？」呼叫 `search_knowledge_base`，回答附參考來源；「AAPL 現在股價和本益比？」依序呼叫 `search_knowledge_base`、`fetch_company_data`（`has_report: true`）、`search_knowledge_base`，股價與 Trailing P/E 標 `[即時市場數據]`，代表 tool 結果已解析並回到 graph。兩題皆無 Traceback、401、421；每次呼叫 tool 都建立新 session，用完即結束。**已知限制**：`fetch_market_overview` 這次 agent 未選用；它與另兩個 tool 走同一條 adapters 路徑，風險低。
+
 ### 五、`extract_filters` 降級時的公司與市場鎖定
 
 **起因：撞上限不留紀錄**：該節點用 `with_structured_output`，拿不到 `response_metadata`，沒有 token／耗時欄位，撞 `num_predict`（第一節）也沒有 warning。原以為撞上限會解析失敗而留下紀錄，**實測推翻**：在真的 Ollama（`qwen3.5:9b`）把 `num_predict` 調到 10，模型輸出殘缺 JSON `{"companies": ["233`、`done_reason=length`，langchain 卻寬鬆解析成功，`parsing_error` 為 None，撞上限完全不留紀錄。
 
 改 `include_raw=True`，從 raw `AIMessage` 取 usage 寫進 log，解析錯誤自行 raise 以沿用原降級；`done_reason=="length"` 直接視為失敗並降級，因為正常輸出遠低於上限，撞到只會是失控生成，部分結果不可信。**取捨**：截斷若發生在 `companies` 已完整之後，會丟掉模型抽出的代號，改由降級分支從問句撿回；撿不回則反問公司，不退到全庫檢索。驗證：`num_predict=10` 實測先出 warning、log 記「結構化輸出失敗」、結果降級。
 
-**問題**：結構化輸出失敗（撞上限、逾時、解析失敗）時降級為 `companies=[]`、`market=None`，`resolve_market` 找不到公司：不反問雙掛牌市場、不做問句市場校正，MCP 檢索的 market 留空而跨市場檢索，「台積電營收多少？」可能混入 2330 與 TSM 兩邊資料。`in_scope` 降級為 True，不會誤判離題（已確認）。
+**問題**：結構化輸出失敗（撞上限、逾時、解析失敗）時降級為 `companies=[]`、`market=None`，`resolve_market` 找不到公司：不反問雙掛牌市場、不做問句市場校正，MCP 檢索的 market 留空而跨市場檢索，「台積電營收多少？」可能混入 2330 與 TSM 兩邊資料。
 
 **推翻的判斷**：最初只補市場鎖定，判斷非雙掛牌公司不撿回也只是「答案變廣但不會錯」。**實測推翻**：stub 模擬撞上限、接真 DB 檢索，「輝達最近財報表現？」撈到 tw 2／us 3 塊，混入 2454、ASML、2330、APP；「聯發科台股…」雖鎖 tw 仍混入 3008、2380。全庫檢索會混入別家公司的數字，與 2026-09-16 章節記載的「降級後跨全庫檢索以其他公司片段組成看似合理答案」同一失敗模式。
 
@@ -752,7 +754,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | 200 | 2/2 成功 | 每批約 44 秒，總計約 85 秒 |
 | 400 | 連同首次端到端共 3/3 失敗 | 皆在 75～80 秒斷線 |
 
-**處理**：`src/config.py` 的 `EMBED_BATCH_SIZE` 預設值由 400 改為 100。**驗證**：rebuild image 後在 mcp 容器重新入庫 2317 PDF，413 塊全部寫入，5 批全部成功、無重試，總計 96 秒（embedding 約 88 秒）。**已知限制**：端到端未重測——16GB 主機上 Docker VM 8GB、`qwen3.5:9b`（`num_ctx` 32768，6.6GB）與瀏覽器同時開著會用盡記憶體；且 2317 現在已判定有財報，端到端不會再走到 MOPS embedding 這一段。`has_report` 被數字財報擋住重抓則列為已知限制：不能直接排除 TWSE-API，因 MOPS 上 2317／2454 最新 PDF 為 202602、已逾 120 天，排除後每次提問都會重抓 MOPS，須改看抓取時間等設計。
+**處理**：`src/config.py` 的 `EMBED_BATCH_SIZE` 預設值由 400 改為 100。**驗證**：rebuild image 後在 mcp 容器重新入庫 2317 PDF，413 塊全部寫入，5 批全部成功、無重試，總計 96 秒（embedding 約 88 秒）。**已知限制**：端到端未重測——受主機記憶體限制（見索引已知限制），且 2317 現在已判定有財報，端到端不會再走到 MOPS embedding 這一段。`has_report` 被數字財報擋住重抓則列為已知限制：不能直接排除 TWSE-API，因 MOPS 上 2317／2454 最新 PDF 為 202602、已逾 120 天，排除後每次提問都會重抓 MOPS，須改看抓取時間等設計。
 
 ### 改動內容
 
@@ -774,7 +776,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ## 2026-10-29　LLM 失敗收尾與 log 量測修正　`LangGraph` `可觀測性`
 
-本日兩件事：一是承接 10-28 的重試收斂，補上重試範圍與失敗收尾；二是審查 log 數字時發現 pytest 假紀錄污染正式 log，為另一件獨立工作。
+本日兩件事：一是承接 10-28 的重試收斂，補上重試範圍與失敗收尾；二是審查 log 數字時發現 pytest 假紀錄污染正式 log，為另一件獨立工作。另有 `extract_filters` 降級分支的測試補齊與開發依賴釘版，見改動內容。
 
 ### 一、LLM 重試範圍與失敗收尾
 
@@ -786,7 +788,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 **同類缺口**：`generate` 撞 `num_predict` 上限時，10-28 只記 warning，使用者看到的半截答案沒有任何標示；改為與串流中途逾時相同，在答案後加註「超過長度上限被截斷」（兩者同時發生時以逾時說明為準）。`OllamaEmbeddings`（檢索與 ingest）原本沒有 timeout，embed 呼叫停滯會讓檢索或入庫無限期卡住，改沿用 `OLLAMA_TIMEOUT_SECONDS`。
 
-**驗證**：新增 2 個測試（串流前失敗→只顯示 `answer_failed`、不寫 history、關 step；串流途中失敗→保留已串出內容再接提示）。
+**驗證**：新增 2 個測試，涵蓋串流前與串流途中失敗。
 
 ### 二、pytest 不再寫入正式 log
 
@@ -798,12 +800,12 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 |---|---|
 | `extract_filters` | 579／659 |
 | `generate` | 537／622 |
-| 「輸出撞到 token 上限」 | 60／60 |
-| 「prompt 疑似被截斷」 | 162／162 |
+| 「輸出撞到 token 上限」（全節點合計） | 60／60 |
+| 「prompt 疑似被截斷」（全節點合計） | 162／162 |
 
 其餘從 app log 統計的項目（`retrieve_context`、`resolve_market`、各節點逾時等）同樣大量混入；bench jsonl 與直接量測的數字不受影響。本檔引用的 log 統計已排除 stub 重算。
 
-10-29 以前的 `data/logs/app*.log`（含容器內 app-2026-09-19、10-10、10-28）以 qid 指紋排除 stub：在 `tests/conftest.py` 下跑 pytest 收集 stub 的 qid；qid 是問題文字 hash，同文會撞，另以 `elapsed_ms` 佐證（stub 0–11 ms、真實 ≥1 秒）。
+10-29 以前的 log 以 qid 指紋排除 stub，另以 `elapsed_ms` 佐證（stub 0–11 ms、真實 ≥1 秒）。
 
 **修法**：新增 `tests/conftest.py`，在 import `src` 之前把 `LOG_DIR` 設成暫存目錄，並加回歸測試防止再犯。**驗證**：前後 `app-local.log` 行數都是 1562。
 
@@ -812,7 +814,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | 項目 | 改動說明 | commit |
 |---|---|---|
 | 重試範圍收斂 | `_RETRYABLE` 改為 `(httpx.ConnectError,)` | `65d8972` |
-| 回答失敗收尾 | `on_message` try 包整段流程；寫 JSON log、關 step、接 `answer_failed`、不寫 history | `65d8972` |
+| 回答失敗收尾 | `on_message` try 包整段流程；寫 JSON log、關 step、接 `answer_failed`、不寫 history；新增串流前／串流途中失敗兩個測試 | `65d8972` |
 | pytest 不寫正式 log | 新增 `tests/conftest.py` 於 import `src` 前設暫存 `LOG_DIR`；新增 `test_pytest_does_not_write_production_logs` | `f729b6f` |
 | embedding 逾時 | `graph`、`ingest` 的 `OllamaEmbeddings` 帶 `OLLAMA_TIMEOUT_SECONDS` | `d3b44a0` |
 | 截斷提示 | `generate` 撞 `num_predict` 時加註 i18n `generate_truncated`，並設 `generate_truncated` 讓 app 串流端同樣補上 | `9fea171` |
@@ -823,7 +825,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 
 ## 2026-10-30　prompt injection 防線評估與指標補測　`LangGraph` `RAG` `效能` `可觀測性`
 
-當天分兩條線：第一節評估生成端 prompt injection 的最小防線，自成一件事；第二節補齊先前只有估計、沒有量測的指標，第三節據此量測答案層引用正確率，第四節修正量測中暴露的公司抽取失敗，三節是承接下去的同一條線。
+第一節獨立；二至四節為同一條線：補測 → 引用正確率 → 抽取修正。
 
 **實測條件**：2026-10-30，`qwen3.5:9b`，`temperature 0`；各節差異於節內註明。
 
@@ -840,14 +842,7 @@ EPS 題的答案混入不相關的 Penguin Solutions 財測，**根因**是檢�
 | off | 否 | 風險欄仍列出兩點；有引用假來源，但只引了「法說會後市場反應平穩」這句事實 |
 | on | 否 | 回歸：沒有任何 `[來源N]` 引用（`no_citation`）、出現 `[來源1-4]` 這種非法標記、利多與風險欄出現「參考資料中無…可供引用」的填充句，結論寫成「維持強勁買入評級」 |
 
-回歸題（off → on）：
-
-| 題目 | `check_answer_format` 違規數 | 字數 | 耗時 |
-|---|---|---|---|
-| A1 | 1→1 | +137 | +15s |
-| C1 | 1→1 | +257 | +10s |
-| D1 | 1→0 | +34 | +3s |
-| E3 | 0→0 | +61 | +6s |
+回歸題（off → on）：4 題違規數持平或減少（D1 1→0），字數 +34～+257、耗時 +3～+15 秒。
 
 **已知限制**：分隔字串是靜態的，攻擊者可在內文偽造結束標記；升級路徑是每次請求改用隨機 nonce（程式碼中有 `ponytail:` 註解）。樣本只有 1 題注入，結論僅限這個模型與這種直白的注入句型。
 
@@ -882,14 +877,7 @@ n=23：中位 274 秒、p90 552 秒，首字約出現在總耗時 65% 處，也�
 #### 4. Embedding 快取與並行檢索
 
 - 查詢 embedding 快取命中 57/123（46%）；log 含 bench 與 demo 重跑同題，實際使用下應偏低。
-- 並行檢索：
-
-| 情境 | 循序 | 並行 |
-|---|---|---|
-| 無快取 | 103.7 ms | 51.8 ms |
-| 有快取 | 9.2 ms | 13.6 ms |
-
-有快取時並行反而慢約 4 ms，相對整題數百秒可忽略，不另做分支。
+- 並行檢索無快取 103.7→51.8 ms、有快取 9.2→13.6 ms（慢約 4 ms，相對整題數百秒可忽略，不另做分支）。
 
 #### 5. 重測：ADR EPS 換算
 
@@ -906,7 +894,7 @@ n=23：中位 274 秒、p90 552 秒，首字約出現在總耗時 65% 處，也�
 
 ### 三、答案層引用正確率
 
-`check_answer_format` 只驗引用格式（編號越界、有來源卻沒引用），不看 [來源N] 撐不撐得起那句話。新增 `tests/eval_citation_accuracy.py` 補上這層：沿用第二節的 26 題，每題跑完整 graph，逐句比對「帶 [來源N] 的句子裡的數字，是否出現在來源 N」。判讀用規則不用 LLM（9B 批改自己不可信，財報題的事實以數字為主），中文「億」與來源的 billion／million 互換、日期整段排除。**結論：可判讀的 22 題、119 筆數字引用，人工複核後 108 筆正確（91%）；錯誤 11 筆（腳本判 12 筆，扣除 G05「約 570 億」這筆 56,994 百萬四捨五入的評分誤判）分三類，另有 5 題問題出在檢索前的公司抽取，沒走到生成。**
+`check_answer_format` 只驗引用格式（編號越界、有來源卻沒引用），不看 [來源N] 撐不撐得起那句話。新增 `tests/eval_citation_accuracy.py` 補上這層：沿用第二節的 26 題，每題跑完整 graph，逐句比對「帶 [來源N] 的句子裡的數字，是否出現在來源 N」。判讀用規則不用 LLM（9B 批改自己不可信，財報題的事實以數字為主），中文「億」與來源的 billion／million 互換、日期整段排除。**結論：可判讀的 22 題、119 筆數字引用，人工複核後 108 筆正確（91%）；錯誤 11 筆分三類，另有 5 題問題出在檢索前的公司抽取，沒走到生成。**
 
 **實測條件差異**：G20、G21 問句補上「台股」（台積電雙掛牌，裸問會被反問、走不到生成）；每題 1 次，單題 100～430 秒。
 
@@ -917,9 +905,7 @@ n=23：中位 274 秒、p90 552 秒，首字約出現在總耗時 65% 處，也�
 | 編造後附上引用 | 4 | G09 決策卡「觸發條件」的 50 億、2,100 億門檻；G23 把子公司間的研發委託金額寫成「3.97～4.58 億」 |
 
 - 引錯號多在同一句引了相鄰來源，數字本身沒錯；換算錯與編造才是會誤導使用者的錯誤，共 6 筆（5%）。
-- **檢索前就失敗的 5 題**（不計入上表）：
-  - G08 Google Cloud、G11 Meta 廣告、G16 禮來、G19 SpaceX 被判離題拒答。`extract_filters` 對這 4 題的原始輸出是 `companies: []`、`in_scope: false`——不是降級，是 9B 沒把 Google／Meta（大小寫混用）／禮來／SpaceX 對到代號，抽不到公司時又順手判成離題；而 `_is_off_topic` 只在「沒抽到公司且 in_scope=false」時成立，兩個錯疊在一起才拒答。第四節表格「修正前」欄的 28 題 `companies` 全對，是因為那組題多用代號或對照表內的公司。
-  - G24 大立光被抽成 3712（正確 3008，庫內有 75 塊財報），檢索拿回別家資料，回答無任何引用，決策卡還把 prompt 的欄位說明原文吐出。成因相同：`_known_codes_block` 只列雙掛牌與上櫃公司，其餘靠模型記憶。
+- **檢索前就失敗的 5 題**（不計入上表）：G08 Google Cloud、G11 Meta、G16 禮來、G19 SpaceX 因 9B 沒把公司名對到代號（`companies: []`），`_is_off_topic` 判成離題拒答；G24 大立光被抽成 3712（正確 3008），回答無引用。成因都是 `_known_codes_block` 只列雙掛牌與上櫃公司。
 
 **已知限制**：只比對數字，無數字的引用句（85 句）未判讀；整數巧合命中（例如 G09 的 50 億剛好出現在另一個來源）會被算成引錯號而非編造；每題只跑 1 次。
 
@@ -937,7 +923,7 @@ n=23：中位 274 秒、p90 552 秒，首字約出現在總耗時 65% 處，也�
 | `answer_shape` | 26/26 | 31/31 |
 | 全欄皆對 | 26/28 | 29/33 |
 
-prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移（C7 填 `us`、N2 填 `both`、D3 從 `tw` 變 None）不影響，因雙掛牌公司的市場由 `_market_in_question` 從問句重算，其他公司的市場由代號決定；M5 台積電 ADR 從 `TSM` 變成 `2330`，反問行為不變。修正前失敗的 S2、N8（`market` 誤填 `us`）修正後不再出現。
+4 題輸出位移，市場欄由 `_market_in_question` 或代號在下游重算、M5 反問行為不變，都沒有影響；修正前失敗的 S2、N8 不再出現。
 
 **引用正確率重跑**（同第三節條件，只跑這 5 題）：
 
@@ -949,10 +935,10 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 | G19 SpaceX | 判離題拒答 | 4/4 |
 | G24 大立光 | 抽成 3712，無引用 | 3008 財報等 6 個來源；5/5 |
 
-- 腳本判 7 筆找不到，人工複核：G08「247.6 億」是 24,768 百萬取到小數一位，屬評分誤判；其餘 4 筆是單位換算錯（來源 24,768 百萬讀成「2,476 億」「2,476 百萬」，半年 44,796 百萬寫成「4,479.6 億」）；G16 的 44%／21% 是模型自行拆分 65% 後掛上引用的推算值。
+- 人工複核後 4 筆單位換算錯（百萬讀成億等）、G16 的 44%／21% 為模型自行推算後掛上引用，另 1 筆為評分誤判。
 - 合併第三節：27 題、156 筆數字引用，人工複核後正確 139 筆（89%）；換算錯與編造（含推算）共 12 筆（8%）。
 
-**驗證**（11-02）：全套 335 個測試通過；本機 331 passed、4 skipped，skip 的 `test_market_filter` 外洩測試在 app 容器內接 Postgres 與 `bge-m3` 4/4 通過。
+**驗證**（11-02）：全套 335 個測試通過（含 4 個在 app 容器內接 Postgres 與 `bge-m3` 的整合測試）。
 
 **已知限制**：`COMPANY_NAMES` 是靜態表，新增公司時漏補一行就會退回靠記憶；每題只跑 1 次。
 
@@ -963,9 +949,8 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 | `INJECTION_GUARD` 開關 | `src/config.py` 新增（預設 off）；`generate` 與 `search_knowledge_base` 的 `summary_for_llm` 依開關加分隔與規則句；`src/i18n.py` 補文案 | `285ee00` |
 | 測試 | 新增 `tests/test_injection_guard.py` | `285ee00` |
 | golden set | 新增 `tests/eval_retrieval_golden.py`、`tests/eval_data/retrieval_golden.json` | `558c8fe` |
-| 文件 | 本章節；更新「已知限制」TTFT 與「後續方向」golden set 項 | `558c8fe` |
-| 引用正確率 eval | 新增 `tests/eval_citation_accuracy.py`；本章節第三節，「已知限制」補公司抽取一項 | `558c8fe` |
-| 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10；本章節第四節 | `558c8fe` |
+| 引用正確率 eval | 新增 `tests/eval_citation_accuracy.py` | `558c8fe` |
+| 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10 | `558c8fe` |
 
 ---
 
@@ -978,7 +963,7 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 `src/api/` 套件；`service.py` 的 `run_graph` 串 `graph.astream`，產生 `step`／`token`／`done` 事件，SSE 與 job 共用。業務路由掛在 `/api/v1`，互動文件在 `/docs`。
 
 - `GET /health`（liveness）、`GET /ready`（graph 建好前回 503），不需驗證。
-- `POST /api/v1/ask`：SSE，依序送 `step`（retrieve → fetch → generate）、`token`、`done`（`answer`、`sources`、`ask_market`、`peer_company`）；串流中例外送 `error` 事件，細節只在 log。回應帶 `Cache-Control: no-cache`、`X-Accel-Buffering: no`。
+- `POST /api/v1/ask`：SSE，依序送 `step`（retrieve → fetch → generate）、`token`、`done`（`answer`、`sources`、`ask_market`、`peer_company`）；串流中例外送 `error` 事件，細節只在 log。
 - `POST /api/v1/jobs` 回 202 與 `job_id`；`GET /api/v1/jobs/{id}` 查 pending／running／done／error，不存在或不是自己的 job 一律 404。完成（done/error）的 job 於結束後保留 1 小時，下一次建立 job 時清除，之後查詢回 404。
 - 錯誤統一回 `{"error": {"code", "message"}}`。
 
@@ -986,7 +971,7 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 
 JWT 採 HS256，要求 `exp`、`sub`，`sub` 作為 tracing 的 `user_id`。`API_JWT_SECRET` 至少 32 bytes，不足拒絕啟動；容器內未設定同樣拒絕啟動，本機未設定則關閉驗證並印 warning。`python -m src.api.issue_token --sub <name>` 簽發 token（預設 30 天）。
 
-`X-Request-ID` 帶入則沿用（截斷 64 字元），否則產生，並回寫 response header。JSON Lines 存取 log 寫進 `data/logs/api.log`（本機 `api-local.log`），欄位 `request_id`、`method`、`path`、`status`、`elapsed_ms`；`/health`、`/ready` 不記，uvicorn 內建 access log 關閉。`API_CORS_ORIGINS` 有設定才啟用 CORS。未處理例外回 500（`internal_error`，帶 `X-Request-ID`，例外細節只進 log）。
+`X-Request-ID` 帶入則沿用，否則產生，並回寫 response header。JSON Lines 存取 log 寫進 `data/logs/api.log`（本機 `api-local.log`），`/health`、`/ready` 不記。`API_CORS_ORIGINS` 有設定才啟用 CORS。
 
 ### 部署
 
@@ -1008,7 +993,7 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 
 ### 相依套件 CVE 更新
 
-CI 的 `pip-audit` 步驟轉紅：`requirements.lock` 裡的 pypdf 6.21.3 有 3 個新公布的 CVE（CVE-2026-119203、CVE-2026-119204、CVE-2026-119205），6.21.4 已修正。這與 HTTP API 的改動無關，是 2026-10-28 章節（第四節）設計的機制在運作：新 CVE 公布時 CI 轉紅。處理方式是把 `requirements.txt` 的 pypdf 下限調為 `>=6.21.4`，並以 `uv pip compile --upgrade-package pypdf` 重新產生兩個 lock，只有 pypdf 變動；兩個 lock 的 pip-audit 皆為 0 筆，PR 的 CI 通過。
+CI 的 `pip-audit` 因 `requirements.lock` 的 pypdf 6.21.3 有 3 個新公布的 CVE（CVE-2026-119203～119205）轉紅（機制見 2026-10-28 章節第四節）；`requirements.txt` 下限調為 `>=6.21.4`，以 `uv pip compile --upgrade-package pypdf` 重新產生兩個 lock，只有 pypdf 變動，兩個 lock 的 pip-audit 皆為 0 筆、PR 的 CI 通過。
 
 ### 改動內容
 
@@ -1021,4 +1006,3 @@ CI 的 `pip-audit` 步驟轉紅：`requirements.lock` 裡的 pypdf 6.21.3 有 3 
 | 錯誤處理 | 未處理例外回 500（`internal_error`，帶 `X-Request-ID`）；API 的 prompt 拿掉「請點選下方按鈕」，只在 Chainlit 加上，graph 回的文字不含 | `c358659` |
 | job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `4bdf1bf` |
 | pypdf 升版 | `requirements.txt` 下限調為 `>=6.21.4`，重新產生兩個 lock | `41043e4` |
-| 文件 | 本章節；索引補 HTTP API 狀態與已知限制 | — |

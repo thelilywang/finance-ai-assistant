@@ -83,9 +83,10 @@ flowchart TD
 | `i18n.py` | Centralized bilingual (zh/en) UI and prompt strings, no i18n library |
 | `graph.py` | LangGraph pipeline described above; `build_graph()` returns the compiled app |
 | `tracing.py` | Langfuse tracing of LangGraph LLM calls; never raises, missing keys or an unreachable Langfuse just means no trace |
-| `logging_setup.py` | Central logging: stdout plus a daily JSON Lines file under `LOG_DIR` (retention `LOG_BACKUP_DAYS`); each entry point calls `setup_logging("app"\|"mcp"\|"update"\|"ingest")` once |
+| `logging_setup.py` | Central logging: stdout plus a daily JSON Lines file under `LOG_DIR` (retention `LOG_BACKUP_DAYS`); each entry point calls `setup_logging("app"\|"mcp"\|"update"\|"ingest"\|"api"\|"cli")` once |
 | `cli.py` | Terminal chat (single-turn) |
 | `app.py` | Chainlit web UI: token streaming, multi-turn (last 5 rounds in session memory), interactive charts under each answer (`cl.Plotly`), downloadable PDF report per answer (falls back to `.md` when PDF generation fails) |
+| `api/` | FastAPI HTTP API. JWT (HS256) auth, tokens issued with `python -m src.api.issue_token`; `POST /api/v1/ask` streams over SSE, `/api/v1/jobs` runs async jobs (kept 1 hour after finishing); `/health` and `/ready` probes; `X-Request-ID` plus a JSON Lines access log. Runs as the docker compose `api` service on port 8001 |
 
 ### DB schema (`db/init.sql`)
 
@@ -151,6 +152,7 @@ Details for each item are in [MAINTENANCE_LOG](MAINTENANCE_LOG.md).
 - **165 chunks remain `market=NULL`**: 137 cmoney chunks need a re-fetch, 28 udn/cnyes chunks come from unlisted sections.
 - **`both` (two-market) queries need duplicate retrieval**: financial data is stored under a single company value, so each market is queried once.
 - **mcp-server does not expose a port outside the docker network**; Bearer token auth is ready for when an external client needs it.
+- **HTTP API jobs live in memory, and streaming latency is not in the access log**: jobs vanish on restart and only a single worker is supported; for SSE, `elapsed_ms` only counts up to the moment the response starts being sent.
 
 ---
 
@@ -233,9 +235,10 @@ flowchart TD
 | `i18n.py` | 集中管理雙語(中/英)介面與 prompt 字串,不引入 i18n 套件 |
 | `graph.py` | 上述 LangGraph 流程;`build_graph()` 回傳編譯後的 app |
 | `tracing.py` | 以 Langfuse 追蹤 LangGraph 的 LLM 呼叫;不會拋錯,缺少金鑰或 Langfuse 連不上時僅不產生 trace |
-| `logging_setup.py` | 集中式日誌:輸出至 stdout,並於 `LOG_DIR` 下寫入每日 JSON Lines 檔(保留天數 `LOG_BACKUP_DAYS`);各進入點啟動時呼叫一次 `setup_logging("app"\|"mcp"\|"update"\|"ingest")` |
+| `logging_setup.py` | 集中式日誌:輸出至 stdout,並於 `LOG_DIR` 下寫入每日 JSON Lines 檔(保留天數 `LOG_BACKUP_DAYS`);各進入點啟動時呼叫一次 `setup_logging("app"\|"mcp"\|"update"\|"ingest"\|"api"\|"cli")` |
 | `cli.py` | 終端聊天(單輪) |
 | `app.py` | Chainlit 網頁介面:token 逐字串流、多輪對話(session 記憶體保留最近 5 輪)、回答下方附互動圖表(`cl.Plotly`)、每則回答附可下載 PDF 報告(PDF 生成失敗時退回 `.md`) |
+| `api/` | FastAPI HTTP API。JWT(HS256)驗證,以 `python -m src.api.issue_token` 簽發;`POST /api/v1/ask` 以 SSE 串流回答,`/api/v1/jobs` 為非同步 job(完成後保留 1 小時);`/health`、`/ready` 探針;`X-Request-ID` 加 JSON Lines 存取日誌。以 docker compose 的 `api` service 運行,port 8001 |
 
 ### DB schema(`db/init.sql`)
 
@@ -300,3 +303,4 @@ created_at TIMESTAMPTZ
 - **165 筆 chunk 仍為 `market=NULL`**:其中 137 筆來自 cmoney,須重新抓取;28 筆來自未列入的 udn/cnyes 版面。
 - **`both`(兩市場)查詢需重複檢索**:財務資料存放於單一公司欄位下,因此每個市場各查詢一次。
 - **mcp-server 不對 docker 網路以外開放連接埠**;Bearer token 驗證已就緒,待外部用戶端有需要時即可使用。
+- **HTTP API 的 job 存在記憶體,串流延遲不入存取日誌**:job 重啟即消失,僅能單一 worker;SSE 的 `elapsed_ms` 只計到回應開始送出。
