@@ -29,3 +29,14 @@ class ErrorResponse(BaseModel):
 
 class Health(BaseModel):
     status: str
+
+
+class JobCreated(BaseModel):
+    job_id: str
+
+
+class JobStatus(BaseModel):
+    job_id: str
+    status: Literal["pending", "running", "done", "error"]
+    result: AnswerResult | None = None
+    error: str | None = None
