@@ -954,9 +954,9 @@ n=23：中位 274 秒、p90 552 秒，首字約出現在總耗時 65% 處，也�
 
 ---
 
-## 2026-11-02　FastAPI HTTP API　`API` `部署`
+## 2026-11-02　FastAPI HTTP API 與入口補齊　`API` `部署` `可觀測性`
 
-在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。當天另外處理了一件獨立的事：升級 pypdf 以修補新公布的 CVE。
+在既有 LangGraph 流程外加一層 HTTP API，讓非 Chainlit 的 client 也能提問：同步以 SSE（Server-Sent Events，伺服器單向推送）串流回答，長題改走非同步 job 輪詢；驗證用 JWT，並以獨立 compose service 部署。graph 邏輯未改。當天另外處理兩件獨立的事：升級 pypdf 以修補新公布的 CVE，以及補上 CLI 入口漏掉的 logging。
 
 ### 架構與端點
 
@@ -995,6 +995,18 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 
 CI 的 `pip-audit` 因 `requirements.lock` 的 pypdf 6.21.3 有 3 個新公布的 CVE（CVE-2026-119203～119205）轉紅（機制見 2026-10-28 章節第四節）；`requirements.txt` 下限調為 `>=6.21.4`，以 `uv pip compile --upgrade-package pypdf` 重新產生兩個 lock，只有 pypdf 變動，兩個 lock 的 pip-audit 皆為 0 筆、PR 的 CI 通過。
 
+### CLI 補上 logging
+
+**問題**：`python -m src.cli` 沒呼叫 `setup_logging`，CLI 執行不寫 JSON Lines log（`update.py` CLI 也曾漏過同類缺口，見 `logging_setup` docstring）；10-28 章節第四節的 MCP 補驗因此沒進 log。
+
+**修法**：`setup_logging` 新增 `stream_level` 參數，只調終端門檻、檔案照 `LOG_LEVEL` 記；CLI 傳 `logging.WARNING`，避免 INFO 穿插在串流答案中間。
+
+**取捨**：不用「`LOG_LEVEL` 設 WARNING」，因它設在 root logger，檔案也收不到 INFO。
+
+**驗證**：pytest 351 passed、4 skipped；腳本驗證終端只出 WARNING、log 檔有 INFO 與 WARNING。
+
+**已知限制**：尚未實際跑 `python -m src.cli` 問一題確認。
+
 ### 改動內容
 
 | 項目 | 改動說明 | commit |
@@ -1006,3 +1018,5 @@ CI 的 `pip-audit` 因 `requirements.lock` 的 pypdf 6.21.3 有 3 個新公布�
 | 錯誤處理 | 未處理例外回 500（`internal_error`，帶 `X-Request-ID`）；API 的 prompt 拿掉「請點選下方按鈕」，只在 Chainlit 加上，graph 回的文字不含 | `c358659` |
 | job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `4bdf1bf` |
 | pypdf 升版 | `requirements.txt` 下限調為 `>=6.21.4`，重新產生兩個 lock | `41043e4` |
+| CLI logging | `setup_logging` 新增 `stream_level`；`src/cli.py` 啟動時呼叫並傳 `logging.WARNING` | `17e8fc7` |
+| 文件 | `PROJECT.md` 補 `api/` 模組列、`logging_setup` 進入點補 api／cli、已知限制補 HTTP API job；維護日誌精簡與 10-28 第四節 MCP 補驗 | `a90ccf8` |
