@@ -78,7 +78,9 @@ def test_empty_question_422(client):
 
 
 def test_sse_order_and_done(client):
-    text = _ask(client, _token()).text
+    r = _ask(client, _token())
+    assert (r.headers["cache-control"], r.headers["x-accel-buffering"]) == ("no-cache", "no")
+    text = r.text
     assert text.index("event: step") < text.index("event: token") < text.index("event: done")
     assert 'data: {"node": "retrieve"}' in text
     assert '"answer": "你好"' in text and '"sources": ["a.pdf"]' in text

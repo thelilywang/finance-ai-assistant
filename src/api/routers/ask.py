@@ -35,4 +35,6 @@ async def ask(
             log.exception("ask 失敗", extra={"fields": {"session_id": session_id, "user": user}})
             yield _sse("error", {"message": "internal error"})
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    # 告訴瀏覽器與反向代理（nginx）不要快取或緩衝，事件才會即時送到 client
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
