@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessageChunk
 
 from src.api import main
 from src.api.deps import get_graph
+from src.api.routers import jobs
 from src.api.settings import settings
 
 SECRET = "x" * 32
@@ -194,3 +195,12 @@ def test_job_graph_error(client):
 def test_job_create_needs_token(client):
     r = client.post("/api/v1/jobs", json={"question": "x"})
     assert r.status_code == 401
+
+
+def test_job_expired_pruned_on_create(client, monkeypatch):
+    old = _create_job(client).json()["job_id"]
+    monkeypatch.setattr(jobs, "_JOB_TTL_S", -1)  # 讓已完成的 job 視為過期
+    new = _create_job(client).json()["job_id"]
+    assert client.get(f"/api/v1/jobs/{old}", headers=_auth()).status_code == 404
+    r = client.get(f"/api/v1/jobs/{new}", headers=_auth())
+    assert r.status_code == 200 and r.json()["status"] == "done"
