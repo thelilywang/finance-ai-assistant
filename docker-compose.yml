@@ -80,5 +80,39 @@ services:
     volumes:
       - ./data:/app/data
 
+  api:
+    build: .
+    container_name: finance_ai_assistant_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    env_file:
+      - .env
+    # 同 app service
+    environment:
+      PGVECTOR_URL: postgresql://finrag:finrag@db:5432/finrag
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      TZ: ${TZ:-Asia/Taipei}
+      MCP_SERVER_URL: http://mcp-server:8000/mcp
+      LANGFUSE_RELEASE: ${LANGFUSE_RELEASE:-dev}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 只能單一 worker（job 存在記憶體），不要加 --workers 或 replicas
+    command: ["python", "-m", "src.api.main"]
+    ports:
+      - "8001:8001"
+    healthcheck:
+      # 映像沒有 curl，用 python；非 2xx 或連不上都會拋例外 exit 1。
+      test: ["CMD", "python", "-c", "import urllib.request as r; r.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ./data:/app/data
+
 volumes:
   pgdata:
