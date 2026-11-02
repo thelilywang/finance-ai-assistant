@@ -6,7 +6,7 @@ psycopg[binary]>=3.1.0
 psycopg[pool]>=3.1.0
 pgvector>=0.3.0
 # 6.21.2 以下有惡意 PDF 造成 DoS 等漏洞（pip-audit 2026-10-28），ingest 解析的是外部下載的 PDF
-pypdf>=6.21.2
+pypdf>=6.21.4
 python-dotenv>=1.0.0
 tiktoken>=0.7.0
 # chunk 以 token 計數時載 embedding 模型自己的 tokenizer（見 config.CHUNK_UNIT）。
