@@ -37,8 +37,8 @@ def client(monkeypatch):
         yield c
 
 
-def _token(secret=SECRET, exp_in=3600):
-    return jwt.encode({"sub": "alice", "exp": int(time.time()) + exp_in}, secret, "HS256")
+def _token(secret=SECRET, exp_in=3600, sub="alice"):
+    return jwt.encode({"sub": sub, "exp": int(time.time()) + exp_in}, secret, "HS256")
 
 
 def _ask(client, token=None, **body):
@@ -93,3 +93,45 @@ def test_graph_error_becomes_error_event(client):
 def test_empty_secret_disables_auth(client, monkeypatch):
     monkeypatch.setattr(settings, "API_JWT_SECRET", "")
     assert _ask(client).status_code == 200
+
+
+def _auth(token=None):
+    return {"Authorization": f"Bearer {token or _token()}"}
+
+
+def _create_job(client, token=None):
+    return client.post("/api/v1/jobs", json={"question": "台積電營收"}, headers=_auth(token))
+
+
+def test_job_done(client):
+    r = _create_job(client)
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    body = client.get(f"/api/v1/jobs/{job_id}", headers=_auth()).json()
+    assert body["status"] == "done"
+    assert body["result"]["answer"] == "你好" and body["result"]["sources"] == ["a.pdf"]
+
+
+def test_job_not_found_404(client):
+    r = client.get("/api/v1/jobs/nope", headers=_auth())
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "http_404"
+
+
+def test_job_of_other_user_404(client):
+    job_id = _create_job(client).json()["job_id"]
+    r = client.get(f"/api/v1/jobs/{job_id}", headers=_auth(_token(sub="bob")))
+    assert r.status_code == 404
+
+
+def test_job_graph_error(client):
+    client.app.dependency_overrides[get_graph] = lambda: FakeGraph(fail=True)
+    job_id = _create_job(client).json()["job_id"]
+    r = client.get(f"/api/v1/jobs/{job_id}", headers=_auth())
+    assert r.json()["status"] == "error" and r.json()["error"] == "internal error"
+    assert "boom" not in r.text
+
+
+def test_job_create_needs_token(client):
+    r = client.post("/api/v1/jobs", json={"question": "x"})
+    assert r.status_code == 401
