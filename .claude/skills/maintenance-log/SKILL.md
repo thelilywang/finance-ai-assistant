@@ -61,7 +61,8 @@ description: 依專案慣例撰寫或更新 docs/MAINTENANCE_LOG.md 的維護紀
 
 章節末固定一張 `### 改動內容` 表格，三欄 `| 項目 | 改動說明 | commit |`。
 commit 欄填短 hash，**從 `git log` 取得，不得憑印象填寫**；沒有單一對應 commit
-（尚未 commit、實測後回退、多 commit 混合）填 `—`，不要編造。散文裡引用的 hash
+（尚未 commit、實測後回退、多 commit 混合）填 `—`，不要編造。本 repo 用 squash 合併，
+**尚未合併的 PR 填 PR 編號（如 `#6`）**——分支上的 hash 在 rebase／合併後會變。散文裡引用的 hash
 同樣要查，不是只查 commit 欄。
 
 **一天只有一個 `##` 日期章節**：`grep "^## <日期>"` 確認全檔該日只有一個。
