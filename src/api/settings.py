@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     API_JWT_ALG: str = "HS256"
     API_HOST: str = "127.0.0.1"
     API_PORT: int = 8001
+    API_CORS_ORIGINS: list[str] = []  # 空清單＝不啟用 CORS
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
