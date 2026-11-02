@@ -987,9 +987,9 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 | 存取 log | `request_id` 與 header 一致；SSE 該筆 `elapsed_ms`=9（串流實際 186 秒）；healthcheck 持續呼叫，`/health`、`/ready` 0 筆紀錄 |
 | 未設 secret | `docker compose run --rm --no-deps -e API_JWT_SECRET= api` 拒絕啟動（exit 3） |
 
-**取捨**：實測模型由 `qwen3.5:9b` 改用 `qwen3.5:4b`——9b 執行時系統記憶體剩餘降到 14% 而中止，4b 剩餘最低 20%；換來能跑完，代價是此次答案品質不代表 9b。
+**取捨**：實測模型由 `qwen3.5:9b` 改用 `qwen3.5:4b`——9b 執行時系統記憶體剩餘降到 14% 而中止，4b 剩餘最低 20%；代價是此次答案品質不代表 9b。
 
-**已知限制**：job 存在記憶體，重啟消失、只能單一 worker；存取 log 的 `elapsed_ms` 對 SSE 只記到回應開始送出；本機 Ollama 一次跑一題，同時進來的請求會排隊。
+**已知限制**：除索引所列外，本機 Ollama 一次跑一題，同時進來的請求會排隊。
 
 ### 相依套件 CVE 更新
 
@@ -997,15 +997,11 @@ CI 的 `pip-audit` 因 `requirements.lock` 的 pypdf 6.21.3 有 3 個新公布�
 
 ### CLI 補上 logging
 
-**問題**：`python -m src.cli` 沒呼叫 `setup_logging`，CLI 執行不寫 JSON Lines log（`update.py` CLI 也曾漏過同類缺口，見 `logging_setup` docstring）；10-28 章節第四節的 MCP 補驗因此沒進 log。
+**問題**：`python -m src.cli` 沒呼叫 `setup_logging`，CLI 執行不寫 JSON Lines log。
 
-**修法**：`setup_logging` 新增 `stream_level` 參數，只調終端門檻、檔案照 `LOG_LEVEL` 記；CLI 傳 `logging.WARNING`，避免 INFO 穿插在串流答案中間。
+**修法**：`setup_logging` 新增 `stream_level`，只調終端門檻、檔案照 `LOG_LEVEL` 記；CLI 傳 `logging.WARNING`。不改 `LOG_LEVEL`，因它設在 root logger，檔案也會收不到 INFO。
 
-**取捨**：不用「`LOG_LEVEL` 設 WARNING」，因它設在 root logger，檔案也收不到 INFO。
-
-**驗證**：pytest 351 passed、4 skipped；腳本驗證終端只出 WARNING、log 檔有 INFO 與 WARNING。
-
-**已知限制**：尚未實際跑 `python -m src.cli` 問一題確認。
+**驗證**：pytest 351 passed、4 skipped；容器內 CLI 問一題，終端 0 行 INFO，`cli.log` 含各節點 `model` 與 `elapsed_ms`。模型同上方實測改用 `qwen3.5:4b`。
 
 ### 改動內容
 
@@ -1015,8 +1011,8 @@ CI 的 `pip-audit` 因 `requirements.lock` 的 pypdf 6.21.3 有 3 個新公布�
 | 非同步 job | `routers/jobs.py`、`/api/v1/jobs` | `d99257d` |
 | Middleware | `X-Request-ID`、JSON Lines 存取 log、可選 CORS | `60c54f2` |
 | 部署 | `docker-compose.yml` 新增 `api` service 與 healthcheck；SSE 加 no-buffering headers（`Cache-Control: no-cache`、`X-Accel-Buffering: no`） | `c0e1bc8` |
-| 錯誤處理 | 未處理例外回 500（`internal_error`，帶 `X-Request-ID`）；API 的 prompt 拿掉「請點選下方按鈕」，只在 Chainlit 加上，graph 回的文字不含 | `c358659` |
+| 錯誤處理 | 未處理例外回 500（`internal_error`，帶 `X-Request-ID`）；API 的 prompt 不含按鈕提示 | `c358659` |
 | job 清理 | 完成的 job 保留 1 小時，下一次建立 job 時清除 | `4bdf1bf` |
 | pypdf 升版 | `requirements.txt` 下限調為 `>=6.21.4`，重新產生兩個 lock | `41043e4` |
 | CLI logging | `setup_logging` 新增 `stream_level`；`src/cli.py` 啟動時呼叫並傳 `logging.WARNING` | `17e8fc7` |
-| 文件 | `PROJECT.md` 補 `api/` 模組列、`logging_setup` 進入點補 api／cli、已知限制補 HTTP API job；維護日誌精簡與 10-28 第四節 MCP 補驗 | `a90ccf8` |
+| 文件 | `PROJECT.md` 補 HTTP API；維護日誌精簡、10-28 MCP 補驗 | `a90ccf8` |
