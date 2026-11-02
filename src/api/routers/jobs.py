@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Annotated
 from uuid import uuid4
 
@@ -11,8 +12,9 @@ from ..service import run_graph
 log = logging.getLogger("api")
 router = APIRouter(prefix="/api/v1")
 
-# ponytail: job 存在記憶體 dict，重啟就消失、只支援單一 process；要持久化或多 worker 時改用 Redis 加 arq。
-_jobs: dict[str, dict] = {}  # job_id -> {"user": str, "status": JobStatus}
+# ponytail: job 存在記憶體 dict，重啟就消失、只支援單一 process；完成超過 1 小時的 job 在下次建立時清掉；要持久化或多 worker 時改用 Redis 加 arq。
+_jobs: dict[str, dict] = {}  # job_id -> {"user": str, "status": JobStatus, "finished": 完成時的 monotonic 秒數}
+_JOB_TTL_S = 3600  # 完成／失敗的 job 保留 1 小時，足夠 client 輪詢取結果
 
 
 async def _run_job(job_id: str, graph, req: AskRequest, user: str) -> None:
@@ -28,6 +30,8 @@ async def _run_job(job_id: str, graph, req: AskRequest, user: str) -> None:
         # 細節留在 log，不外洩給 client
         log.exception("job 失敗", extra={"fields": {"job_id": job_id, "session_id": session_id, "user": user}})
         job.status, job.error = "error", "internal error"
+    finally:
+        _jobs[job_id]["finished"] = time.monotonic()
 
 
 @router.post("/jobs", status_code=202, response_model=JobCreated)
@@ -37,6 +41,9 @@ async def create_job(
     graph: Annotated[object, Depends(get_graph)],
     user: Annotated[str, Depends(get_current_user)],
 ):
+    now = time.monotonic()
+    for k in [k for k, j in _jobs.items() if "finished" in j and now - j["finished"] > _JOB_TTL_S]:
+        del _jobs[k]
     job_id = uuid4().hex
     _jobs[job_id] = {"user": user, "status": JobStatus(job_id=job_id, status="pending")}
     tasks.add_task(_run_job, job_id, graph, req, user)
