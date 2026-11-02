@@ -4,6 +4,7 @@
     python -m src.cli
 """
 import asyncio
+import logging
 import uuid
 
 from rich.console import Console
@@ -12,6 +13,7 @@ from rich.markdown import Markdown
 from . import tracing
 from .graph import build_graph, is_fetching
 from .i18n import t
+from .logging_setup import setup_logging
 
 console = Console()
 
@@ -70,6 +72,7 @@ async def _ask(app, question: str, session_id: str) -> dict:
 # 為此把輸入搬去另一個執行緒不值得。
 async def main() -> None:
     # CLI 是短生命週期程序，一次執行算一個 session
+    setup_logging("cli", stream_level=logging.WARNING)
     session_id = f"cli-{uuid.uuid4().hex[:8]}"
     app = await build_graph()
     console.print("[bold cyan]財報/新聞 RAG 問答助理[/bold cyan]（輸入 exit 離開）\n")

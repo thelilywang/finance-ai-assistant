@@ -1,6 +1,6 @@
 """集中設定 logging：stdout 照舊，另外每日一檔寫 JSON Lines 供事後回測。
 
-各服務進入點呼叫一次：`setup_logging("app")` / `setup_logging("mcp")` / `setup_logging("update")` / `setup_logging("ingest")`。
+各服務進入點呼叫一次：`setup_logging("app")` / `setup_logging("mcp")` / `setup_logging("update")` / `setup_logging("ingest")` / `setup_logging("api")` / `setup_logging("cli")`。
 之後各模組用 `logging.getLogger(__name__)` 取得 logger 即可，不需再設定。
 
 **新增任何 __main__ / CLI 進入點都要呼叫一次**，否則 root logger 沒有 handler，
@@ -77,8 +77,12 @@ def _file_handler(service: str) -> logging.Handler:
     return handler
 
 
-def setup_logging(service: str) -> None:
-    """設定 root logger；重複呼叫只會生效一次。"""
+def setup_logging(service: str, stream_level: int = logging.NOTSET) -> None:
+    """設定 root logger；重複呼叫只會生效一次。
+
+    `stream_level` 只調終端輸出門檻，檔案照 LOG_LEVEL 記；
+    互動式 CLI 傳 WARNING，免得 INFO 穿插在串流答案中間。
+    """
     root = logging.getLogger()
     if any(getattr(h, "_finrag", False) for h in root.handlers):
         return
@@ -86,6 +90,7 @@ def setup_logging(service: str) -> None:
     root.setLevel(config.LOG_LEVEL)
 
     stream = logging.StreamHandler()
+    stream.setLevel(stream_level)
     stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     handlers = [stream]
 
