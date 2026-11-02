@@ -952,6 +952,8 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 - 腳本判 7 筆找不到，人工複核：G08「247.6 億」是 24,768 百萬取到小數一位，屬評分誤判；其餘 4 筆是單位換算錯（來源 24,768 百萬讀成「2,476 億」「2,476 百萬」，半年 44,796 百萬寫成「4,479.6 億」）；G16 的 44%／21% 是模型自行拆分 65% 後掛上引用的推算值。
 - 合併第三節：27 題、156 筆數字引用，人工複核後正確 139 筆（89%）；換算錯與編造（含推算）共 12 筆（8%）。
 
+**驗證**（11-02）：全套 335 個測試通過；本機 331 passed、4 skipped，skip 的 `test_market_filter` 外洩測試在 app 容器內接 Postgres 與 `bge-m3` 4/4 通過。
+
 **已知限制**：`COMPANY_NAMES` 是靜態表，新增公司時漏補一行就會退回靠記憶；每題只跑 1 次。
 
 ### 改動內容
@@ -960,10 +962,10 @@ prompt 變長後有 4 題輸出位移，皆無下游影響：市場欄的位移�
 |---|---|---|
 | `INJECTION_GUARD` 開關 | `src/config.py` 新增（預設 off）；`generate` 與 `search_knowledge_base` 的 `summary_for_llm` 依開關加分隔與規則句；`src/i18n.py` 補文案 | `285ee00` |
 | 測試 | 新增 `tests/test_injection_guard.py` | `285ee00` |
-| golden set | 新增 `tests/eval_retrieval_golden.py`、`tests/eval_data/retrieval_golden.json` | `e9786f3` |
-| 文件 | 本章節；更新「已知限制」TTFT 與「後續方向」golden set 項 | `e9786f3` |
-| 引用正確率 eval | 新增 `tests/eval_citation_accuracy.py`；本章節第三節，「已知限制」補公司抽取一項 | `51defef` |
-| 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10；本章節第四節 | `26cf0d0` |
+| golden set | 新增 `tests/eval_retrieval_golden.py`、`tests/eval_data/retrieval_golden.json` | `558c8fe` |
+| 文件 | 本章節；更新「已知限制」TTFT 與「後續方向」golden set 項 | `558c8fe` |
+| 引用正確率 eval | 新增 `tests/eval_citation_accuracy.py`；本章節第三節，「已知限制」補公司抽取一項 | `558c8fe` |
+| 公司抽取修正 | `src/tickers.py` 新增 `COMPANY_NAMES`，`src/graph.py` 的 `_known_codes_block` 併入；`extract_filters_annotations.json` 補 C6～C10；本章節第四節 | `558c8fe` |
 
 ---
 
