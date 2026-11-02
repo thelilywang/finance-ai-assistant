@@ -416,7 +416,9 @@ async def _pick_market(final_state: dict, ui_lang: str) -> str | None:
         for m in ("tw", "us", "both")
     ]
     res = await cl.AskActionMessage(
-        content=final_state["answer"], actions=actions, timeout=3600
+        # 按鈕提示只在 Chainlit 加：graph 的反問文字也會給 CLI、API 用
+        content=final_state["answer"] + t(ui_lang, "ask_market_btn_hint"),
+        actions=actions, timeout=3600
     ).send()
     return res.get("payload", {}).get("market") if res else None
 

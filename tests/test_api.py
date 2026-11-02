@@ -145,7 +145,9 @@ def test_unhandled_error_logged_as_500(monkeypatch, caplog):
         raise RuntimeError("boom")
 
     with TestClient(app, raise_server_exceptions=False) as c, caplog.at_level("INFO", logger="api"):
-        assert c.get("/boom", headers={"X-Request-ID": "err-1"}).status_code == 500
+        r = c.get("/boom", headers={"X-Request-ID": "err-1"})
+    assert r.status_code == 500 and r.headers["X-Request-ID"] == "err-1"
+    assert r.json()["error"] == {"code": "internal_error", "message": "internal error"} and "boom" not in r.text
     (err,) = [r for r in caplog.records if r.message == "unhandled error"]
     assert err.exc_info and err.fields == {"request_id": "err-1"}
     (rec,) = [r for r in caplog.records if r.message == "request"]
