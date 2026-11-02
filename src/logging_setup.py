@@ -50,9 +50,8 @@ class _JsonLinesFormatter(logging.Formatter):
 def _log_name(service: str) -> str:
     """容器內用服務名，容器外再加 -local。
 
-    LOG_DIR 是 bind mount，host 直接跑測試時會寫進容器同一個檔。兩邊連的
-    DB 不同（host 沒開 5432，只會連線失敗），混在一起會讓回測把本機測試
-    的雜訊當成正式環境數據。
+    LOG_DIR 是 bind mount，host 直接跑測試時會寫進容器同一個檔，混在一起
+    會讓回測把本機測試的雜訊當成正式環境數據。
     """
     return service if Path("/.dockerenv").exists() else f"{service}-local"
 
