@@ -21,8 +21,9 @@ STRINGS = {
             "「{name}」在台股與美股都有掛牌，兩邊的數字不能直接比較："
             "台股（{tw}）以新台幣計價、按季公布；美股（{us}）是 ADR，以美元計價，"
             "且每股基準不同（1 股 ADR 對應數股台股普通股）。\n\n"
-            "請問你要看哪一邊？（請點選下方按鈕）"
+            "請問你要看哪一邊？"
         ),
+        "ask_market_btn_hint": "（請點選下方按鈕）",
         "market_btn_tw": "台股 {tw}",
         "market_btn_us": "美股 {us}",
         "market_btn_both": "兩邊都要",
@@ -199,8 +200,9 @@ STRINGS = {
             "\"{name}\" is listed in both Taiwan and the US, and the figures are not directly comparable: "
             "the Taiwan listing ({tw}) reports in TWD on a quarterly basis, while the US listing ({us}) is an ADR "
             "reporting in USD, with a different per-share basis (one ADR represents several ordinary shares).\n\n"
-            "Which one would you like? (Please pick a button below.)"
+            "Which one would you like?"
         ),
+        "ask_market_btn_hint": " (Please pick a button below.)",
         "market_btn_tw": "Taiwan {tw}",
         "market_btn_us": "US {us}",
         "market_btn_both": "Both",

@@ -19,7 +19,6 @@
 - **對照表以外的公司名靠模型記憶轉代號**（`extract_filters`）——庫內常問公司已列入 `COMPANY_NAMES`；新增公司時漏補，就會退回靠記憶，可能抽不到公司而被判離題，或抽錯代號。詳見 2026-10-30 章節（第三、四節）。
 - **生成端沒有專門的 prompt injection 防線**（`INJECTION_GUARD` 預設 off）——目前靠模型本身不照做、來源以官方為主、工具唯讀、免責聲明由程式追加。詳見 2026-10-30 章節（第一節）。
 - **HTTP API 的 job 存在記憶體、串流延遲不入存取 log**（`src/api/`）——job 重啟即消失、僅能單一 worker、完成後不自動清除；存取 log 的 `elapsed_ms` 對 SSE 只計到回應開始送出。詳見 2026-11-02 章節。
-- **HTTP API 的 500 不帶 `X-Request-ID`、雙掛牌反問文字沿用 Chainlit 用語**——request_id 仍在 log；client 依 `ask_market` 帶 `market` 重問。詳見 2026-11-02 章節。
 
 ## 後續方向
 
@@ -999,7 +998,7 @@ prompt 變長後有 4 題輸出位移，逐一確認沒有下游影響：
 
 JWT 採 HS256，要求 `exp`、`sub`，`sub` 作為 tracing 的 `user_id`。`API_JWT_SECRET` 至少 32 bytes，不足拒絕啟動；容器內未設定同樣拒絕啟動，本機未設定則關閉驗證並印 warning。`python -m src.api.issue_token --sub <name>` 簽發 token（預設 30 天）。
 
-`X-Request-ID` 帶入則沿用（截斷 64 字元），否則產生，並回寫 response header。JSON Lines 存取 log 寫進 `data/logs/api.log`（本機 `api-local.log`），欄位 `request_id`、`method`、`path`、`status`、`elapsed_ms`；`/health`、`/ready` 不記，uvicorn 內建 access log 關閉。`API_CORS_ORIGINS` 有設定才啟用 CORS。
+`X-Request-ID` 帶入則沿用（截斷 64 字元），否則產生，並回寫 response header。JSON Lines 存取 log 寫進 `data/logs/api.log`（本機 `api-local.log`），欄位 `request_id`、`method`、`path`、`status`、`elapsed_ms`；`/health`、`/ready` 不記，uvicorn 內建 access log 關閉。`API_CORS_ORIGINS` 有設定才啟用 CORS。未處理例外回 500（`internal_error`，帶 `X-Request-ID`，例外細節只進 log）。雙掛牌反問的「請點選下方按鈕」只在 Chainlit 加上，graph 回的文字不含。
 
 ### 部署
 
@@ -1017,7 +1016,7 @@ docker-compose 新增 `api` service（`finance_ai_assistant_api`，port 8001，�
 
 **取捨**：實測模型由 `qwen3.5:9b` 改用 `qwen3.5:4b`——9b 執行時系統記憶體剩餘降到 14% 而中止，4b 剩餘最低 20%；換來能跑完，代價是此次答案品質不代表 9b。
 
-**已知限制**：job 存在記憶體，重啟消失、只能單一 worker、完成的 job 不自動清除；存取 log 的 `elapsed_ms` 對 SSE 只記到回應開始送出；未處理例外的 500 回應不帶 `X-Request-ID`（request_id 仍在 log）；雙掛牌反問文字沿用 Chainlit 的「請點選下方按鈕」，API client 依 `ask_market` 帶 `market` 重問；本機 Ollama 一次跑一題，同時進來的請求會排隊。
+**已知限制**：job 存在記憶體，重啟消失、只能單一 worker、完成的 job 不自動清除；存取 log 的 `elapsed_ms` 對 SSE 只記到回應開始送出；本機 Ollama 一次跑一題，同時進來的請求會排隊。
 
 ### 改動內容
 

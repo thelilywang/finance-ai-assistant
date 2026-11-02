@@ -73,7 +73,7 @@ async def _request_context(request: Request, call_next):
     # client 帶的值不可信，截斷避免超長字串寫進 log
     request_id = request.headers.get("X-Request-ID", "")[:64] or uuid.uuid4().hex
     started = time.monotonic()
-    status = 500  # 未處理的例外會由外層轉成 500
+    status = 500  # 未處理的例外由下方 except 回 500
     try:
         response = await call_next(request)
         status = response.status_code
@@ -81,7 +81,9 @@ async def _request_context(request: Request, call_next):
         return response
     except Exception:
         log.exception("unhandled error", extra={"fields": {"request_id": request_id}})
-        raise
+        # 在這裡回 500，而不是交給外層的 ServerErrorMiddleware：
+        # 才能帶 X-Request-ID 並用統一錯誤格式；例外細節只進 log
+        return _error(500, "internal_error", "internal error", {"X-Request-ID": request_id})
     finally:
         if request.url.path not in _QUIET_PATHS:
             # SSE（/api/v1/ask）的 elapsed_ms 量到 response 開始送出（TTFB），不含整段串流
